@@ -1,0 +1,16 @@
+{
+    "user_id": "<unique_user_id>",
+    "background": "music",
+    "age": 25,
+    "communication_style": "simple",
+    "knowledge_level": 2,
+    "language_tone": "friendly",
+    "response_length": "medium",
+    "interests": ["guitar", "rock music", "composing"],
+    "dislikes": ["pop music"],
+    "temperament": "calm",
+    "motivations": "To become a professional musician",
+    "analysis_complete": true,
+    "created_at": "2023-01-15T14:35:25Z",
+    "updated_at": "2023-02-20T10:05:12Z"
+}
