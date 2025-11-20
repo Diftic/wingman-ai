@@ -41,6 +41,7 @@ from providers.open_ai import OpenAi, OpenAiAzure, OpenAiCompatibleTts
 from providers.hume import Hume
 from providers.inworld import Inworld
 from providers.open_ai import OpenAi, OpenAiAzure
+from providers.x_ai import XAi
 from providers.wingman_pro import WingmanPro
 from services.benchmark import Benchmark
 from services.markdown import cleanup_text
@@ -84,6 +85,7 @@ class OpenAiWingman(Wingman):
         self.wingman_pro: WingmanPro | None = None
         self.google: GoogleGenAI | None = None
         self.perplexity: OpenAi | None = None
+        self.xai: XAi | None = None
 
         # tool queue
         self.pending_tool_calls = []
@@ -146,6 +148,9 @@ class OpenAiWingman(Wingman):
 
             if self.uses_provider("perplexity"):
                 await self.validate_and_set_perplexity(errors)
+
+            if self.uses_provider("xai"):
+                await self.validate_and_set_xai(errors)
 
             if self.uses_provider("hume"):
                 await self.validate_and_set_hume(errors)
@@ -262,6 +267,13 @@ class OpenAiWingman(Wingman):
                 [
                     self.config.features.conversation_provider
                     == ConversationProvider.PERPLEXITY,
+                ]
+            )
+        elif provider_type == "xai":
+            return any(
+                [
+                    self.config.features.conversation_provider
+                    == ConversationProvider.XAI,
                 ]
             )
         return False
@@ -464,6 +476,14 @@ class OpenAiWingman(Wingman):
             self.perplexity = OpenAi(
                 api_key=api_key,
                 base_url=self.config.perplexity.endpoint,
+            )
+
+    async def validate_and_set_xai(self, errors: list[WingmanInitializationError]):
+        api_key = await self.retrieve_secret("xai", errors)
+        if api_key:
+            self.xai = XAi(
+                api_key=api_key,
+                base_url=self.config.xai.endpoint,
             )
 
     # overrides the base class method
@@ -972,14 +992,18 @@ class OpenAiWingman(Wingman):
         for command in commands:
             tool_id = None
             if (
-                    self.config.features.conversation_provider == ConversationProvider.OPENAI
+                self.config.features.conversation_provider
+                == ConversationProvider.OPENAI
             ) or (
-                    self.config.features.conversation_provider
-                    == ConversationProvider.WINGMAN_PRO
-                    and "gpt" in self.config.wingman_pro.conversation_deployment.lower()
+                self.config.features.conversation_provider
+                == ConversationProvider.WINGMAN_PRO
+                and "gpt" in self.config.wingman_pro.conversation_deployment.lower()
             ):
                 tool_id = f"call_{str(uuid.uuid4()).replace('-', '')}"
-            elif self.config.features.conversation_provider == ConversationProvider.GOOGLE:
+            elif (
+                self.config.features.conversation_provider
+                == ConversationProvider.GOOGLE
+            ):
                 tool_id = f"function-call-{''.join(random.choices('0123456789', k=20))}"
 
             # early exit for unsupported providers/models
@@ -1233,6 +1257,12 @@ class OpenAiWingman(Wingman):
                     messages=messages,
                     tools=tools,
                     model=self.config.perplexity.conversation_model.value,
+                )
+            elif self.config.features.conversation_provider == ConversationProvider.XAI:
+                completion = self.xai.ask(
+                    messages=messages,
+                    tools=tools,
+                    model=self.config.xai.conversation_model,
                 )
         except Exception as e:
             await printr.print_async(
@@ -1553,7 +1583,7 @@ class OpenAiWingman(Wingman):
                     model=self.config.openai_compatible_tts.model,
                     speed=(
                         self.config.openai_compatible_tts.speed
-                        if self.config.openai_compatible_tts.speed#!= 1.0
+                        if self.config.openai_compatible_tts.speed  #!= 1.0
                         else NOT_GIVEN
                     ),
                     sound_config=sound_config,

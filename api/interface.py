@@ -396,6 +396,11 @@ class PerplexityConfig(BaseModel):
     endpoint: str
 
 
+class XaiConfig(BaseModel):
+    conversation_model: str
+    endpoint: str
+
+
 class GroqConfig(BaseModel):
     conversation_model: str
     endpoint: str
@@ -740,6 +745,7 @@ class NestedConfig(BaseModel):
     fasterwhisper: FasterWhisperSttConfig
     wingman_pro: WingmanProConfig
     perplexity: PerplexityConfig
+    xai: XaiConfig
     commands: Optional[list[CommandConfig]] = None
     skills: Optional[list[SkillConfig]] = None
 
@@ -775,6 +781,7 @@ class BasicWingmanConfig(BaseModel):
     fasterwhisper: FasterWhisperSttConfig
     wingman_pro: WingmanProConfig
     perplexity: PerplexityConfig
+    xai: XaiConfig
     openai_compatible_tts: OpenAiCompatibleTtsConfig
 
 

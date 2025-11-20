@@ -143,6 +143,7 @@ class ConversationProvider(Enum):
     GOOGLE = "google"
     CEREBRAS = "cerebras"
     PERPLEXITY = "perplexity"
+    XAI = "xai"
 
 
 class ImageGenerationProvider(Enum):
