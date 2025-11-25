@@ -454,12 +454,19 @@ class ConfigMigrationService:
         def migrate_wingman(old: dict, new: Optional[dict]) -> dict:
             return old
 
+        def migrate_secrets(old: dict) -> dict:
+            if "local_llm" not in old:
+                old["local_llm"] = "not-set"
+                self.log("- added new secret: local_llm")
+            return old
+
         self.migrate(
             old_version="1_8_2",
             new_version="1_9_0",
             migrate_settings=migrate_settings,
             migrate_defaults=migrate_defaults,
             migrate_wingman=migrate_wingman,
+            migrate_secrets=migrate_secrets,
         )
 
     # INTERNAL
@@ -551,6 +558,7 @@ class ConfigMigrationService:
         migrate_settings: Callable[[dict, dict], dict],
         migrate_defaults: Callable[[dict, dict], dict],
         migrate_wingman: Callable[[dict, Optional[dict]], dict],
+        migrate_secrets: Optional[Callable[[dict], dict]] = None,
     ) -> None:
         users_dir = get_users_dir()
         old_config_path = path.join(users_dir, old_version, CONFIGS_DIR)
@@ -638,7 +646,18 @@ class ConfigMigrationService:
                     continue
                 # secrets
                 if filename == "secrets.yaml":
-                    self.copy_file(old_file, new_file)
+                    if migrate_secrets:
+                        self.log("Migrating secrets.yaml...", True)
+                        old_secrets = self.config_manager.read_config(old_file) or {}
+                        migrated_secrets = migrate_secrets(old_secrets)
+                        # Write the migrated secrets
+                        new_dir = path.dirname(new_file)
+                        if not path.exists(new_dir):
+                            os.makedirs(new_dir)
+                        self.config_manager.write_config(new_file, migrated_secrets)
+                        self.log("Migrated secrets.yaml", highlight=True)
+                    else:
+                        self.copy_file(old_file, new_file)
 
                     if new_config_path == self.latest_config_path:
                         secret_keeper = SecretKeeper()
@@ -761,6 +780,21 @@ class ConfigMigrationService:
                 self.log(
                     f"Logically deleting config {root} like in the previous version"
                 )
+
+        # Handle case where secrets.yaml doesn't exist in old version but we need to create it
+        if migrate_secrets:
+            new_secrets_file = path.join(new_config_path, "secrets.yaml")
+            if not path.exists(new_secrets_file):
+                self.log("Creating secrets.yaml (not found in old version)...", True)
+                migrated_secrets = migrate_secrets({})
+                if not path.exists(new_config_path):
+                    os.makedirs(new_config_path)
+                self.config_manager.write_config(new_secrets_file, migrated_secrets)
+                self.log("Created secrets.yaml with new secrets", highlight=True)
+
+                if new_config_path == self.latest_config_path:
+                    secret_keeper = SecretKeeper()
+                    secret_keeper.secrets = secret_keeper.load()
 
         success_message = "Migration completed successfully!"
         self.printr.print(

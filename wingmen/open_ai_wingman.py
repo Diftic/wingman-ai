@@ -402,10 +402,12 @@ class OpenAiWingman(Wingman):
     async def validate_and_set_local_llm(
         self, errors: list[WingmanInitializationError]
     ):
-        self.local_llm = OpenAi(
-            api_key="not-set",
-            base_url=self.config.local_llm.endpoint,
-        )
+        api_key = await self.retrieve_secret("local_llm", errors)
+        if api_key:
+            self.local_llm = OpenAi(
+                api_key=api_key,
+                base_url=self.config.local_llm.endpoint,
+            )
 
     async def validate_and_set_elevenlabs(
         self, errors: list[WingmanInitializationError]
