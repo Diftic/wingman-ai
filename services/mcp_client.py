@@ -281,6 +281,9 @@ class McpClient:
             connection.error = "URL is required for SSE transport"
             return
 
+        # Store headers for later use in tool calls
+        connection._merged_headers = headers
+
         try:
             # Create the SSE client context
             context_manager = sse_client(
@@ -450,6 +453,32 @@ class McpClient:
                 result = await session.call_tool(tool_name, arguments)
                 return self._parse_tool_result(result)
 
+    async def _call_tool_sse(
+        self,
+        connection: McpConnection,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout: float = 60.0,
+    ) -> str:
+        """
+        Call a tool on an SSE MCP server using a fresh connection per call.
+
+        SSE transport uses per-call connections because:
+        1. The MCP SDK's anyio task groups require proper context manager usage
+        2. Fresh connections avoid blocking issues with persistent connections
+        """
+        config = connection.config
+
+        async with sse_client(
+            url=config.url,
+            headers=connection._merged_headers if connection._merged_headers else None,
+            timeout=timeout,
+        ) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.call_tool(tool_name, arguments)
+                return self._parse_tool_result(result)
+
     def _parse_tool_result(self, result) -> str:
         """Parse a tool result into a string."""
         # Parse the result content
@@ -493,7 +522,7 @@ class McpClient:
             return f"Error: Not connected to MCP server {connection.config.name}"
 
         try:
-            # Use per-call connections for both HTTP and STDIO to avoid
+            # Use per-call connections for HTTP, STDIO, and SSE to avoid
             # anyio task group blocking issues
             if connection.config.type == McpTransportType.HTTP:
                 result_str = await asyncio.wait_for(
@@ -505,15 +534,13 @@ class McpClient:
                     self._call_tool_stdio(connection, tool_name, arguments, timeout),
                     timeout=timeout + 5,
                 )
-            else:
-                # SSE - still uses persistent session (may need similar fix)
-                if not connection.session:
-                    return f"Error: No session for MCP server {connection.config.name}"
-                result = await asyncio.wait_for(
-                    connection.session.call_tool(tool_name, arguments),
-                    timeout=timeout,
+            elif connection.config.type == McpTransportType.SSE:
+                result_str = await asyncio.wait_for(
+                    self._call_tool_sse(connection, tool_name, arguments, timeout),
+                    timeout=timeout + 5,
                 )
-                result_str = self._parse_tool_result(result)
+            else:
+                return f"Error: Unknown transport type {connection.config.type}"
 
             return result_str
 
