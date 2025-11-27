@@ -5,8 +5,7 @@ from mss import mss
 from PIL import Image
 from api.enums import LogSource, LogType
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
-from services.benchmark import Benchmark
-from skills.skill_base import Skill
+from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
     from wingmen.open_ai_wingman import OpenAiWingman
@@ -35,59 +34,25 @@ class VisionAI(Skill):
 
         return errors
 
-    def get_tools(self) -> list[tuple[str, dict]]:
-        tools = [
-            (
-                "analyse_what_you_or_user_sees",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "analyse_what_you_or_user_sees",
-                        "description": "Analyse what you or the user sees and answer questions about it.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "question": {
-                                    "type": "string",
-                                    "description": "The question to answer about the image.",
-                                }
-                            },
-                            "required": ["question"],
-                        },
-                    },
-                },
-            ),
-        ]
-        return tools
+    @tool(
+        name="analyse_what_you_or_user_sees",
+        description="""Captures and analyzes the user's screen to answer questions about visual content.
 
-    async def execute_tool(
-        self, tool_name: str, parameters: dict[str, any], benchmark: Benchmark
-    ) -> tuple[str, str]:
-        function_response = ""
-        instant_response = ""
+        WHEN TO USE:
+        - User asks 'What is on my screen?' or 'What do you see?'
+        - User wants analysis of currently displayed content
+        - User asks specific questions about visual elements, text, or objects on screen
 
-        if tool_name == "analyse_what_you_or_user_sees":
-            benchmark.start_snapshot(f"Vision AI: {tool_name}")
-
-            if self.settings.debug_mode:
-                message = f"Vision AI: executing tool '{tool_name}'"
-                if parameters:
-                    message += f" with params: {parameters}"
-                await self.printr.print_async(text=message, color=LogType.INFO)
-
-            question = parameters.get("question", "What's in this image?")
-            answer = await self.analyse_screen(question)
-
-            if answer:
-                if self.settings.debug_mode:
-                    await self.printr.print_async(
-                        f"Vision analysis: {answer}.", color=LogType.INFO
-                    )
-                function_response = answer
-
-            benchmark.finish_snapshot()
-
-        return function_response, instant_response
+        For image analysis: Ask user to open the image on their computer first, then capture and analyze.
+        Provides detailed descriptions of visual content including text, UI elements, and objects.""",
+        wait_response=True,
+    )
+    async def analyse_what_you_or_user_sees(self, question: str) -> str:
+        """
+        Args:
+            question: The question to answer about the image.
+        """
+        return await self.analyse_screen(question)
 
     async def analyse_screen(self, prompt: str, desired_image_width: int = 1000):
         function_response = ""
@@ -148,14 +113,6 @@ class VisionAI(Skill):
             )
 
         return function_response
-
-    async def is_summarize_needed(self, tool_name: str) -> bool:
-        """Returns whether a tool needs to be summarized."""
-        return True
-
-    async def is_waiting_response_needed(self, tool_name: str) -> bool:
-        """Returns whether a tool probably takes long and a message should be printet in between."""
-        return True
 
     def pil_image_to_base64(self, pil_image):
         """
