@@ -337,6 +337,7 @@ class WingmanPro:
                 buffer_callback=buffer_callback,
                 config=sound_config,
                 wingman_name=wingman_name,
+                use_gain_boost=True,  # Streaming audio needs gain boost for radio effects
             )
         else:
             response = requests.post(
