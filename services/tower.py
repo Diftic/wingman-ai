@@ -141,9 +141,9 @@ class Tower:
             errors.extend(validation_errors)
 
             # init and validate skills
-            # Note: skill_errors are not added to errors - we don't want to
-            # prevent a wingman from loading just because one skill failed
+            # Note: skill errors are non-fatal but should be shown to user
             skill_errors = await wingman.init_skills()
+            errors.extend(skill_errors)  # Add to errors for client notification
 
             # init MCP servers (if the wingman supports them)
             # Note: MCP errors are non-fatal but should be shown to user
@@ -158,7 +158,20 @@ class Tower:
                         server_only=True,
                     )
 
-            if not errors or len(errors) == 0:
+            # Check for fatal errors that should prevent wingman loading
+            # MCP, skill, and missing secret errors are non-fatal
+            fatal_errors = [
+                e
+                for e in errors
+                if e.error_type
+                not in [
+                    WingmanInitializationErrorType.MCP_CONNECTION_FAILED,
+                    WingmanInitializationErrorType.MISSING_SECRET,
+                    WingmanInitializationErrorType.SKILL_INITIALIZATION_FAILED,
+                ]
+            ]
+
+            if not fatal_errors:
                 await wingman.prepare()
                 self.wingmen.append(wingman)
 
@@ -208,7 +221,7 @@ class Tower:
                 self.disabled_wingmen.remove(wingman_config)
                 printr.print(
                     f"Enabled wingman {wingman_name}.",
-                    color=LogType.INFO,
+                    color=LogType.SYSTEM,
                     server_only=True,
                     source_name=self.log_source_name,
                     source=LogSource.SYSTEM,
@@ -224,7 +237,7 @@ class Tower:
                 self.wingmen.remove(wingman)
                 printr.print(
                     f"Disabled wingman {wingman_name}.",
-                    color=LogType.INFO,
+                    color=LogType.SYSTEM,
                     server_only=True,
                     source_name=self.log_source_name,
                     source=LogSource.SYSTEM,
@@ -246,7 +259,7 @@ class Tower:
                         )
                         printr.print(
                             f"Saved wingman {wingman_name}.",
-                            color=LogType.INFO,
+                            color=LogType.SYSTEM,
                             server_only=True,
                             source_name=self.log_source_name,
                             source=LogSource.SYSTEM,

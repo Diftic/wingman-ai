@@ -698,7 +698,7 @@ class WingmanCore(WebSocketUser):
                     self.printr.print(
                         f"Cleaned original transcription: {transcription.text}",
                         server_only=True,
-                        color=LogType.SUBTLE,
+                        color=LogType.SYSTEM,
                     )
         elif provider == VoiceActivationSttProvider.OPENAI:
             # TODO: can't await secret_keeper.retrieve here, so just assume the secret is there...
@@ -1143,9 +1143,7 @@ class WingmanCore(WebSocketUser):
         return content.get("data", [])
 
     async def get_xai_models(self):
-        xia_api_key = await self.secret_keeper.retrieve(
-            key="xai", requester="XAI"
-        )
+        xia_api_key = await self.secret_keeper.retrieve(key="xai", requester="XAI")
         response = requests.get(
             url="https://api.x.ai/v1/models",
             timeout=10,
@@ -1331,5 +1329,5 @@ class WingmanCore(WebSocketUser):
         self.printr.print(
             "Core shutdown.",
             server_only=True,
-            color=LogType.SUBTLE,
+            color=LogType.SYSTEM,
         )

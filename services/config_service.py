@@ -604,7 +604,7 @@ class ConfigService:
 
         await self.printr.print_async(
             f"Loaded config: {loaded_config_dir.name}.",
-            color=LogType.HIGHLIGHT,
+            color=LogType.STARTUP,
             source_name=self.source_name,
             command_tag="config_loaded",
         )

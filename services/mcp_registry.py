@@ -247,7 +247,7 @@ class McpRegistry:
             if results:
                 printr.print(
                     f"🔍 Searching MCP servers... found {len(self._manifests)} available",
-                    color=LogType.PURPLE,
+                    color=LogType.MCP,
                 )
             return results
 
@@ -279,19 +279,19 @@ class McpRegistry:
                     results = [manifest]
                     printr.print(
                         f"🔍 Searching for '{query}'... using {manifest.display_name} (has discovery tools)",
-                        color=LogType.PURPLE,
+                        color=LogType.MCP,
                     )
                     return results
 
         if results:
             names = [m.display_name for m in results]
             printr.print(
-                f"🔍 Searching for '{query}'... found: {', '.join(names)}",
-                color=LogType.PURPLE,
+                f"Searching for '{query}'... found: {', '.join(names)}",
+                color=LogType.MCP,
             )
         else:
             printr.print(
-                f"🔍 Searching for '{query}'... no matching MCP servers found",
+                f"Searching for '{query}'... no matching MCP servers found",
                 color=LogType.WARNING,
             )
 
@@ -323,7 +323,7 @@ class McpRegistry:
 
         printr.print(
             f"🌐 MCP activated: {manifest.display_name}",
-            color=LogType.PURPLE,
+            color=LogType.MCP,
         )
         return (
             True,
@@ -340,8 +340,8 @@ class McpRegistry:
         display_name = manifest.display_name if manifest else server_name
 
         printr.print(
-            f"🔌 MCP deactivated: {display_name}",
-            color=LogType.PURPLE,
+            f"MCP deactivated: {display_name}",
+            color=LogType.MCP,
         )
         return True, f"Deactivated '{display_name}'."
 
@@ -350,8 +350,8 @@ class McpRegistry:
         if self._active_servers:
             count = len(self._active_servers)
             printr.print(
-                f"🔄 Conversation reset: deactivating {count} MCP server(s)",
-                color=LogType.PURPLE,
+                f"Conversation reset: deactivating {count} MCP server(s)",
+                color=LogType.MCP,
             )
         self._active_servers.clear()
 
@@ -483,7 +483,7 @@ class McpRegistry:
         # Debug logging for developers (server-only)
         printr.print(
             f"Meta-tool called: {tool_name}({parameters})",
-            color=LogType.INFO,
+            color=LogType.MCP,
             server_only=True,
         )
 

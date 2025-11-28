@@ -184,8 +184,8 @@ class SkillRegistry:
             if results:
                 skill_names = [m.display_name for m in results]
                 printr.print(
-                    f"🔍 Searching skills... found {len(self._manifests)} available",
-                    color=LogType.PURPLE,
+                    f"Searching skills... found {len(self._manifests)} available",
+                    color=LogType.SKILL,
                 )
             return results
 
@@ -203,12 +203,12 @@ class SkillRegistry:
         if results:
             skill_names = [m.display_name for m in results]
             printr.print(
-                f"🔍 Searching for '{query}'... found: {', '.join(skill_names)}",
-                color=LogType.PURPLE,
+                f"Searching for '{query}'... found: {', '.join(skill_names)}",
+                color=LogType.SKILL,
             )
         else:
             printr.print(
-                f"🔍 Searching for '{query}'... no matching skills found",
+                f"Searching for '{query}'... no matching skills found",
                 color=LogType.WARNING,
             )
 
@@ -230,7 +230,7 @@ class SkillRegistry:
         if skill_name not in self._skills:
             available = ", ".join(self._manifests.keys())
             printr.print(
-                f"⚠️ Skill '{skill_name}' not found",
+                f"Skill '{skill_name}' not found",
                 color=LogType.WARNING,
             )
             return (
@@ -248,8 +248,8 @@ class SkillRegistry:
 
         if needs_validation:
             printr.print(
-                f"🔌 Activating skill: {manifest.display_name} (validating...)",
-                color=LogType.PURPLE,
+                f"Activating skill: {manifest.display_name} (validating...)",
+                color=LogType.SKILL,
             )
             return (
                 True,
@@ -258,8 +258,8 @@ class SkillRegistry:
             )
 
         printr.print(
-            f"🔧 Skill activated: {manifest.display_name}",
-            color=LogType.PURPLE,
+            f"Skill activated: {manifest.display_name}",
+            color=LogType.SKILL,
         )
         return (
             True,
@@ -276,8 +276,8 @@ class SkillRegistry:
         manifest = self._manifests.get(skill_name)
         display_name = manifest.display_name if manifest else skill_name
         printr.print(
-            f"🔌 Skill deactivated: {display_name}",
-            color=LogType.PURPLE,
+            f"Skill deactivated: {display_name}",
+            color=LogType.SKILL,
         )
         return True, f"Deactivated skill '{skill_name}'."
 
@@ -290,8 +290,8 @@ class SkillRegistry:
         if self._active_skills:
             count = len(self._active_skills)
             printr.print(
-                f"🔄 Conversation reset: deactivating {count} skill(s)",
-                color=LogType.PURPLE,
+                f"Conversation reset: deactivating {count} skill(s)",
+                color=LogType.SKILL,
             )
         self._active_skills.clear()
 
@@ -401,7 +401,7 @@ class SkillRegistry:
         # Debug logging for developers (server-only)
         printr.print(
             f"Meta-tool called: {tool_name}({parameters})",
-            color=LogType.INFO,
+            color=LogType.SKILL,
             server_only=True,
         )
 

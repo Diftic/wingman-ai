@@ -102,7 +102,7 @@ class XVASynth:
                 self.printr.print(
                     f"XVASynth server started on {self.settings.host}:{self.settings.port}.",
                     server_only=True,
-                    color=LogType.HIGHLIGHT,
+                    color=LogType.STARTUP,
                 )
             else:
                 self.printr.toast_error(
@@ -121,7 +121,7 @@ class XVASynth:
             self.running_process.wait()
             self.running_process = None
             self.printr.print(
-                "XVASynth server stopped.", server_only=True, color=LogType.HIGHLIGHT
+                "XVASynth server stopped.", server_only=True, color=LogType.STARTUP
             )
 
     def update_settings(self, settings: XVASynthSettings):

@@ -296,34 +296,33 @@ class Wingman:
                     self.skills.append(skill)
                     await self.prepare_skill(skill)
 
-                    printr.print(
-                        f"Skill '{skill_config.name}' loaded (pending validation).",
-                        color=LogType.INFO,
-                        server_only=True,
-                    )
-
             except Exception as e:
+                skill_name = skill_folder_name
+                error_msg = f"Error loading skill '{skill_name}': {str(e)}"
                 await printr.print_async(
-                    f"Error loading skill '{skill_name}': {str(e)}",
+                    error_msg,
                     color=LogType.ERROR,
                 )
                 printr.print(
                     traceback.format_exc(), color=LogType.ERROR, server_only=True
+                )
+                errors.append(
+                    WingmanInitializationError(
+                        wingman_name=self.name,
+                        message=error_msg,
+                        error_type=WingmanInitializationErrorType.SKILL_INITIALIZATION_FAILED,
+                    )
                 )
 
         # Log summary of enabled skills for this wingman
         if self.skills:
             skill_names = [s.config.name for s in self.skills]
             printr.print(
-                f"[{self.name}] Enabled skills ({len(skill_names)}): {', '.join(skill_names)}",
-                color=LogType.INFO,
-                server_only=True,
-            )
-        else:
-            printr.print(
-                f"[{self.name}] No skills enabled.",
-                color=LogType.INFO,
-                server_only=True,
+                f"Enabled skills ({len(skill_names)}): {', '.join(skill_names)}",
+                color=LogType.WINGMAN,
+                source=LogSource.WINGMAN,
+                source_name=self.name,
+                server_only=not self.settings.debug_mode,
             )
 
         return errors
@@ -371,7 +370,7 @@ class Wingman:
             if transcript:
                 await printr.print_async(
                     f"{transcript}",
-                    color=LogType.PURPLE,
+                    color=LogType.USER,
                     source_name="User",
                     source=LogSource.USER,
                     benchmark_result=(
@@ -567,14 +566,14 @@ class Wingman:
                 await self.execute_action(command)
                 await printr.print_async(
                     f"Executed {'instant' if is_instant else 'AI'} command: {command.name}",
-                    color=LogType.INFO,
+                    color=LogType.COMMAND,
                 )
 
             # handle the global special commands:
             if command.name == "ResetConversationHistory":
                 self.reset_conversation_history()
                 await printr.print_async(
-                    f"Executed command: {command.name}", color=LogType.INFO
+                    f"Executed command: {command.name}", color=LogType.COMMAND
                 )
 
             return self._select_command_response(command) or "Ok"

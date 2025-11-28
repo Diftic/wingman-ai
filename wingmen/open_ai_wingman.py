@@ -347,12 +347,6 @@ class OpenAiWingman(Wingman):
         """
         errors = []
 
-        printr.print(
-            f"[{self.name}] Initializing MCP servers...",
-            color=LogType.INFO,
-            server_only=True,
-        )
-
         # Check if MCP SDK is available
         if not self.mcp_client.is_available:
             printr.print(
@@ -362,51 +356,27 @@ class OpenAiWingman(Wingman):
             )
             return errors
 
-        printr.print(
-            f"[{self.name}] MCP SDK available, checking config...",
-            color=LogType.INFO,
-            server_only=True,
-        )
-
         # Disconnect existing MCP servers
         await self.unload_mcps()
 
         # Get MCP configs
         mcp_configs = self.config.mcp or []
         if not mcp_configs:
-            printr.print(
-                f"[{self.name}] No MCP servers configured.",
-                color=LogType.INFO,
-                server_only=True,
-            )
             return errors
-
-        printr.print(
-            f"[{self.name}] Found {len(mcp_configs)} MCP server(s) in config.",
-            color=LogType.INFO,
-            server_only=True,
-        )
 
         # Get disabled MCPs list (blacklist)
         disabled_mcps = self.config.disabled_mcps or []
 
         connected_count = 0
+        connected_names = []
+        skipped_names = []
+
         for mcp_config in mcp_configs:
             try:
                 # Check if MCP is disabled for this wingman
                 if mcp_config.name in disabled_mcps:
-                    printr.print(
-                        f"[{self.name}] MCP '{mcp_config.name}' is disabled, skipping.",
-                        color=LogType.INFO,
-                        server_only=True,
-                    )
+                    skipped_names.append(mcp_config.name)
                     continue
-
-                printr.print(
-                    f"[{self.name}] Connecting to MCP '{mcp_config.display_name}'...",
-                    color=LogType.INFO,
-                    server_only=True,
-                )
 
                 # Build headers with secrets
                 headers = {}
@@ -464,10 +434,8 @@ class OpenAiWingman(Wingman):
 
                 if connection.is_connected:
                     connected_count += 1
-                    printr.print(
-                        f"[{self.name}] MCP '{mcp_config.display_name}' connected ({len(connection.tools)} tools).",
-                        color=LogType.POSITIVE,
-                        server_only=True,
+                    connected_names.append(
+                        f"{mcp_config.display_name} ({len(connection.tools)} tools)"
                     )
                 else:
                     error_msg = f"MCP '{mcp_config.display_name}' failed to connect: {connection.error}"
@@ -503,11 +471,14 @@ class OpenAiWingman(Wingman):
                     )
                 )
 
+        # Log consolidated MCP status for this wingman
         if connected_count > 0:
             printr.print(
-                f"[{self.name}] Connected to {connected_count} MCP server(s).",
-                color=LogType.POSITIVE,
-                server_only=True,
+                f"MCP servers ({connected_count}): {', '.join(connected_names)}",
+                color=LogType.WINGMAN,
+                source=LogSource.WINGMAN,
+                source_name=self.name,
+                server_only=not self.settings.debug_mode,
             )
 
         return errors
@@ -880,14 +851,23 @@ class OpenAiWingman(Wingman):
             return instant_response, instant_response, None, True
         benchmark.finish_snapshot()
 
+        # Track cumulative times for proper aggregation
+        llm_processing_time_ms = 0.0
+        tool_execution_time_ms = 0.0
+        tool_timings: list[tuple[str, float]] = (
+            []
+        )  # (label, time_ms) for individual tools
+
         # make a GPT call with the conversation history
         # if an instant command got executed, prevent tool calls to avoid duplicate executions
-        benchmark.start_snapshot("LLM Processing")
-
+        llm_start = time.perf_counter()
         completion = await self._llm_call(instant_command_executed is False)
+        llm_processing_time_ms += (time.perf_counter() - llm_start) * 1000
 
         if completion is None:
-            benchmark.finish_snapshot()
+            self._add_benchmark_snapshot(
+                benchmark, "LLM Processing", llm_processing_time_ms
+            )
             return None, None, None, True
 
         response_message, tool_calls = await self._process_completion(completion)
@@ -921,18 +901,39 @@ class OpenAiWingman(Wingman):
             else:
                 is_summarize_needed = True
 
-            benchmark.finish_snapshot()
+            # Time tool execution and collect individual timings
+            tool_start = time.perf_counter()
+            instant_response, skill, iteration_timings = await self._handle_tool_calls(
+                tool_calls
+            )
+            tool_execution_time_ms += (time.perf_counter() - tool_start) * 1000
+            tool_timings.extend(iteration_timings)
 
-            benchmark.start_snapshot("AI Commands & Skills")
-            instant_response, skill = await self._handle_tool_calls(tool_calls)
             if instant_response:
-                benchmark.finish_snapshot()
+                # Add snapshots before returning
+                self._add_benchmark_snapshot(
+                    benchmark, "LLM Processing", llm_processing_time_ms
+                )
+                if tool_execution_time_ms > 0:
+                    self._add_tool_execution_snapshot(
+                        benchmark, tool_execution_time_ms, tool_timings
+                    )
                 return None, instant_response, None, interrupt
 
             if is_summarize_needed:
+                # Time the follow-up LLM call
+                llm_start = time.perf_counter()
                 completion = await self._llm_call(True)
+                llm_processing_time_ms += (time.perf_counter() - llm_start) * 1000
+
                 if completion is None:
-                    benchmark.finish_snapshot()
+                    self._add_benchmark_snapshot(
+                        benchmark, "LLM Processing", llm_processing_time_ms
+                    )
+                    if tool_execution_time_ms > 0:
+                        self._add_tool_execution_snapshot(
+                            benchmark, tool_execution_time_ms, tool_timings
+                        )
                     return None, None, None, True
 
                 response_message, tool_calls = await self._process_completion(
@@ -944,11 +945,81 @@ class OpenAiWingman(Wingman):
                 if tool_calls:
                     interrupt = False
             elif is_waiting_response_needed:
-                benchmark.finish_snapshot()
+                self._add_benchmark_snapshot(
+                    benchmark, "LLM Processing", llm_processing_time_ms
+                )
+                if tool_execution_time_ms > 0:
+                    self._add_tool_execution_snapshot(
+                        benchmark, tool_execution_time_ms, tool_timings
+                    )
                 return None, None, None, interrupt
 
-        benchmark.finish_snapshot()
+        # Add final snapshots
+        self._add_benchmark_snapshot(
+            benchmark, "LLM Processing", llm_processing_time_ms
+        )
+        if tool_execution_time_ms > 0:
+            self._add_tool_execution_snapshot(
+                benchmark, tool_execution_time_ms, tool_timings
+            )
         return response_message.content, response_message.content, None, interrupt
+
+    def _add_benchmark_snapshot(
+        self, benchmark: Benchmark, label: str, execution_time_ms: float
+    ):
+        """Add a snapshot with the given label and execution time."""
+        if execution_time_ms >= 1000:
+            formatted_time = f"{execution_time_ms/1000:.1f}s"
+        else:
+            formatted_time = f"{int(execution_time_ms)}ms"
+
+        from api.interface import BenchmarkResult
+
+        benchmark.snapshots.append(
+            BenchmarkResult(
+                label=label,
+                execution_time_ms=execution_time_ms,
+                formatted_execution_time=formatted_time,
+            )
+        )
+
+    def _add_tool_execution_snapshot(
+        self,
+        benchmark: Benchmark,
+        total_time_ms: float,
+        tool_timings: list[tuple[str, float]],
+    ):
+        """Add a tool execution snapshot with nested individual tool timings."""
+        from api.interface import BenchmarkResult
+
+        if total_time_ms >= 1000:
+            formatted_time = f"{total_time_ms/1000:.1f}s"
+        else:
+            formatted_time = f"{int(total_time_ms)}ms"
+
+        # Create nested snapshots for individual tools
+        nested_snapshots = []
+        for label, time_ms in tool_timings:
+            if time_ms >= 1000:
+                fmt = f"{time_ms/1000:.1f}s"
+            else:
+                fmt = f"{int(time_ms)}ms"
+            nested_snapshots.append(
+                BenchmarkResult(
+                    label=label,
+                    execution_time_ms=time_ms,
+                    formatted_execution_time=fmt,
+                )
+            )
+
+        benchmark.snapshots.append(
+            BenchmarkResult(
+                label="Tool Execution",
+                execution_time_ms=total_time_ms,
+                formatted_execution_time=formatted_time,
+                snapshots=nested_snapshots if nested_snapshots else None,
+            )
+        )
 
     def _get_random_filler(self):
         # get last two used instant responses
@@ -1571,10 +1642,11 @@ class OpenAiWingman(Wingman):
             tool_calls: The list of tool calls to process.
 
         Returns:
-            str: The immediate response from processed tool calls or None if there are no immediate responses.
+            tuple: (instant_response, skill, tool_timings) where tool_timings is a list of (label, time_ms) tuples.
         """
         instant_response = None
         function_response = ""
+        tool_timings: list[tuple[str, float]] = []
 
         skill = None
 
@@ -1588,13 +1660,22 @@ class OpenAiWingman(Wingman):
                     # OpenAI returns a string
                     else json.loads(tool_call.function.arguments)
                 )
+
+                # Time the individual tool execution
+                tool_start = time.perf_counter()
                 (
                     function_response,
                     instant_response,
                     skill,
+                    tool_label,
                 ) = await self.execute_command_by_function_call(
                     function_name, function_args
                 )
+                tool_time_ms = (time.perf_counter() - tool_start) * 1000
+
+                # Add timing if we got a label (actual tool execution, not meta-tool)
+                if tool_label:
+                    tool_timings.append((tool_label, tool_time_ms))
 
                 if tool_call.id:
                     # updating the dummy tool response with the actual response
@@ -1610,11 +1691,11 @@ class OpenAiWingman(Wingman):
                 printr.print(
                     traceback.format_exc(), color=LogType.ERROR, server_only=True
                 )
-        return instant_response, skill
+        return instant_response, skill, tool_timings
 
     async def execute_command_by_function_call(
         self, function_name: str, function_args: dict[str, any]
-    ) -> tuple[str, str | None, Skill | None] | None:
+    ) -> tuple[str, str | None, Skill | None, str | None]:
         """
         Uses an OpenAI function call to execute a command. If it's an instant activation_command, one if its responses will be played.
 
@@ -1623,13 +1704,16 @@ class OpenAiWingman(Wingman):
             function_args (dict[str, any]): The arguments to pass to the function being executed.
 
         Returns:
-            A tuple containing two elements:
+            A tuple containing:
             - function_response (str): The text response or result obtained after executing the function.
             - instant_response (str): An immediate response or action to be taken, if any (e.g., play audio).
+            - used_skill (Skill): The skill that was used, if any.
+            - tool_label (str): Label for benchmark timing (e.g., "MCP: resolve-library-id"), or None for meta-tools.
         """
         function_response = ""
         instant_response = ""
         used_skill = None
+        tool_label = None
 
         # Handle meta-tools for progressive skill discovery/activation
         if self.skill_registry.is_meta_tool(function_name):
@@ -1649,7 +1733,7 @@ class OpenAiWingman(Wingman):
                         function_response = validation_msg
                         tools_changed = False
                         await printr.print_async(
-                            f"❌ Skill activation failed: {skill_name}",
+                            f"Skill activation failed: {skill_name}",
                             color=LogType.ERROR,
                         )
                     else:
@@ -1658,18 +1742,18 @@ class OpenAiWingman(Wingman):
                             skill_name
                         )
                         await printr.print_async(
-                            f"🔧 Skill activated: {display_name}",
-                            color=LogType.PURPLE,
+                            f"Skill activated: {display_name}",
+                            color=LogType.SKILL,
                         )
 
-            return function_response, None, None
+            return function_response, None, None, None  # Meta-tool, no timing label
 
         # Handle MCP meta-tools for server discovery/activation
         if self.mcp_registry.is_meta_tool(function_name):
             function_response, tools_changed = self.mcp_registry.execute_meta_tool(
                 function_name, function_args
             )
-            return function_response, None, None
+            return function_response, None, None, None  # Meta-tool, no timing label
 
         # Handle MCP server tools (prefixed with mcp_)
         if self.mcp_registry.is_mcp_tool(function_name):
@@ -1677,13 +1761,15 @@ class OpenAiWingman(Wingman):
             if connection:
                 display_name = connection.config.display_name
                 original_name = self.mcp_registry.get_original_tool_name(function_name)
+                tool_label = f"🌐 {display_name}: {original_name}"
 
                 benchmark = Benchmark(
                     f"MCP '{connection.config.name}' - {original_name}"
                 )
                 await printr.print_async(
-                    f"🌐 {display_name}: calling `{original_name}`",
-                    color=LogType.PURPLE,
+                    f"{display_name}: calling `{original_name}`",
+                    color=LogType.MCP,
+                    server_only=not self.settings.debug_mode,
                 )
 
                 try:
@@ -1692,7 +1778,7 @@ class OpenAiWingman(Wingman):
                     )
                 except Exception as e:
                     await printr.print_async(
-                        f"❌ {display_name}: `{original_name}` failed - {str(e)}",
+                        f"{display_name}: `{original_name}` failed - {str(e)}",
                         color=LogType.ERROR,
                     )
                     printr.print(
@@ -1701,18 +1787,20 @@ class OpenAiWingman(Wingman):
                     function_response = "ERROR DURING MCP TOOL EXECUTION"
                 finally:
                     await printr.print_async(
-                        f"✅ {display_name}: `{original_name}` completed",
-                        color=LogType.PURPLE,
+                        f"{display_name}: `{original_name}` completed",
+                        color=LogType.MCP,
                         benchmark_result=benchmark.finish(),
+                        server_only=not self.settings.debug_mode,
                     )
 
-                return function_response, None, None
+                return function_response, None, None, tool_label
 
         if function_name == "execute_command":
             # get the command based on the argument passed by the LLM
             command = self.get_command(function_args["command_name"])
             # execute the command
             function_response = await self._execute_command(command)
+            tool_label = f"Command: {function_args.get('command_name', function_name)}"
             # if the command has responses, we have to play one of them
             if command and command.responses:
                 instant_response = self._select_command_response(command)
@@ -1722,13 +1810,14 @@ class OpenAiWingman(Wingman):
         if function_name in self.tool_skills:
             skill = self.tool_skills[function_name]
             display_name = self.skill_registry.get_skill_display_name(skill.name)
-            tool_display = function_name.replace("_", " ")
+            tool_label = f"⚡ {display_name}: {function_name}"
 
             benchmark = Benchmark(f"Skill '{skill.name}' - {function_name}")
             await printr.print_async(
-                f"⚡ {display_name}: calling `{function_name}`",
-                color=LogType.PURPLE,
+                f"{display_name}: calling `{function_name}`",
+                color=LogType.SKILL,
                 skill_name=skill.name,
+                server_only=not self.settings.debug_mode,
             )
 
             try:
@@ -1742,7 +1831,7 @@ class OpenAiWingman(Wingman):
                     await self.play_to_user(instant_response)
             except Exception as e:
                 await printr.print_async(
-                    f"❌ {display_name}: `{function_name}` failed - {str(e)}",
+                    f"{display_name}: `{function_name}` failed - {str(e)}",
                     color=LogType.ERROR,
                 )
                 printr.print(
@@ -1754,13 +1843,14 @@ class OpenAiWingman(Wingman):
                 instant_response = None
             finally:
                 await printr.print_async(
-                    f"✅ {display_name}: `{function_name}` completed",
-                    color=LogType.PURPLE,
+                    f"{display_name}: `{function_name}` completed",
+                    color=LogType.SKILL,
                     benchmark_result=benchmark.finish(),
                     skill_name=skill.name,
+                    server_only=not self.settings.debug_mode,
                 )
 
-        return function_response, instant_response, used_skill
+        return function_response, instant_response, used_skill, tool_label
 
     async def play_to_user(
         self,

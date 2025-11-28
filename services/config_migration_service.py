@@ -609,7 +609,7 @@ class ConfigMigrationService:
     def log(self, message: str, highlight: bool = False):
         self.printr.print(
             message,
-            color=LogType.SUBTLE if not highlight else LogType.PURPLE,
+            color=LogType.SYSTEM if not highlight else LogType.STARTUP,
             server_only=True,
         )
         self.log_message += f"{message}\n"

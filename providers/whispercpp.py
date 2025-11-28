@@ -76,7 +76,7 @@ class Whispercpp:
         else:
             self.printr.print(
                 text=f"whispercpp connected on {self.settings.host}:{self.settings.port}.",
-                color=LogType.HIGHLIGHT,
+                color=LogType.STARTUP,
                 server_only=True,
             )
 

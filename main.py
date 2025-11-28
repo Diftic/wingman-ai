@@ -46,7 +46,7 @@ set_bundled_skills_dir(bundled_skills_path)
 printr.print(
     f"Skills directory: {bundled_skills_path}",
     server_only=True,
-    color=LogType.HIGHLIGHT,
+    color=LogType.STARTUP,
 )
 
 # creates all the configs from templates - do this first!
@@ -54,7 +54,7 @@ config_manager = ConfigManager(app_root_path)
 printr.print(
     f"Config directory: {config_manager.config_dir}",
     server_only=True,
-    color=LogType.HIGHLIGHT,
+    color=LogType.STARTUP,
 )
 
 secret_keeper = SecretKeeper()
@@ -64,7 +64,7 @@ system_manager = SystemManager()
 printr.print(
     f"Wingman AI Core v{system_manager.local_version}",
     server_only=True,
-    color=LogType.HIGHLIGHT,
+    color=LogType.STARTUP,
 )
 
 is_latest_version = system_manager.check_version()
@@ -114,7 +114,7 @@ async def shutdown():
 
 def exit_handler():
     printr.print(
-        "atexit handler shutting down...", color=LogType.SUBTLE, server_only=True
+        "atexit handler shutting down...", color=LogType.SYSTEM, server_only=True
     )
     asyncio.run(shutdown())
 
@@ -128,7 +128,7 @@ async def lifespan(_app: FastAPI):
 
     # executed after the application has finished
     printr.print(
-        "Lifespan end - shutting down...", color=LogType.SUBTLE, server_only=True
+        "Lifespan end - shutting down...", color=LogType.SYSTEM, server_only=True
     )
     await shutdown()
 
@@ -262,7 +262,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
     printr.print(
         f"Audio client {websocket.client.host} connected",
         server_only=True,
-        color=LogType.SUBTLE,
+        color=LogType.SYSTEM,
     )
 
     # Track connection state
@@ -310,7 +310,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
                     printr.print(
                         "Audio subscription successful",
                         server_only=True,
-                        color=LogType.SUBTLE,
+                        color=LogType.SYSTEM,
                     )
                     break
 
@@ -344,7 +344,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         printr.print(
-            f"Audio client disconnected", server_only=True, color=LogType.SUBTLE
+            f"Audio client disconnected", server_only=True, color=LogType.SYSTEM
         )
     except Exception as e:
         printr.print(f"Audio error: {str(e)}", server_only=True, color=LogType.ERROR)
@@ -361,7 +361,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
                 printr.print(
                     "Audio unsubscribed successfully",
                     server_only=True,
-                    color=LogType.SUBTLE,
+                    color=LogType.SYSTEM,
                 )
             except Exception as e:
                 printr.print(
@@ -488,7 +488,7 @@ if __name__ == "__main__":
     def signal_handler(sig, frame):
         printr.print(
             "SIGINT/SIGTERM received! Initiating shutdown...",
-            color=LogType.SUBTLE,
+            color=LogType.SYSTEM,
             server_only=True,
         )
         # Schedule the shutdown asynchronously

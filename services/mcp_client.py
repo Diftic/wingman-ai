@@ -152,7 +152,7 @@ class McpClient:
                 self._connections[config.name] = connection
                 printr.print(
                     f"MCP connected: {config.display_name} ({len(connection.tools)} tools)",
-                    color=LogType.INFO,
+                    color=LogType.MCP,
                     server_only=True,
                 )
 
@@ -363,7 +363,7 @@ class McpClient:
         if connection.config:
             printr.print(
                 f"MCP disconnected: {connection.config.display_name}",
-                color=LogType.INFO,
+                color=LogType.MCP,
                 server_only=True,
             )
 

@@ -4,13 +4,27 @@ from pydantic import BaseModel
 
 # Enum declarations
 class LogType(Enum):
-    SUBTLE = "subtle"
-    INFO = "info"
-    HIGHLIGHT = "highlight"
-    POSITIVE = "positive"
-    WARNING = "warning"
-    ERROR = "error"
-    PURPLE = "purple"
+    # System/Runtime messages (by importance/category)
+    SYSTEM = "system"  # Gray - least important, lifecycle events like "Playback started", "Client disconnected"
+    INFO = "info"  # Blue - general runtime info, "good to know" messages
+    STARTUP = "startup"  # Teal/Cyan - important status on startup, version info, paths
+    WARNING = "warning"  # Yellow - attention required but not an error
+    ERROR = "error"  # Red - errors
+
+    # Feature-specific categories (for differentiated logging)
+    MCP = "mcp"  # Dedicated color for MCP-related messages
+    SKILL = "skill"  # Dedicated color for Skills-related messages (system-level)
+    COMMAND = "command"  # Dedicated color for Command execution messages
+    WINGMAN = "wingman"  # Dedicated color for Wingman-specific status messages
+
+    # Conversation messages
+    USER = "user"  # Pink/Purple - user speech/input
+    POSITIVE = "positive"  # Green - LLM responses, success messages
+
+    # Legacy aliases (deprecated, use semantic names above)
+    SUBTLE = "system"  # -> SYSTEM
+    HIGHLIGHT = "startup"  # -> STARTUP
+    PURPLE = "user"  # -> USER
 
 
 class LogSource(Enum):
@@ -31,6 +45,7 @@ class WingmanInitializationErrorType(Enum):
     INVALID_CONFIG = "invalid_config"
     MISSING_SECRET = "missing_secret"
     MCP_CONNECTION_FAILED = "mcp_connection_failed"
+    SKILL_INITIALIZATION_FAILED = "skill_initialization_failed"
 
 
 class CommandTag(Enum):
