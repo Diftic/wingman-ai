@@ -1,6 +1,7 @@
+from typing import Optional
 import openai
 import requests
-from typing import Optional
+from openai.types.audio import Transcription
 from api.enums import CommandTag, LogType
 from api.interface import (
     AzureSttConfig,
@@ -53,7 +54,7 @@ class WingmanPro:
             else:
                 response.raise_for_status()
             json = response.json()
-            transcription = openai.types.audio.Transcription.model_validate(json)
+            transcription = Transcription.model_validate(json)
             return transcription
 
     def transcribe_azure_speech(self, filename: str, config: AzureSttConfig):
