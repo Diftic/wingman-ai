@@ -85,6 +85,7 @@ class TtsVoiceGender(Enum):
     UNKNOWN = "Unknown"
     MALE = "Male"
     FEMALE = "Female"
+    NEUTRAL = "Neutral"
 
 
 class MistralModel(Enum):
