@@ -51,16 +51,22 @@ from services.audio_recorder import RECORDING_PATH, AudioRecorder
 from services.config_manager import ConfigManager
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
+from services.system_manager import SystemManager
 from services.tower import Tower
 from services.websocket_user import WebSocketUser
 
 
 class WingmanCore(WebSocketUser):
     def __init__(
-        self, config_manager: ConfigManager, app_root_path: str, app_is_bundled: bool
+        self,
+        config_manager: ConfigManager,
+        app_root_path: str,
+        app_is_bundled: bool,
+        system_manager: SystemManager,
     ):
         self.printr = Printr()
         self.app_root_path = app_root_path
+        self.system_manager = system_manager
         self.is_client_logged_in: bool = False
         self.is_client_pro: bool = False
         self.client_account_name: str = ""
@@ -1027,8 +1033,9 @@ class WingmanCore(WebSocketUser):
         devices = [
             "auto",
             "cpu",
-            "cuda",
         ]
+        if self.system_manager.is_cuda_available():
+            devices.append("cuda")
         return devices
 
     # POST /xvasynth/start

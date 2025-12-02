@@ -80,6 +80,7 @@ core = WingmanCore(
     config_manager=config_manager,
     app_root_path=app_root_path,
     app_is_bundled=app_is_bundled,
+    system_manager=system_manager,
 )
 core.set_connection_manager(connection_manager)
 

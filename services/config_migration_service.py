@@ -470,6 +470,24 @@ class ConfigMigrationService:
 
     def migrate_182_to_190(self):
         def migrate_settings(old: dict, new: dict) -> dict:
+            # Auto-detect CUDA availability and set FasterWhisper device accordingly
+            cuda_available = self.system_manager.is_cuda_available()
+            device = "cuda" if cuda_available else "cpu"
+
+            if "voice_activation" in old and "fasterwhisper" in old["voice_activation"]:
+                old["voice_activation"]["fasterwhisper"]["device"] = device
+            else:
+                # Ensure the structure exists
+                if "voice_activation" not in old:
+                    old["voice_activation"] = {}
+                if "fasterwhisper" not in old["voice_activation"]:
+                    old["voice_activation"]["fasterwhisper"] = {}
+                old["voice_activation"]["fasterwhisper"]["device"] = device
+
+            self.log(
+                f"- set voice_activation.fasterwhisper.device to '{device}' (CUDA {'available' if cuda_available else 'not available'})"
+            )
+
             return old
 
         def migrate_defaults(old: dict, new: dict) -> dict:
