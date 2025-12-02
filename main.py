@@ -3,10 +3,37 @@ import asyncio
 import atexit
 from enum import Enum
 from os import path
+import os
 import signal
 import sys
 import traceback
 from typing import Any, Literal, get_args, get_origin
+
+# =============================================================================
+# NVIDIA CUDA DLL PATH SETUP (must be done before any CUDA-dependent imports)
+# =============================================================================
+# When running as a PyInstaller bundle, the NVIDIA CUDA DLLs are in subdirectories
+# of _internal/nvidia/. We need to add these to PATH so ctranslate2 can find them.
+# This must happen before any import that might load ctranslate2 or CUDA libraries.
+if getattr(sys, "frozen", False):
+    # Running as bundled exe
+    _internal_dir = sys._MEIPASS
+    _nvidia_paths = [
+        path.join(_internal_dir, "nvidia", "cublas", "bin"),
+        path.join(_internal_dir, "nvidia", "cudnn", "bin"),
+        path.join(_internal_dir, "nvidia", "cuda_runtime", "bin"),
+        path.join(_internal_dir, "nvidia", "cuda_nvrtc", "bin"),
+        path.join(_internal_dir, "nvidia", "nvrtc", "bin"),
+    ]
+    # Prepend existing paths that exist
+    _existing_nvidia_paths = [p for p in _nvidia_paths if path.isdir(p)]
+    if _existing_nvidia_paths:
+        os.environ["PATH"] = (
+            os.pathsep.join(_existing_nvidia_paths)
+            + os.pathsep
+            + os.environ.get("PATH", "")
+        )
+
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import asynccontextmanager
