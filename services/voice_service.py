@@ -405,11 +405,8 @@ class VoiceService:
         )
         await wingman_pro.generate_inworld_speech(
             text=text,
-            voice_id=config.voice_id,
+            config=config,
             sound_config=sound_config,
             audio_player=self.audio_player,
             wingman_name="system",
-            stream=config.output_streaming,
-            model_id=config.model_id,
-            temperature=config.temperature,
         )

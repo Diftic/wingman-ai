@@ -6,6 +6,7 @@ from api.enums import CommandTag, LogType
 from api.interface import (
     AzureSttConfig,
     AzureTtsConfig,
+    InworldConfig,
     SoundConfig,
     VoiceInfo,
     WingmanProSettings,
@@ -254,37 +255,30 @@ class WingmanPro:
     async def generate_inworld_speech(
         self,
         text: str,
-        voice_id: str,
+        config: InworldConfig,
         sound_config: SoundConfig,
         audio_player: AudioPlayer,
         wingman_name: str,
-        stream: bool = False,
-        model_id: str = "inworld-tts-1",
-        temperature: float = 1.1,
-        audio_config: dict = None,
-        timestamp_type: str = "TIMESTAMP_TYPE_UNSPECIFIED",
-        apply_text_normalization: str = "APPLY_TEXT_NORMALIZATION_UNSPECIFIED",
-        speed: float = 1.0,
     ):
         data = {
             "text": text,
-            "voice_id": voice_id,
-            "stream": stream,
-            "model_id": model_id,
-            "temperature": temperature,
-            "timestamp_type": timestamp_type,
-            "apply_text_normalization": apply_text_normalization,
-            "speed": speed,
+            "voice_id": config.voice_id,
+            "stream": config.output_streaming,
+            "model_id": config.model_id,
+            "temperature": config.temperature,
         }
-        if audio_config is not None:
-            data["audio_config"] = audio_config
+        if config.apply_text_normalization is not None:
+            data["apply_text_normalization"] = (
+                "ON" if config.apply_text_normalization else "OFF"
+            )
+        if config.audio_config is not None:
+            data["audio_config"] = config.audio_config.model_dump()
 
-        if stream:
+        if config.output_streaming:
             # For streaming, we need LINEAR16 format for raw PCM playback
-            data["audio_config"] = {
-                "audio_encoding": "LINEAR16",
-                "sample_rate_hertz": 16000,
-            }
+            if data["audio_config"]:
+                data["audio_config"]["audio_encoding"] = "LINEAR16"
+                data["audio_config"]["sample_rate_hertz"] = 16000
 
             def buffer_generator():
                 with requests.post(

@@ -37,6 +37,11 @@ class Inworld:
     ):
         return errors
 
+    def _to_camel_case(self, snake_str: str) -> str:
+        """Convert snake_case to camelCase."""
+        components = snake_str.split("_")
+        return components[0] + "".join(x.title() for x in components[1:])
+
     async def play_audio(
         self,
         text: str,
@@ -45,13 +50,17 @@ class Inworld:
         audio_player: AudioPlayer,
         wingman_name: str,
     ):  # Prepare audio config - override encoding for streaming
-        audio_config = config.audio_config.model_dump()
+        # Convert snake_case keys to camelCase for the API
+        audio_config = {
+            self._to_camel_case(k): v
+            for k, v in config.audio_config.model_dump().items()
+        }
 
         if config.output_streaming:
-            # Replace the existing audio_encoding field (not audioEncoding)
-            audio_config["audio_encoding"] = "LINEAR16"
+            # Override encoding for streaming
+            audio_config["audioEncoding"] = "LINEAR16"
             # Use standard sample rate for LINEAR16 streaming (better performance)
-            audio_config["sample_rate_hertz"] = (
+            audio_config["sampleRateHertz"] = (
                 24000  # Good balance of quality and performance
             )
 
@@ -62,6 +71,10 @@ class Inworld:
             "audioConfig": audio_config,
             "temperature": config.temperature,
         }
+        if config.apply_text_normalization is not None:
+            payload["applyTextNormalization"] = (
+                "ON" if config.apply_text_normalization else "OFF"
+            )
 
         response = requests.request(
             "POST",
@@ -214,10 +227,10 @@ class Inworld:
                 buffer_callback=buffer_callback,
                 config=sound_config,
                 wingman_name=wingman_name,
-                sample_rate=int(audio_config["sample_rate_hertz"]),
+                sample_rate=int(audio_config["sampleRateHertz"]),
                 channels=1,  # LINEAR16 is typically mono
                 dtype="int16",  # LINEAR16 uses 16-bit integers
-                use_gain_boost=True, # All streaming PCM TTS providers need this
+                use_gain_boost=True,  # All streaming PCM TTS providers need this
             )
 
             # Wait for the background thread to complete

@@ -476,6 +476,9 @@ class ConfigMigrationService:
             old["xai"] = new["xai"]
             self.log("- added new property: xai")
 
+            old["google"]["conversation_model"] = "gemini-2.5-flash"
+            self.log("- set google.conversation_model to new default: gemini-2.5-flash")
+
             # Force override prompts with new MCP-optimized versions
             # These new prompts establish tool-first behavior and cleaner TTS instructions
             if "prompts" not in old:
@@ -493,6 +496,11 @@ class ConfigMigrationService:
             if "inworld" in new:
                 old["inworld"]["tts_prompt"] = new["inworld"]["tts_prompt"]
                 self.log("- force updated inworld.tts_prompt (new audio markup format)")
+                if "audio_config" in old["inworld"]:
+                    del old["inworld"]["audio_config"]["pitch"]
+                    self.log(
+                        "- removed inworld.audio_config.pitch (no longer supported)"
+                    )
 
             return old
 

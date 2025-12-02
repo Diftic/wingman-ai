@@ -143,14 +143,13 @@ inworld:
   tts_endpoint: https://api.inworld.ai/tts/v1/voice
   model_id: inworld-tts-1
   voice_id: Hades
+  temperature: 0.8
+  output_streaming: true
   audio_config:
     audio_encoding: MP3
     bitrate: 128000
     sample_rate_hertz: 48000
-    pitch: 0.0
     speaking_rate: 1.0
-  temperature: 0.8
-  output_streaming: true
   use_tts_prompt: true
   tts_prompt: |
     You can use audio markups to add emotion and vocal effects to your speech. Use them sparingly for emphasis - not in every response.

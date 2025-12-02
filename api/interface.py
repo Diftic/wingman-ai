@@ -292,8 +292,6 @@ class InworldAudioConfig(BaseModel):
     """The bitrate to use for the audio encoding in bps. Default is 128k"""
     sample_rate_hertz: float
     """The synthesis sample rate (in hertz) for this audio. Accepts values within the range [8000, 48000]. Default is 48k"""
-    pitch: float
-    """Modifies the pitch of the synthesized speech. Accepts a double value in the range [-5.0, 5.0]. Default is 0"""
     speaking_rate: float
     """Speaking rate/speed, in the range [0.5, 1.5]. 1.0 is the normal native speed supported by the specific voice. The default is 1.0."""
 
@@ -308,6 +306,11 @@ class InworldConfig(BaseModel):
     temperature: float
     """Determines the degree of randomness when sampling audio tokens to generate the response. Accepts values between 0 and 2. Defaults to 0.8"""
     output_streaming: bool
+    apply_text_normalization: Optional[bool] = None
+    """When enabled, text normalization automatically expands and standardizes things like numbers, dates, times, and abbreviations before converting them to speech.
+    For example, Dr. Smith becomes Doctor Smith, and 3/10/25 is spoken as March tenth, twenty twenty-five.
+    Turning this off may reduce latency, but the speech output will read the text exactly as written.
+    Defaults to automatically deciding whether to apply text normalization."""
     use_tts_prompt: bool
     tts_prompt: str
 
