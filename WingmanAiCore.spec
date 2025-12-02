@@ -88,9 +88,94 @@ hiddenimports = [
     'urllib',
     'urllib.robotparser',
     'sqlite3',
+    'json',
+    'email.mime.text',
+    'email.mime.multipart',
 
     # Scientific computing
     'scipy._lib.array_api_compat.numpy.fft',
+    'scipy.special._cdflib',
+
+    # setuptools vendored dependencies (required by pkg_resources)
+    'backports',
+    'backports.tarfile',
+    'jaraco',
+    'jaraco.context',
+    'jaraco.text',
+    'jaraco.functools',
+
+    # MCP (Model Context Protocol) - new in 1.9
+    'mcp',
+    'mcp.client',
+    'mcp.client.stdio',
+    'mcp.client.sse',
+    'mcp.client.streamable_http',
+    'mcp.types',
+    'anyio',
+    'anyio._backends',
+    'anyio._backends._asyncio',
+    'httpx_sse',
+    'sse_starlette',
+    'pydantic_settings',
+    'typing_inspection',
+
+    # Google GenAI
+    'google.genai',
+    'google.genai.types',
+
+    # Hume TTS
+    'hume',
+    'hume.tts',
+
+    # Pedalboard audio effects
+    'pedalboard',
+
+    # Skills dependencies
+    # web_search
+    'duckduckgo_search',
+    'trafilatura',
+    'lxml',
+    'lxml_html_clean',
+    'courlan',
+    'htmldate',
+    'jusText',
+    'dateparser',
+    'babel',
+    'tld',
+    'primp',
+    # google_search
+    'googlesearch',
+    'bs4',
+    'beautifulsoup4',
+    # api_request / audio_device_changer
+    'aiohttp',
+    # vision_ai / auto_screenshot
+    'PIL',
+    'PIL.Image',
+    'mss',
+    'pygetwindow',
+    'pyrect',
+    # spotify
+    'spotipy',
+    # file_manager
+    'pdfminer',
+    'pdfminer.six',
+    'pdfminer.high_level',
+    'cryptography',
+    # control_windows
+    'clip_util',
+    # msfs2020_control
+    'SimConnect',
+    # ats_telemetry
+    'truck_telemetry',
+    'pyproj',
+
+    # FasterWhisper / STT dependencies
+    'numba',
+    'llvmlite',
+    'tokenizers',
+    'onnxruntime',
+    'huggingface_hub',
 
     # NVIDIA packages (ensure they're included even if DLL collection fails)
     'nvidia',
