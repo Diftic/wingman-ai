@@ -58,6 +58,7 @@ class SystemCore(TypedDict):
     version: str
     latest_version: str
     is_latest: bool
+    cuda_available: bool
 
 
 class SystemInfo(BaseModel):

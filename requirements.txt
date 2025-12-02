@@ -5,6 +5,14 @@ elevenlabslib==0.32.1
 fastapi==0.115.7
 faster_whisper==1.2.1
 google-genai==1.51.0
+
+# NVIDIA CUDA libraries for GPU-accelerated FasterWhisper (ctranslate2)
+# These are bundled with PyInstaller to provide zero-config GPU support
+# IMPORTANT: Must stay on CUDA 12.x (12.4-12.8 tested). CUDA 13.x is NOT compatible with ctranslate2.
+nvidia-cublas-cu12>=12.4.2,<13.0
+nvidia-cuda-runtime-cu12>=12.4.99,<13.0
+nvidia-cudnn-cu12>=9.1.0,<10.0
+nvidia-cuda-nvrtc-cu12>=12.4.99,<13.0
 httptools==0.6.4
 hume==0.13.4
 markdown==3.10
