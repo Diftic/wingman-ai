@@ -59,6 +59,7 @@ class SystemCore(TypedDict):
     latest_version: str
     is_latest: bool
     cuda_available: bool
+    gpu_name: Optional[str]
 
 
 class SystemInfo(BaseModel):

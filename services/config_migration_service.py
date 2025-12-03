@@ -472,20 +472,28 @@ class ConfigMigrationService:
         def migrate_settings(old: dict, new: dict) -> dict:
             # Auto-detect CUDA availability and set FasterWhisper device accordingly
             cuda_available = self.system_manager.is_cuda_available()
+            gpu_name = self.system_manager.get_gpu_name()
+            is_rtx_50xx = self.system_manager.is_rtx_50xx_series()
+
             device = "cuda" if cuda_available else "cpu"
+            # RTX 50xx (Blackwell) requires float16 compute type
+            compute_type = "float16" if is_rtx_50xx else "auto"
 
-            if "voice_activation" in old and "fasterwhisper" in old["voice_activation"]:
-                old["voice_activation"]["fasterwhisper"]["device"] = device
-            else:
-                # Ensure the structure exists
-                if "voice_activation" not in old:
-                    old["voice_activation"] = {}
-                if "fasterwhisper" not in old["voice_activation"]:
-                    old["voice_activation"]["fasterwhisper"] = {}
-                old["voice_activation"]["fasterwhisper"]["device"] = device
+            # Ensure the structure exists
+            if "voice_activation" not in old:
+                old["voice_activation"] = {}
+            if "fasterwhisper" not in old["voice_activation"]:
+                old["voice_activation"]["fasterwhisper"] = {}
 
+            old["voice_activation"]["fasterwhisper"]["device"] = device
+            old["voice_activation"]["fasterwhisper"]["compute_type"] = compute_type
+
+            self.log(f"- detected GPU: {gpu_name or 'None'}")
             self.log(
                 f"- set voice_activation.fasterwhisper.device to '{device}' (CUDA {'available' if cuda_available else 'not available'})"
+            )
+            self.log(
+                f"- set voice_activation.fasterwhisper.compute_type to '{compute_type}'{' (RTX 50xx Blackwell architecture)' if is_rtx_50xx else ''}"
             )
 
             return old
