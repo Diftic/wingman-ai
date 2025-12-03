@@ -190,6 +190,10 @@ class Wingman:
 
     async def unload(self):
         """This method is called when the Wingman is unloaded by Tower. You can override it if you need to clean up resources."""
+        # Unsubscribe from secret events to prevent duplicate handlers
+        self.secret_keeper.secret_events.unsubscribe(
+            "secrets_saved", self.handle_secret_saved
+        )
         await self.unload_skills()
 
     async def unload_skills(self):
