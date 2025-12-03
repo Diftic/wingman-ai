@@ -68,7 +68,7 @@ class WingmanCore(WebSocketUser):
         self.app_root_path = app_root_path
         self.system_manager = system_manager
         self.is_client_logged_in: bool = False
-        self.is_client_pro: bool = False
+        self.client_plan: str = "Free"
         self.client_account_name: str = ""
 
         self.router = APIRouter()

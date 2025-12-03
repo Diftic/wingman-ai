@@ -52,7 +52,7 @@ class StopRecordingCommand(WebSocketCommandModel):
 
 class ClientLoggedInCommand(WebSocketCommandModel):
     command: Literal["client_logged_in"] = "client_logged_in"
-    is_pro: bool
+    plan: str
     account_name: str
 
 

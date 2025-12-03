@@ -312,11 +312,11 @@ class CommandHandler:
             return
 
         self.core.is_client_logged_in = True
-        self.core.is_client_pro = command.is_pro
+        self.core.client_plan = command.plan
         self.core.client_account_name = command.account_name
 
         self.printr.print(
-            f"User {command.account_name} logged in ({'Pro' if command.is_pro else 'Free'})",
+            f"User {command.account_name} logged in ({command.plan})",
             toast=ToastType.NORMAL,
             source=LogSource.SYSTEM,
             source_name=self.source_name,
@@ -333,7 +333,7 @@ class CommandHandler:
         self, command: ClientLoggedOutCommand, websocket: WebSocket
     ):
         self.core.is_client_logged_in = False
-        self.core.is_client_pro = False
+        self.core.client_plan = "Free"
         self.core.client_account_name = ""
 
         self.printr.print(

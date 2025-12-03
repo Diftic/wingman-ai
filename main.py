@@ -411,9 +411,9 @@ async def ping():
     return "Ok" if core.is_started else "Starting"
 
 
-@app.get("/client/is-pro", tags=["main"], response_model=bool)
-async def is_client_pro():
-    return core.is_client_pro
+@app.get("/client/plan", tags=["main"], response_model=str)
+async def get_client_plan():
+    return core.client_plan
 
 
 @app.get("/client/account-name", tags=["main"], response_model=str)
