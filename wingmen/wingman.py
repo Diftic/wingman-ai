@@ -337,6 +337,142 @@ class Wingman:
 
         You can override it if you need to react on data of this skill."""
 
+    async def unprepare_skill(self, skill: Skill):
+        """Remove a skill's registration. Called when a skill is disabled.
+
+        Override in subclass to clean up skill-specific registrations."""
+        pass
+
+    async def enable_skill(self, skill_name: str) -> tuple[bool, str]:
+        """Enable a single skill without reinitializing all skills.
+
+        Args:
+            skill_name: The display name of the skill to enable
+
+        Returns:
+            (success, message) tuple
+        """
+        import sys
+
+        current_platform = sys.platform
+        platform_map = {"win32": "windows", "darwin": "darwin", "linux": "linux"}
+        normalized_platform = platform_map.get(current_platform, current_platform)
+
+        # Check if skill is already enabled
+        for existing_skill in self.skills:
+            if existing_skill.config.name == skill_name:
+                return True, f"Skill '{skill_name}' is already enabled."
+
+        # Find the skill config
+        available_skills = ModuleManager.read_available_skill_configs()
+
+        # Build user config lookup
+        user_skill_configs: dict[str, "SkillConfig"] = {}
+        if self.config.skills:
+            for skill_config in self.config.skills:
+                user_skill_configs[skill_config.name] = skill_config
+
+        for skill_folder_name, skill_config_path in available_skills:
+            try:
+                skill_config_dict = ModuleManager.read_config(skill_config_path)
+                if not skill_config_dict:
+                    continue
+
+                from api.interface import SkillConfig
+
+                # Apply user overrides
+                if skill_folder_name in user_skill_configs:
+                    user_config = user_skill_configs[skill_folder_name]
+                    if user_config.custom_properties:
+                        skill_config_dict["custom_properties"] = [
+                            prop.model_dump() for prop in user_config.custom_properties
+                        ]
+                    if user_config.prompt:
+                        skill_config_dict["prompt"] = user_config.prompt
+
+                skill_config = SkillConfig(**skill_config_dict)
+
+                if skill_config.name != skill_name:
+                    continue
+
+                # Check platform compatibility
+                if skill_config.platforms:
+                    if normalized_platform not in skill_config.platforms:
+                        return (
+                            False,
+                            f"Skill '{skill_name}' is not supported on {normalized_platform}.",
+                        )
+
+                # Load and register the skill
+                skill = ModuleManager.load_skill(
+                    config=skill_config,
+                    settings=self.settings,
+                    wingman=self,
+                )
+                if skill:
+                    skill.threaded_execution = self.threaded_execution
+                    self.skills.append(skill)
+                    await self.prepare_skill(skill)
+
+                    printr.print(
+                        f"Skill '{skill_name}' enabled.",
+                        color=LogType.POSITIVE,
+                        server_only=True,
+                    )
+                    return True, f"Skill '{skill_name}' enabled successfully."
+
+            except Exception as e:
+                error_msg = f"Error enabling skill '{skill_name}': {str(e)}"
+                printr.print(error_msg, color=LogType.ERROR)
+                printr.print(
+                    traceback.format_exc(), color=LogType.ERROR, server_only=True
+                )
+                return False, error_msg
+
+        return False, f"Skill '{skill_name}' not found."
+
+    async def disable_skill(self, skill_name: str) -> tuple[bool, str]:
+        """Disable a single skill without reinitializing all skills.
+
+        Args:
+            skill_name: The display name of the skill to disable
+
+        Returns:
+            (success, message) tuple
+        """
+        # Find the skill in our list
+        skill_to_remove = None
+        for skill in self.skills:
+            if skill.config.name == skill_name:
+                skill_to_remove = skill
+                break
+
+        if not skill_to_remove:
+            return True, f"Skill '{skill_name}' is already disabled."
+
+        try:
+            # Unload the skill (cleanup resources, unsubscribe events)
+            await skill_to_remove.unload()
+
+            # Remove from skill list
+            self.skills.remove(skill_to_remove)
+
+            # Remove skill-specific registrations (tools, registry, etc.)
+            await self.unprepare_skill(skill_to_remove)
+
+            printr.print(
+                f"Skill '{skill_name}' disabled.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return True, f"Skill '{skill_name}' disabled successfully."
+
+        except Exception as e:
+            error_msg = f"Error disabling skill '{skill_name}': {str(e)}"
+            printr.print(error_msg, color=LogType.ERROR)
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+            return False, error_msg
+
     def reset_conversation_history(self):
         """This function is called when the user triggers the ResetConversationHistory command.
         It's a global command that should be implemented by every Wingman that keeps a message history.
@@ -707,18 +843,33 @@ class Wingman:
     async def update_config(
         self, config: WingmanConfig, validate=False, update_skills=False
     ) -> bool:
-        """Update the config of the Wingman. This method should always be called if the config of the Wingman has changed."""
+        """Update the config of the Wingman.
+
+        This method should always be called if the config of the Wingman has changed.
+
+        Args:
+            config: The new wingman configuration
+            validate: If True, validate the config and rollback on error
+            update_skills: DEPRECATED - No longer used. Skill toggling now uses
+                incremental enable_skill()/disable_skill() methods instead of
+                full reinitialization. This parameter is kept for backwards
+                compatibility but has no effect.
+
+        Returns:
+            True if config was updated successfully, False otherwise
+        """
         try:
             if validate:
                 old_config = deepcopy(self.config)
 
             self.config = config
 
-            if update_skills:
-                await self.init_skills()
-                # Also reload MCPs if the wingman supports them
-                if hasattr(self, "init_mcps"):
-                    await self.init_mcps()
+            # DEPRECATED: update_skills is no longer used
+            # Skill toggling now uses incremental enable_skill()/disable_skill()
+            # if update_skills:
+            #     await self.init_skills()
+            #     if hasattr(self, "init_mcps"):
+            #         await self.init_mcps()
 
             if validate:
                 errors = await self.validate()

@@ -235,11 +235,13 @@ class RadioChatter(Skill):
         return errors
 
     async def prepare(self) -> None:
+        await super().prepare()
         self.loaded = True
         if self.auto_start:
             self.threaded_execution(self._init_chatter)
 
     async def unload(self) -> None:
+        await super().unload()
         self.loaded = False
         self.radio_status = False
 

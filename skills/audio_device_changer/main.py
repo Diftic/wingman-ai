@@ -87,6 +87,7 @@ class AudioDeviceChanger(Skill):
         await self.reset_audio_device()
 
     async def unload(self) -> None:
+        await super().unload()
         await self.reset_audio_device()
 
         self.wingman.audio_player.playback_events.unsubscribe(

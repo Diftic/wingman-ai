@@ -476,12 +476,14 @@ class ATSTelemetry(Skill):
 
     # Autostart dispatch mode if option turned on in config
     async def prepare(self) -> None:
+        await super().prepare()
         self.loaded = True
         if self.autostart_dispatch_mode:
             self.threaded_execution(self.autostart_dispatcher_mode)
 
     # Unload telemetry module and stop any ongoing loop when config / program unloads
     async def unload(self) -> None:
+        await super().unload()
         self.loaded = False
         await self.stop_telemetry_loop()
         truck_telemetry.deinit()

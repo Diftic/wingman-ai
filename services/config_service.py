@@ -274,7 +274,11 @@ class ConfigService:
         skill_name: str,
         enabled: bool,
     ):
-        """Enable or disable a skill for a specific wingman."""
+        """Enable or disable a skill for a specific wingman.
+
+        Uses incremental skill toggle to avoid reinitializing all skills,
+        which improves performance and prevents resource accumulation.
+        """
         try:
             # Load the wingman config
             wingman_config = self.config_manager.load_wingman_config(
@@ -297,15 +301,31 @@ class ConfigService:
                 if skill_name not in wingman_config.disabled_skills:
                     wingman_config.disabled_skills.append(skill_name)
 
-            # Save the config and update the wingman
+            # Save the config WITHOUT reinitializing all skills
             await self.save_wingman_config(
                 config_dir=config_dir,
                 wingman_file=wingman_file,
                 wingman_config=wingman_config,
-                silent=False,
+                silent=True,  # We'll show our own message
                 validate=False,
-                update_skills=True,  # Reload skills after change
+                update_skills=False,  # Don't reload all skills
             )
+
+            # Incrementally toggle just this skill on the active wingman
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_file.name)
+                if self.tower
+                else None
+            )
+            if wingman:
+                if enabled:
+                    success, message = await wingman.enable_skill(skill_name)
+                else:
+                    success, message = await wingman.disable_skill(skill_name)
+
+                if not success:
+                    self.printr.toast_error(message)
+                    return
 
             action = "enabled" if enabled else "disabled"
             self.printr.print(
@@ -682,6 +702,19 @@ class ConfigService:
         validate: bool = False,
         update_skills: bool = False,
     ):
+        """Save wingman configuration and optionally update the active wingman.
+
+        Args:
+            config_dir: The config directory info
+            wingman_file: The wingman file info
+            wingman_config: The wingman configuration to save
+            silent: If True, don't show toast notification
+            validate: If True, validate the config before applying
+            update_skills: DEPRECATED - No longer used. Skill toggling now uses
+                incremental enable_skill()/disable_skill() methods instead of
+                full reinitialization. This parameter is kept for backwards
+                compatibility but has no effect.
+        """
         # Check if tower is available
         if not self.tower:
             self.printr.toast_error(

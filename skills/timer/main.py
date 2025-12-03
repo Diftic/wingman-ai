@@ -131,10 +131,12 @@ class Timer(Skill):
         self.active = False
 
     async def prepare(self) -> None:
+        await super().prepare()
         self.active = True
         self.threaded_execution(self.start_timer_worker)
 
     async def unload(self) -> None:
+        await super().unload()
         self.active = False
 
     async def get_prompt(self) -> str | None:

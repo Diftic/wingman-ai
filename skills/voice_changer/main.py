@@ -118,6 +118,7 @@ class VoiceChanger(Skill):
         return errors
 
     async def prepare(self) -> None:
+        await super().prepare()
         self.active = True
 
         # prepare first personality
@@ -125,6 +126,7 @@ class VoiceChanger(Skill):
             self.threaded_execution(self._generate_new_context)
 
     async def unload(self) -> None:
+        await super().unload()
         self.active = False
 
     async def on_add_user_message(self, message: str):

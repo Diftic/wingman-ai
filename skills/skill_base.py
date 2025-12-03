@@ -286,7 +286,7 @@ class Skill:
         self.wingman = wingman
 
         self.secret_keeper = SecretKeeper()
-        self.secret_keeper.secret_events.subscribe("secrets_saved", self.secret_changed)
+        # Note: secret_events subscription moved to prepare() to avoid listener accumulation
         self.name = self.__class__.__name__
         self.printr = Printr()
         self.execution_start: None | float = None
@@ -299,6 +299,8 @@ class Skill:
         """Cached validation errors if validation failed."""
         self.is_prepared: bool = False
         """Whether prepare() has been called."""
+        self.is_unloaded: bool = False
+        """Whether unload() has been called. Check this in __del__ before calling unload()."""
 
         # Collect @tool decorated methods
         self._decorated_tools: dict[str, ToolDefinition] = {}
@@ -385,14 +387,38 @@ class Skill:
         return True, f"Skill '{self.config.display_name}' activated successfully."
 
     async def unload(self) -> None:
-        """Unload the skill. Use this hook to clear background tasks, etc."""
-        self.secret_keeper.secret_events.unsubscribe(
-            "secrets_saved", self.secret_changed
-        )
+        """Unload the skill. Use this hook to clear background tasks, etc.
+
+        This is always called when a skill is removed, regardless of whether
+        prepare() was ever called. Safe to call multiple times.
+
+        Custom skills with __del__ should check self.is_unloaded before calling unload():
+            def __del__(self):
+                if not self.is_unloaded:
+                    # handle cleanup synchronously, don't use asyncio.run()
+        """
+        if self.is_unloaded:
+            return  # Already unloaded, skip
+
+        self.is_unloaded = True
+
+        # Safely unsubscribe - the handler may not be subscribed if prepare() was never called
+        try:
+            self.secret_keeper.secret_events.unsubscribe(
+                "secrets_saved", self.secret_changed
+            )
+        except ValueError:
+            # Handler wasn't subscribed, that's fine
+            pass
 
     async def prepare(self) -> None:
-        """Prepare the skill. Use this hook to initialize background tasks, etc."""
-        pass
+        """Prepare the skill. Use this hook to initialize background tasks, etc.
+
+        Called once when the skill is first activated (lazy initialization).
+        Subscribe to events here, not in __init__.
+        """
+        # Subscribe to secret changes - will be unsubscribed in unload()
+        self.secret_keeper.secret_events.subscribe("secrets_saved", self.secret_changed)
 
     def get_tools(self) -> list[tuple[str, dict]]:
         """

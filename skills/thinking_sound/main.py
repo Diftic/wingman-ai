@@ -3,6 +3,7 @@ from api.enums import LogType
 from api.interface import WingmanInitializationError, AudioFileConfig
 from skills.skill_base import Skill
 
+
 class ThinkingSound(Skill):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -22,10 +23,12 @@ class ThinkingSound(Skill):
         return errors
 
     async def unload(self) -> None:
+        await super().unload()
         await self.stop_playback()
         self.active = False
 
     async def prepare(self) -> None:
+        await super().prepare()
         self.active = True
 
     async def on_playback_started(self, wingman_name):
@@ -71,7 +74,12 @@ class ThinkingSound(Skill):
 
     async def auto_stop_playback(self):
         # Wait for main playback to start
-        while not ( self.wingman.audio_player.stream or self.wingman.audio_player.raw_stream ) and self.active:
+        while (
+            not (
+                self.wingman.audio_player.stream or self.wingman.audio_player.raw_stream
+            )
+            and self.active
+        ):
             await asyncio.sleep(0.1)
 
         if self.wingman.settings.debug_mode:
@@ -81,5 +89,7 @@ class ThinkingSound(Skill):
                 server_only=False,
             )
 
-        await self.wingman.audio_library.stop_playback(self.audio_config, self.stop_duration)
+        await self.wingman.audio_library.stop_playback(
+            self.audio_config, self.stop_duration
+        )
         self.playing = False

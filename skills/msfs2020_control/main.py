@@ -332,11 +332,13 @@ class Msfs2020Control(Skill):
 
     async def prepare(self) -> None:
         """Load the skill by trying to connect to the sim"""
+        await super().prepare()
         self.loaded = True
         self.threaded_execution(self.start_simconnect)
 
     async def unload(self) -> None:
         """Unload the skill."""
+        await super().unload()
         await self.stop_data_monitoring_loop()
         self.loaded = False
         if self.sm:

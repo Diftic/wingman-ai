@@ -335,6 +335,28 @@ class OpenAiWingman(Wingman):
         # init skill methods
         skill.llm_call = self.actual_llm_call
 
+    async def unprepare_skill(self, skill: Skill):
+        """Remove a skill's tools and registrations when it's disabled."""
+        try:
+            # Remove tool mappings
+            for tool_name, _ in skill.get_tools():
+                self.tool_skills.pop(tool_name, None)
+                # Remove from skill_tools list
+                self.skill_tools = [
+                    t
+                    for t in self.skill_tools
+                    if t.get("function", {}).get("name") != tool_name
+                ]
+
+            # Unregister from the progressive disclosure registry
+            self.skill_registry.unregister_skill(skill.name)
+        except Exception as e:
+            await printr.print_async(
+                f"Error while unpreparing skill '{skill.name}': {str(e)}",
+                color=LogType.ERROR,
+            )
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+
     async def init_mcps(self) -> list[WingmanInitializationError]:
         """
         Initialize MCP (Model Context Protocol) server connections.
