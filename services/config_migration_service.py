@@ -214,10 +214,22 @@ class ConfigMigrationService:
 
             latest_dir = path.join(self.users_dir, self.latest_version)
 
-            # Remove existing latest version directory if it exists
+            # Remove existing latest version directory contents, but preserve 'logs' directory
+            # because the log file may be locked by the logging system
             if path.exists(latest_dir):
-                shutil.rmtree(latest_dir)
-                self.log(f"Removed existing {self.latest_version} directory")
+                for item in os.listdir(latest_dir):
+                    item_path = path.join(latest_dir, item)
+                    if item == "logs":
+                        # Skip logs directory - it may contain open log files
+                        self.log("Preserving logs directory during reset")
+                        continue
+                    if path.isdir(item_path):
+                        shutil.rmtree(item_path)
+                    else:
+                        os.remove(item_path)
+                self.log(
+                    f"Cleared existing {self.latest_version} directory (preserved logs)"
+                )
 
             # Create the latest version directory
             os.makedirs(latest_dir, exist_ok=True)
