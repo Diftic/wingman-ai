@@ -11,6 +11,7 @@ from api.enums import LogSource, LogType, enum_representer
 from api.interface import (
     Config,
     ConfigDirInfo,
+    McpConfig,
     NestedConfig,
     NewWingmanTemplate,
     SettingsConfig,
@@ -26,6 +27,7 @@ SKILLS_DIR = "skills"
 
 SETTINGS_CONFIG_FILE = "settings.yaml"
 DEFAULT_CONFIG_FILE = "defaults.yaml"
+MCP_CONFIG_FILE = "mcp.yaml"
 SECRETS_FILE = "secrets.yaml"
 DEFAULT_WINGMAN_AVATAR = "default-wingman-avatar.png"
 DEFAULT_SKILLS_CONFIG = "default_config.yaml"
@@ -47,10 +49,13 @@ class ConfigManager:
 
         self.settings_config_path = path.join(self.config_dir, SETTINGS_CONFIG_FILE)
         self.default_config_path = path.join(self.config_dir, DEFAULT_CONFIG_FILE)
+        self.mcp_config_path = path.join(self.config_dir, MCP_CONFIG_FILE)
         self.create_settings_config()
         self.settings_config = self.load_settings_config()
         # Load defaults silently - migration may need to run first to fix validation errors
         self.default_config = self.load_defaults_config(silent_on_error=True)
+        # Load MCP config silently - migration may need to run first
+        self.mcp_config = self.load_mcp_config(silent_on_error=True)
 
     def find_default_config(self) -> ConfigDirInfo:
         """Find the (first) default config (name starts with "_") found or another normal config as fallback."""
@@ -285,6 +290,15 @@ class ConfigManager:
 
     def get_new_wingman_template(self):
         parsed_config = self.read_default_config()
+
+        # Get disabled_mcps from servers that are disabled by default in mcp.yaml
+        disabled_mcps = []
+        mcp_config = self.mcp_config
+        if mcp_config and mcp_config.servers:
+            disabled_mcps = [
+                server.name for server in mcp_config.servers if not server.enabled
+            ]
+
         wingman_config = {
             "name": "",
             "description": "",
@@ -293,6 +307,7 @@ class ConfigManager:
             "commands": [],
             "skills": [],
             "prompts": {"backstory": ""},
+            "disabled_mcps": disabled_mcps if disabled_mcps else None,
         }
         validated_config = self.merge_configs(parsed_config, wingman_config)
         return NewWingmanTemplate(
@@ -787,6 +802,39 @@ class ConfigManager:
     def save_defaults_config(self):
         """Write Defaults config to file"""
         return self.write_config(self.default_config_path, self.default_config)
+
+    def load_mcp_config(self, silent_on_error: bool = False) -> Optional[McpConfig]:
+        """Load and validate MCP config from mcp.yaml"""
+        if not path.exists(self.mcp_config_path):
+            if not silent_on_error:
+                self.printr.print(
+                    f"MCP config not found at {self.mcp_config_path}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+            return McpConfig(servers=[])
+
+        parsed = self.read_config(self.mcp_config_path)
+        if parsed:
+            try:
+                validated = McpConfig(**parsed)
+                return validated
+            except ValidationError as e:
+                if not silent_on_error:
+                    self.printr.toast_error(
+                        f"Invalid MCP config '{self.mcp_config_path}':\n{str(e)}"
+                    )
+        return McpConfig(servers=[])
+
+    def save_mcp_config(self):
+        """Write MCP config to file"""
+        return self.write_config(self.mcp_config_path, self.mcp_config)
+
+    def read_mcp_config(self) -> dict:
+        """Read raw MCP config as dict (for migration)"""
+        if path.exists(self.mcp_config_path):
+            return self.read_config(self.mcp_config_path) or {}
+        return {}
 
     # Config merging:
 

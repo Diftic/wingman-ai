@@ -796,7 +796,8 @@ class McpServerConfig(BaseModel):
 
     # Common settings
     enabled: bool = True
-    """Whether this MCP server is enabled."""
+    """Default enabled state for this MCP server. If False, the server will be added to disabled_mcps
+    for new wingmen by default. Users can still enable it by removing from disabled_mcps."""
 
     # Optional metadata
     version: Optional[str] = None
@@ -855,6 +856,17 @@ class McpConnectResult(BaseModel):
 
     error: Optional[str] = None
     """Error message if connection failed."""
+
+
+class McpConfig(BaseModel):
+    """Central MCP configuration loaded from mcp.yaml.
+
+    This defines all available MCP servers that any Wingman can use.
+    Individual Wingmen can disable specific servers using their disabled_mcps list.
+    """
+
+    servers: list[McpServerConfig] = []
+    """List of all available MCP server configurations."""
 
 
 class NestedConfig(BaseModel):
@@ -941,10 +953,12 @@ class WingmanConfig(NestedConfig):
     disabled_mcps: Optional[list[str]] = None
     """List of MCP server names to disable for this wingman. MCP servers not listed are enabled by default.
     This is a blacklist - new MCP servers are automatically available unless explicitly disabled.
-    Example: ["docker"] to disable Docker MCP for a specific wingman."""
+    Example: ["wingman_websearch"] to disable Web Search MCP for a specific wingman."""
 
     mcp: Optional[list[McpServerConfig]] = None
-    """MCP (Model Context Protocol) server configurations. Each server provides additional tools to the wingman."""
+    """DEPRECATED: MCP servers are now defined centrally in mcp.yaml.
+    This field is kept for backward compatibility during migration.
+    Use disabled_mcps to control which MCP servers are enabled per wingman."""
 
     custom_class: Optional[CustomClassConfig] = None
     """If you want to use a custom Wingman (Python) class, you can specify it here."""

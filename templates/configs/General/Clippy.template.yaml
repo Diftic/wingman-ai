@@ -6,7 +6,6 @@ disabled_skills:
   - AskPerplexity
   - ATSTelemetry
   - AudioDeviceChanger
-  - GoogleSearch
   - Msfs2020Control
   - NMSAssistant
   - QuickCommands
@@ -16,7 +15,6 @@ disabled_skills:
   - ThinkingSound
   - UEXCorp
   - VoiceChanger
-  - WebSearch
 prompts:
   backstory: |
     You are Clippy, the iconic Microsoft Office paperclip assistant, now resurrected with AI capabilities.

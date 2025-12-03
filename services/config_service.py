@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 from fastapi import APIRouter
 from api.enums import LogType
@@ -362,7 +363,9 @@ class ConfigService:
                 config_dir=config_dir, wingman_file=wingman_file
             )
 
-            mcp_configs = wingman_config.mcp or []
+            # Get MCP servers from central mcp.yaml
+            mcp_config = self.config_manager.mcp_config
+            mcp_servers = mcp_config.servers if mcp_config else []
             disabled_mcps = wingman_config.disabled_mcps or []
 
             # Get connection state and tools from the active wingman if available
@@ -373,26 +376,35 @@ class ConfigService:
             if wingman and hasattr(wingman, "mcp_registry") and wingman.mcp_registry:
                 registry = wingman.mcp_registry
 
+                # Brief wait for MCP connections to complete if wingman just initialized
+                # MCPs connect asynchronously, so we give them a moment to finish
+                if registry.server_count == 0:
+                    await asyncio.sleep(0.5)
+
             # Build response with enabled/connected state, tools, and errors
             result = []
-            for mcp_config in mcp_configs:
-                is_enabled = mcp_config.name not in disabled_mcps
+            for mcp_server in mcp_servers:
+                # Determine if enabled: if in disabled_mcps blacklist, it's disabled
+                # Otherwise it's enabled (the server's default enabled state only affects
+                # initial wingman creation, not runtime state)
+                is_enabled = mcp_server.name not in disabled_mcps
+
                 is_connected = False
                 tools = None
                 error = None
 
                 if registry:
                     is_connected = (
-                        mcp_config.name in registry.get_connected_server_names()
+                        mcp_server.name in registry.get_connected_server_names()
                     )
                     if is_connected:
-                        tools = registry.get_server_tools(mcp_config.name)
+                        tools = registry.get_server_tools(mcp_server.name)
                     else:
-                        error = registry.get_server_error(mcp_config.name)
+                        error = registry.get_server_error(mcp_server.name)
 
                 result.append(
                     McpServerState(
-                        config=mcp_config,
+                        config=mcp_server,
                         is_enabled=is_enabled,
                         is_connected=is_connected,
                         tools=tools,
@@ -493,29 +505,30 @@ class ConfigService:
                     error="MCP registry not available on this wingman.",
                 )
 
-            # Find the MCP config
-            mcp_config = None
-            if wingman.config.mcp:
-                for cfg in wingman.config.mcp:
+            # Find the MCP config from central mcp.yaml
+            mcp_config = self.config_manager.mcp_config
+            server_config = None
+            if mcp_config and mcp_config.servers:
+                for cfg in mcp_config.servers:
                     if cfg.name == mcp_name:
-                        mcp_config = cfg
+                        server_config = cfg
                         break
 
-            if not mcp_config:
+            if not server_config:
                 return McpConnectResult(
                     success=False,
                     server_name=mcp_name,
-                    error=f"MCP server '{mcp_name}' not found in wingman config.",
+                    error=f"MCP server '{mcp_name}' not found in mcp.yaml.",
                 )
 
             # Build headers with secrets (same logic as init_mcps)
             headers = {}
-            if mcp_config.headers:
-                headers.update(mcp_config.headers)
+            if server_config.headers:
+                headers.update(server_config.headers)
 
             # Check for API key in secrets
             if hasattr(wingman, "secret_keeper"):
-                secret_key = f"mcp_{mcp_config.name}"
+                secret_key = f"mcp_{server_config.name}"
                 api_key = await wingman.secret_keeper.retrieve(
                     requester=wingman.name,
                     key=secret_key,
@@ -531,15 +544,17 @@ class ConfigService:
             # Try to connect
             import asyncio
 
-            default_timeout = 60.0 if mcp_config.type.value == "stdio" else 30.0
+            default_timeout = 60.0 if server_config.type.value == "stdio" else 30.0
             timeout = (
-                float(mcp_config.timeout) if mcp_config.timeout else default_timeout
+                float(server_config.timeout)
+                if server_config.timeout
+                else default_timeout
             )
 
             try:
                 connection = await asyncio.wait_for(
                     wingman.mcp_registry.register_server(
-                        config=mcp_config,
+                        config=server_config,
                         headers=headers if headers else None,
                         auto_activate=True,
                     ),
@@ -550,7 +565,8 @@ class ConfigService:
                     tools = wingman.mcp_registry.get_server_tools(mcp_name)
                     tool_count = len(tools) if tools else 0
                     self.printr.print(
-                        f"🌐 MCP '{mcp_config.display_name}' connected with {tool_count} tools.",
+                        f"🌐 MCP '{server_config.display_name}' connected with {tool_count} tools.",
+                        source_name=wingman_file.name,
                         server_only=True,
                     )
                     return McpConnectResult(

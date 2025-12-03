@@ -96,3 +96,11 @@ class ActionsRecordedCommand(WebSocketCommandModel):
 class VoiceActivationMutedCommand(WebSocketCommandModel):
     command: Literal["voice_activation_muted"] = "voice_activation_muted"
     muted: bool
+
+
+class McpStateChangedCommand(WebSocketCommandModel):
+    """Sent when MCP server connection state changes (connected/disconnected)."""
+
+    command: Literal["mcp_state_changed"] = "mcp_state_changed"
+    wingman_name: str
+    """The wingman whose MCP state changed."""

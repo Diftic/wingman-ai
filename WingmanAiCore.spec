@@ -131,22 +131,6 @@ hiddenimports = [
     'pedalboard',
 
     # Skills dependencies
-    # web_search
-    'duckduckgo_search',
-    'trafilatura',
-    'lxml',
-    'lxml_html_clean',
-    'courlan',
-    'htmldate',
-    'jusText',
-    'dateparser',
-    'babel',
-    'tld',
-    'primp',
-    # google_search
-    'googlesearch',
-    'bs4',
-    'beautifulsoup4',
     # api_request / audio_device_changer
     'aiohttp',
     # vision_ai / auto_screenshot

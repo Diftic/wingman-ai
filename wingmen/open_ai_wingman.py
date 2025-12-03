@@ -43,6 +43,7 @@ from providers.inworld import Inworld
 from providers.open_ai import OpenAi, OpenAiAzure
 from providers.x_ai import XAi
 from providers.wingman_pro import WingmanPro
+from api.commands import McpStateChangedCommand
 from services.benchmark import Benchmark
 from services.markdown import cleanup_text
 from services.printr import Printr
@@ -112,8 +113,21 @@ class OpenAiWingman(Wingman):
 
         # MCP (Model Context Protocol) support
         # Allows connecting to external MCP servers that provide additional tools
-        self.mcp_client = McpClient()
-        self.mcp_registry = McpRegistry(self.mcp_client)
+        self.mcp_client = McpClient(wingman_name=self.name)
+        self.mcp_registry = McpRegistry(
+            self.mcp_client,
+            wingman_name=self.name,
+            on_state_changed=self._broadcast_mcp_state_changed,
+        )
+
+    def _broadcast_mcp_state_changed(self):
+        """Broadcast MCP state change to UI via WebSocket."""
+        if printr._connection_manager:
+            printr.ensure_async(
+                printr._connection_manager.broadcast(
+                    McpStateChangedCommand(wingman_name=self.name)
+                )
+            )
 
     async def validate(self):
         errors = await super().validate()
@@ -361,7 +375,7 @@ class OpenAiWingman(Wingman):
         """
         Initialize MCP (Model Context Protocol) server connections.
 
-        Connects to MCP servers defined in config.mcp, skipping any in disabled_mcps.
+        Loads MCP servers from central mcp.yaml config, skipping any in wingman's disabled_mcps.
         MCP servers provide external tools similar to skills.
 
         Returns:
@@ -381,12 +395,13 @@ class OpenAiWingman(Wingman):
         # Disconnect existing MCP servers
         await self.unload_mcps()
 
-        # Get MCP configs
-        mcp_configs = self.config.mcp or []
+        # Get MCP configs from central mcp.yaml
+        central_mcp_config = self.tower.config_manager.mcp_config
+        mcp_configs = central_mcp_config.servers if central_mcp_config else []
         if not mcp_configs:
             return errors
 
-        # Get disabled MCPs list (blacklist)
+        # Get disabled MCPs list (blacklist) from wingman config
         disabled_mcps = self.config.disabled_mcps or []
 
         connected_count = 0

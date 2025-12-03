@@ -75,7 +75,7 @@ class McpClient:
     - SSE: For Server-Sent Events based servers
 
     Usage:
-        client = McpClient()
+        client = McpClient(wingman_name="MyWingman")
         connection = await client.connect(config)
         if connection.is_connected:
             tools = connection.tools
@@ -83,8 +83,9 @@ class McpClient:
         await client.disconnect(connection)
     """
 
-    def __init__(self):
+    def __init__(self, wingman_name: str = ""):
         self._connections: dict[str, McpConnection] = {}
+        self._wingman_name = wingman_name
 
     @property
     def is_available(self) -> bool:
@@ -150,18 +151,24 @@ class McpClient:
 
             if connection.is_connected:
                 self._connections[config.name] = connection
+                prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
                 printr.print(
-                    f"MCP connected: {config.display_name} ({len(connection.tools)} tools)",
+                    f"{prefix}MCP connected: {config.display_name} ({len(connection.tools)} tools)",
                     color=LogType.MCP,
+                    source_name=self._wingman_name if self._wingman_name else None,
                     server_only=True,
                 )
+                # Note: State change notification is handled by McpRegistry after
+                # it has updated its own state
 
         except Exception as e:
             connection.error = str(e)
             connection.is_connected = False
+            prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
             printr.print(
-                f"MCP connection failed ({config.display_name}): {e}",
+                f"{prefix}MCP connection failed ({config.display_name}): {e}",
                 color=LogType.ERROR,
+                source_name=self._wingman_name if self._wingman_name else None,
                 server_only=True,
             )
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
@@ -361,11 +368,14 @@ class McpClient:
         await self._cleanup_connection(connection)
 
         if connection.config:
+            prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
             printr.print(
-                f"MCP disconnected: {connection.config.display_name}",
+                f"{prefix}MCP disconnected: {connection.config.display_name}",
                 color=LogType.MCP,
+                source_name=self._wingman_name if self._wingman_name else None,
                 server_only=True,
             )
+            # Note: State change notification is handled by McpRegistry
 
     async def disconnect_all(self) -> None:
         """Disconnect from all MCP servers."""

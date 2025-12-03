@@ -1,0 +1,33 @@
+# MCP (Model Context Protocol) Server Configuration
+# This file defines all available MCP servers that can be used by any Wingman.
+# Individual Wingmen can disable specific servers using their disabled_mcps list.
+
+servers:
+  - name: wingman_date_time
+    display_name: Wingman Date Time
+    description: Retrieves the current date and time and converts dates to different timezones.
+    type: http
+    url: https://wingman-ai-mcp-servers.wingman-ai.workers.dev/time/mcp
+    enabled: true
+    aliases:
+      - date
+      - time
+      - today
+      - current date
+
+  - name: wingman_websearch
+    display_name: Wingman Web Search
+    description: Search the internet with Brave or Tavily and fetches web pages.
+    type: http
+    url: https://wingman-ai-mcp-servers.wingman-ai.workers.dev/mcp
+    enabled: false
+    aliases:
+      - Brave
+      - Tavily
+      - internet
+      - web
+      - search
+      - news
+      - information
+      - fetch
+      - read website

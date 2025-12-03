@@ -292,6 +292,15 @@ class ConfigMigrationService:
         if path.exists(legacy_template_skills):
             builtin_skills.update(os.listdir(legacy_template_skills))
 
+        # Skills that were removed in 1.9.0 (converted to MCP servers)
+        # These should NOT be detected as custom skills during migration
+        removed_builtin_skills = {
+            "google_search",
+            "web_search",
+            "time_and_date_retriever",
+        }
+        builtin_skills.update(removed_builtin_skills)
+
         custom_skills_copied = []
 
         if not path.exists(old_skills_dir):
@@ -588,7 +597,6 @@ class ConfigMigrationService:
                 "AudioDeviceChanger",
                 "ControlWindows",
                 "FileManager",
-                "GoogleSearch",
                 "Msfs2020Control",
                 "NMSAssistant",
                 "QuickCommands",
@@ -598,7 +606,6 @@ class ConfigMigrationService:
                 "TypingAssistant",
                 "UEXCorp",
                 "VoiceChanger",
-                "WebSearch",
             ]
 
             # Clippy blacklist (general assistant)
@@ -606,7 +613,6 @@ class ConfigMigrationService:
                 "AskPerplexity",
                 "ATSTelemetry",
                 "AudioDeviceChanger",
-                "GoogleSearch",
                 "Msfs2020Control",
                 "NMSAssistant",
                 "QuickCommands",
@@ -616,7 +622,6 @@ class ConfigMigrationService:
                 "ThinkingSound",
                 "UEXCorp",
                 "VoiceChanger",
-                "WebSearch",
             ]
 
             if wingman_name in ("ATC", "Computer"):
@@ -630,10 +635,37 @@ class ConfigMigrationService:
                     f"disabled_skills (Clippy: {len(clippy_blacklist)} skills disabled)"
                 )
 
+            # MCP servers are now centralized in mcp.yaml
+            # Remove old per-wingman mcp array if it exists (shouldn't in 1.8.2, but clean up)
+            if "mcp" in old:
+                del old["mcp"]
+                changes_made.append("mcp (removed - now centralized in mcp.yaml)")
+
+            # For servers that are disabled by default in mcp.yaml, add them to disabled_mcps
+            # This ensures the disabled_mcps list is the sole source of truth at runtime
+            # When user toggles ON a server, it's removed from disabled_mcps
+            disabled_by_default_mcps = [
+                "wingman_websearch"
+            ]  # From mcp.template.yaml where enabled: false
+            if disabled_by_default_mcps:
+                if "disabled_mcps" not in old or old["disabled_mcps"] is None:
+                    old["disabled_mcps"] = []
+                for mcp_name in disabled_by_default_mcps:
+                    if mcp_name not in old["disabled_mcps"]:
+                        old["disabled_mcps"].append(mcp_name)
+                changes_made.append(
+                    f"disabled_mcps ({len(disabled_by_default_mcps)} MCPs disabled by default)"
+                )
+
             if changes_made:
                 self.log(f"- cleared/updated: {', '.join(changes_made)}")
 
             return old
+
+        def migrate_mcp(old: dict, new: dict) -> dict:
+            # For 1.8.2 -> 1.9.0, we're creating mcp.yaml fresh from template
+            # Just use the new template values
+            return new
 
         def migrate_secrets(old: dict) -> dict:
             if "local_llm" not in old:
@@ -648,6 +680,7 @@ class ConfigMigrationService:
             migrate_defaults=migrate_defaults,
             migrate_wingman=migrate_wingman,
             migrate_secrets=migrate_secrets,
+            migrate_mcp=migrate_mcp,
         )
 
     # INTERNAL
@@ -740,6 +773,7 @@ class ConfigMigrationService:
         migrate_defaults: Callable[[dict, dict], dict],
         migrate_wingman: Callable[[dict, Optional[dict]], dict],
         migrate_secrets: Optional[Callable[[dict], dict]] = None,
+        migrate_mcp: Optional[Callable[[dict, dict], dict]] = None,
     ) -> None:
         users_dir = get_users_dir()
         old_config_path = path.join(users_dir, old_version, CONFIGS_DIR)
@@ -976,6 +1010,46 @@ class ConfigMigrationService:
                 if new_config_path == self.latest_config_path:
                     secret_keeper = SecretKeeper()
                     secret_keeper.secrets = secret_keeper.load()
+
+        # Handle mcp.yaml - this is a new file in 1.9.0
+        if migrate_mcp:
+            new_mcp_file = path.join(new_config_path, "mcp.yaml")
+            old_mcp_file = path.join(old_config_path, "mcp.yaml")
+
+            # Read the template mcp.yaml (from templates/configs/)
+            # Note: template file is named mcp.template.yaml
+            template_mcp_file = path.join(
+                self.templates_dir, "configs", "mcp.template.yaml"
+            )
+            new_mcp_config = {}
+            if path.exists(template_mcp_file):
+                new_mcp_config = (
+                    self.config_manager.read_config(template_mcp_file) or {}
+                )
+
+            if path.exists(old_mcp_file):
+                # mcp.yaml exists in old version - migrate it
+                self.log("Migrating mcp.yaml...", True)
+                old_mcp_config = self.config_manager.read_config(old_mcp_file) or {}
+                migrated_mcp = migrate_mcp(old_mcp_config, new_mcp_config)
+            else:
+                # mcp.yaml doesn't exist in old version - create from template
+                self.log("Creating mcp.yaml (not found in old version)...", True)
+                migrated_mcp = migrate_mcp({}, new_mcp_config)
+
+            if not path.exists(new_config_path):
+                os.makedirs(new_config_path)
+            self.config_manager.write_config(new_mcp_file, migrated_mcp)
+            self.log("Created/migrated mcp.yaml", highlight=True)
+
+            # Reload mcp config if this is the latest version
+            if new_config_path == self.latest_config_path:
+                from api.interface import McpConfig
+
+                try:
+                    self.config_manager.mcp_config = McpConfig(**migrated_mcp)
+                except Exception as e:
+                    self.err(f"Failed to load migrated mcp.yaml: {str(e)}")
 
         success_message = "Migration completed successfully!"
         self.printr.print(

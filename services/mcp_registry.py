@@ -5,8 +5,9 @@ This module manages MCP server connections and their tools, similar to SkillRegi
 It supports progressive disclosure where MCP servers can be searched and activated on-demand.
 """
 
+import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from api.enums import LogType
 from api.interface import McpServerConfig, McpToolInfo
@@ -134,8 +135,17 @@ class McpRegistry:
     tracks available tools, and supports search/activate pattern.
     """
 
-    def __init__(self, mcp_client: McpClient):
+    def __init__(
+        self,
+        mcp_client: McpClient,
+        wingman_name: str = "",
+        on_state_changed: Optional[Callable[[], None]] = None,
+    ):
         self._client = mcp_client
+        self._wingman_name = wingman_name
+        self._on_state_changed = on_state_changed
+        """Optional callback when MCP connection state changes (connect/disconnect)."""
+
         self._connections: dict[str, McpConnection] = {}
         """Active MCP connections by server name"""
 
@@ -150,6 +160,13 @@ class McpRegistry:
 
         self._prefixed_to_original: dict[str, str] = {}
         """Maps prefixed tool names to original tool names"""
+
+    async def _notify_state_changed(self):
+        """Notify listeners that MCP state has changed."""
+        if self._on_state_changed:
+            # Small delay to ensure state has fully propagated before UI refresh
+            await asyncio.sleep(0.3)
+            self._on_state_changed()
 
     @property
     def client(self) -> McpClient:
@@ -212,6 +229,9 @@ class McpRegistry:
             if auto_activate:
                 self._active_servers.add(config.name)
 
+            # Notify UI that MCP state has changed (after registry is updated)
+            await self._notify_state_changed()
+
         return connection
 
     async def unregister_server(self, server_name: str) -> None:
@@ -227,6 +247,9 @@ class McpRegistry:
             self._connections.pop(server_name, None)
             self._manifests.pop(server_name, None)
             self._active_servers.discard(server_name)
+
+            # Notify UI that MCP state has changed
+            await self._notify_state_changed()
 
     async def clear(self) -> None:
         """Disconnect from all servers and clear the registry."""
@@ -245,9 +268,11 @@ class McpRegistry:
         if query_lower in ("all", "*", "list", "list all", "everything", "show all"):
             results = list(self._manifests.values())[:limit]
             if results:
+                prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
                 printr.print(
-                    f"🔍 Searching MCP servers... found {len(self._manifests)} available",
+                    f"{prefix}🔍 Searching MCP servers... found {len(self._manifests)} available",
                     color=LogType.MCP,
+                    source_name=self._wingman_name if self._wingman_name else None,
                 )
             return results
 
@@ -277,22 +302,27 @@ class McpRegistry:
                 )
                 if has_discovery:
                     results = [manifest]
+                    prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
                     printr.print(
-                        f"🔍 Searching for '{query}'... using {manifest.display_name} (has discovery tools)",
+                        f"{prefix}🔍 Searching for '{query}'... using {manifest.display_name} (has discovery tools)",
                         color=LogType.MCP,
+                        source_name=self._wingman_name if self._wingman_name else None,
                     )
                     return results
 
+        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         if results:
             names = [m.display_name for m in results]
             printr.print(
-                f"Searching for '{query}'... found: {', '.join(names)}",
+                f"{prefix}Searching for '{query}'... found: {', '.join(names)}",
                 color=LogType.MCP,
+                source_name=self._wingman_name if self._wingman_name else None,
             )
         else:
             printr.print(
-                f"Searching for '{query}'... no matching MCP servers found",
+                f"{prefix}Searching for '{query}'... no matching MCP servers found",
                 color=LogType.WARNING,
+                source_name=self._wingman_name if self._wingman_name else None,
             )
 
         return results
@@ -321,9 +351,11 @@ class McpRegistry:
         if len(manifest.tool_names) > 5:
             tools_str += f", +{len(manifest.tool_names) - 5} more"
 
+        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         printr.print(
-            f"🌐 MCP activated: {manifest.display_name}",
+            f"{prefix}🌐 MCP activated: {manifest.display_name}",
             color=LogType.MCP,
+            source_name=self._wingman_name if self._wingman_name else None,
         )
         return (
             True,
@@ -339,9 +371,11 @@ class McpRegistry:
         manifest = self._manifests.get(server_name)
         display_name = manifest.display_name if manifest else server_name
 
+        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         printr.print(
-            f"MCP deactivated: {display_name}",
+            f"{prefix}MCP deactivated: {display_name}",
             color=LogType.MCP,
+            source_name=self._wingman_name if self._wingman_name else None,
         )
         return True, f"Deactivated '{display_name}'."
 
@@ -349,9 +383,11 @@ class McpRegistry:
         """Reset all server activations (called on conversation reset)."""
         if self._active_servers:
             count = len(self._active_servers)
+            prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
             printr.print(
-                f"Conversation reset: deactivating {count} MCP server(s)",
+                f"{prefix}Conversation reset: deactivating {count} MCP server(s)",
                 color=LogType.MCP,
+                source_name=self._wingman_name if self._wingman_name else None,
             )
         self._active_servers.clear()
 
@@ -481,9 +517,11 @@ class McpRegistry:
             should receive an updated tool list
         """
         # Debug logging for developers (server-only)
+        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         printr.print(
-            f"Meta-tool called: {tool_name}({parameters})",
+            f"{prefix}Meta-tool called: {tool_name}({parameters})",
             color=LogType.MCP,
+            source_name=self._wingman_name if self._wingman_name else None,
             server_only=True,
         )
 

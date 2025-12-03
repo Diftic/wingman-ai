@@ -9,7 +9,6 @@ disabled_skills:
   - AudioDeviceChanger
   - ControlWindows
   - FileManager
-  - GoogleSearch
   - Msfs2020Control
   - NMSAssistant
   - QuickCommands
@@ -19,7 +18,8 @@ disabled_skills:
   - TypingAssistant
   - UEXCorp
   - VoiceChanger
-  - WebSearch
+disabled_mcps:
+  - wingman_websearch
 prompts:
   backstory: |
     You are the AI board computer of a spacecraft in the Star Citizen universe.
