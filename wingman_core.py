@@ -13,10 +13,11 @@ from showinfm import show_in_file_manager
 import azure.cognitiveservices.speech as speechsdk
 import keyboard.keyboard as keyboard
 import mouse.mouse as mouse
-from api.commands import VoiceActivationMutedCommand
+from api.commands import CoreStateChangedCommand, VoiceActivationMutedCommand
 from api.enums import (
     AzureRegion,
     CommandTag,
+    CoreState,
     LogType,
     VoiceActivationSttProvider,
 )
@@ -27,6 +28,7 @@ from api.interface import (
     CommandJoystickConfig,
     Config,
     ConfigWithDirInfo,
+    CoreStatusResponse,
     ElevenlabsModel,
     OpenRouterEndpointResult,
     VoiceActivationSettings,
@@ -332,6 +334,9 @@ class WingmanCore(WebSocketUser):
         self.active_recording = {"key": "", "wingman": None}
 
         self.is_started = False
+        self.core_state: CoreState = CoreState.STARTING
+        self.core_state_progress: Optional[float] = None
+        self._last_logged_state: Optional[CoreState] = None
         self.startup_errors: list[WingmanInitializationError] = []
         self.tower_errors: list[WingmanInitializationError] = []
 
@@ -391,6 +396,42 @@ class WingmanCore(WebSocketUser):
     async def startup(self):
         if self.settings_service.settings.voice_activation.enabled:
             await self.set_voice_activation(is_enabled=True)
+
+    async def set_core_state(
+        self, state: CoreState, progress: Optional[float] = None
+    ) -> None:
+        """Update the core state and broadcast to all connected clients.
+
+        Args:
+            state: The new CoreState
+            progress: Optional progress indicator (0.0-1.0) for states like MIGRATING
+        """
+        self.core_state = state
+        self.core_state_progress = progress
+
+        # Update is_started for backwards compatibility
+        self.is_started = state == CoreState.READY
+
+        # Broadcast state change to connected clients
+        if self._connection_manager:
+            command = CoreStateChangedCommand(state=state, progress=progress)
+            await self._connection_manager.broadcast(command)
+
+        # Only log actual state changes, not progress updates within the same state
+        if state != self._last_logged_state:
+            self._last_logged_state = state
+            self.printr.print(
+                f"Core state changed: {state.value}",
+                color=LogType.STARTUP,
+                server_only=True,
+            )
+
+    def get_status(self) -> CoreStatusResponse:
+        """Get the current core status for the /ping endpoint."""
+        return CoreStatusResponse(
+            state=self.core_state,
+            progress=self.core_state_progress,
+        )
 
     def is_mouse_configured(self, config: Config) -> bool:
         return any(
@@ -476,6 +517,9 @@ class WingmanCore(WebSocketUser):
             )
             return
 
+        # Broadcast state change - wingmen are being initialized
+        await self.set_core_state(CoreState.INITIALIZING_WINGMEN)
+
         await self.unload_tower()
 
         config = config_dir_info.config
@@ -503,6 +547,10 @@ class WingmanCore(WebSocketUser):
             self.printr.toast_error(error.message)
 
         self.config_service.set_tower(self.tower)
+
+        # Broadcast state change - ready again after tower init
+        await self.set_core_state(CoreState.READY)
+
         self.printr.print(
             "Tower initializated.",
             color=LogType.POSITIVE,
@@ -1353,6 +1401,8 @@ class WingmanCore(WebSocketUser):
             self.printr.toast_error(f"Elevenlabs: \n{str(e)}")
 
     async def shutdown(self):
+        await self.set_core_state(CoreState.SHUTTING_DOWN)
+
         if self.settings_service.settings.xvasynth.enable:
             await self.stop_xvasynth()
         await self.unload_tower()

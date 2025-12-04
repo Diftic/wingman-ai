@@ -1,5 +1,5 @@
 import asyncio
-from typing import Optional
+from typing import Callable, Optional
 from fastapi import APIRouter
 from api.enums import LogType
 from api.interface import (
@@ -982,9 +982,15 @@ class ConfigService:
                             server_only=True,
                         )
 
-    async def migrate_configs(self, system_manager: SystemManager):
+    async def migrate_configs(
+        self,
+        system_manager: SystemManager,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ):
         migration_service = ConfigMigrationService(
-            config_manager=self.config_manager, system_manager=system_manager
+            config_manager=self.config_manager,
+            system_manager=system_manager,
+            progress_callback=progress_callback,
         )
         migration_service.migrate_to_latest()
         # Reload defaults config after migration in case schema changed

@@ -48,6 +48,21 @@ class WingmanInitializationErrorType(Enum):
     SKILL_INITIALIZATION_FAILED = "skill_initialization_failed"
 
 
+class CoreState(Enum):
+    """Represents the lifecycle state of Wingman AI Core.
+
+    Used to communicate the current state to the client via /ping endpoint
+    and WebSocket core_state_changed command.
+    """
+
+    STARTING = "starting"  # Core just launched, not ready yet
+    MIGRATING = "migrating"  # Running config migrations
+    LOADING_CONFIG = "loading_config"  # Loading configuration files
+    INITIALIZING_WINGMEN = "initializing_wingmen"  # Tower/Wingmen initialization
+    READY = "ready"  # Fully operational, ready to accept commands
+    SHUTTING_DOWN = "shutting_down"  # Graceful shutdown in progress
+
+
 class CommandTag(Enum):
     RECORDING_STARTED = "recording_started"
     RECORDING_STOPPED = "recording_stopped"
@@ -277,6 +292,10 @@ class WingmanProTtsProviderModel(BaseEnumModel):
     tts_provider: WingmanProTtsProvider
 
 
+class CoreStateEnumModel(BaseEnumModel):
+    core_state: CoreState
+
+
 # Add all additional Pydantic models for enums as needed
 
 
@@ -301,6 +320,7 @@ ENUM_TYPES = {
     "WingmanProTtsProvider": WingmanProTtsProviderModel,
     "PerplexityModel": PerplexityModelEnumModel,
     "RecordingDevice": RecordingDeviceModel,
+    "CoreState": CoreStateEnumModel,
     # Add new enums here as key-value pairs
 }
 

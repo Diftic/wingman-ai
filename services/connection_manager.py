@@ -43,7 +43,9 @@ class ConnectionManager:
             for connection in self.active_connections:
                 await connection.send_text(json_str)
         else:
-            self.message_queue.append(command)
+            # Don't queue ephemeral state updates - client can poll /ping for current state
+            if command.command != "core_state_changed":
+                self.message_queue.append(command)
 
     async def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:

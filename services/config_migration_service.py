@@ -22,7 +22,12 @@ MINIMUM_SUPPORTED_VERSION = "1_7_0"  # Versions older than this require a fresh 
 
 
 class ConfigMigrationService:
-    def __init__(self, config_manager: ConfigManager, system_manager: SystemManager):
+    def __init__(
+        self,
+        config_manager: ConfigManager,
+        system_manager: SystemManager,
+        progress_callback: Optional[Callable[[float], None]] = None,
+    ):
         self.config_manager = config_manager
         self.system_manager = system_manager
         self.printr = Printr()
@@ -33,6 +38,28 @@ class ConfigMigrationService:
         self.latest_config_path = path.join(
             self.users_dir, self.latest_version, CONFIGS_DIR
         )
+        self.progress_callback = progress_callback
+        # Progress tracking for current migration step
+        self._current_step_start: float = 0.0
+        self._current_step_end: float = 1.0
+
+    def _report_progress(self, progress: float) -> None:
+        """Report migration progress to callback if set."""
+        if self.progress_callback:
+            # Clamp progress to 0.0-1.0 range
+            self.progress_callback(max(0.0, min(1.0, progress)))
+
+    def _report_step_progress(self, fraction: float) -> None:
+        """Report progress within the current migration step.
+
+        Args:
+            fraction: Progress within this step (0.0 to 1.0)
+        """
+        # Map fraction to the global progress range for this step
+        progress = self._current_step_start + fraction * (
+            self._current_step_end - self._current_step_start
+        )
+        self._report_progress(progress)
 
     def migrate_to_latest(self):
 
@@ -41,6 +68,7 @@ class ConfigMigrationService:
 
         if not earliest_version:
             self.log("No valid version directories found for migration.", True)
+            self._report_progress(1.0)
             return
 
         # Check if the latest version is already migrated
@@ -51,6 +79,7 @@ class ConfigMigrationService:
             self.log(
                 f"Found {self.latest_version} configs. No migrations needed.", False
             )
+            self._report_progress(1.0)
             return
 
         # Check if the version is too old to migrate
@@ -60,12 +89,18 @@ class ConfigMigrationService:
                 True,
             )
             self.reset_to_fresh_configs()
+            self._report_progress(1.0)
             return
 
         self.log(
             f"Starting migration from version {earliest_version.replace('_', '.')} to {self.latest_version.replace('_', '.')}",
             True,
         )
+
+        # Progress tracking:
+        # - Phase 1 (preparation): 0-10%
+        # - Phase 2 (migrations): 10-100%
+        self._report_progress(0.02)
 
         # If the latest version directory already exists (e.g., created by ConfigManager),
         # clean up any template configs that will be migrated from old versions
@@ -74,6 +109,8 @@ class ConfigMigrationService:
             self.remove_duplicate_template_configs(
                 latest_existing_version, self.latest_version
             )
+
+        self._report_progress(0.04)
 
         # Copy custom skills from the LATEST existing version to new version
         # This ensures we get the most up-to-date custom skills
@@ -90,16 +127,37 @@ class ConfigMigrationService:
                 f"Skipping custom skills copy - latest_existing_version: {latest_existing_version}, latest_version: {self.latest_version}"
             )
 
+        self._report_progress(0.07)
+
         # Migrate audio library from versioned location to non-versioned location
         # Only check 1.8.1 and 1.8.2 (most users come from 1.8.1, 1.8.2 was dev-only)
         self.migrate_audio_library()
 
-        # Perform migrations
+        self._report_progress(0.10)
+
+        # Calculate total migration steps for progress reporting
+        migration_steps = self._count_migration_steps(earliest_version)
+
+        # Perform migrations - this is 10% to 100% of progress
         current_version = earliest_version
+        step_index = 0
         while current_version != self.latest_version:
             next_version = self.find_next_version(current_version)
-            self.perform_migration(current_version, next_version)
+
+            # Calculate progress for this step (10% to 100% range)
+            step_start_progress = 0.10 + (0.90 * step_index / max(1, migration_steps))
+            step_end_progress = 0.10 + (
+                0.90 * (step_index + 1) / max(1, migration_steps)
+            )
+
+            self.perform_migration(
+                current_version,
+                next_version,
+                step_start_progress=step_start_progress,
+                step_end_progress=step_end_progress,
+            )
             current_version = next_version
+            step_index += 1
 
         # Warn about custom skills that need manual review
         if custom_skills:
@@ -111,6 +169,8 @@ class ConfigMigrationService:
                     server_only=True,
                 )
                 self.log_message += f"{warning_message}\n"
+
+        self._report_progress(1.0)
 
         self.log(
             f"Migration completed successfully. Current version: {self.latest_version.replace('_', '.')}",
@@ -155,13 +215,35 @@ class ConfigMigrationService:
         self.log("No suitable version found for custom skills migration")
         return None
 
+    def _count_migration_steps(self, start_version: str) -> int:
+        """Count the number of migration steps from start_version to latest."""
+        count = 0
+        current = start_version
+        while current != self.latest_version:
+            next_version = self.find_next_version(current)
+            if next_version is None:
+                break
+            count += 1
+            current = next_version
+        return count
+
     def find_next_version(self, current_version):
         for old, new, _ in MIGRATIONS:
             if old == current_version:
                 return new
         return None
 
-    def perform_migration(self, old_version, new_version):
+    def perform_migration(
+        self,
+        old_version,
+        new_version,
+        step_start_progress: float = 0.0,
+        step_end_progress: float = 1.0,
+    ):
+        # Store progress range for this migration step so migrate() can use it
+        self._current_step_start = step_start_progress
+        self._current_step_end = step_end_progress
+
         migration_func = next(
             (m[2] for m in MIGRATIONS if m[0] == old_version and m[1] == new_version),
             None,
@@ -297,7 +379,7 @@ class ConfigMigrationService:
         files_skipped = 0
 
         # Walk through all files in the source audio library
-        for root, dirs, files in os.walk(source_audio_library):
+        for root, _dirs, files in os.walk(source_audio_library):
             for file in files:
                 if not file.endswith((".mp3", ".wav")):
                     continue
@@ -900,6 +982,9 @@ class ConfigMigrationService:
         old_config_path = path.join(users_dir, old_version, CONFIGS_DIR)
         new_config_path = path.join(users_dir, new_version, CONFIGS_DIR)
 
+        # Report start of this migration step
+        self._report_step_progress(0.0)
+
         if not path.exists(path.join(users_dir, new_version)):
             migration_template_path = path.join(
                 self.templates_dir, "migration", new_version
@@ -924,8 +1009,10 @@ class ConfigMigrationService:
                 template_config_path = path.join(migration_template_path, CONFIGS_DIR)
                 new_version_path = path.join(users_dir, new_version)
 
-                # First, copy the entire template structure
+                # First, copy the entire template structure (this is the slow operation)
+                self._report_step_progress(0.05)
                 shutil.copytree(migration_template_path, new_version_path)
+                self._report_step_progress(0.40)  # Template copy is ~35% of work
                 self.log(
                     f"{new_version} configs not found during multi-step migration. Copied migration templates from {migration_template_path}."
                 )
@@ -966,6 +1053,7 @@ class ConfigMigrationService:
             self.log(
                 f"Migration from {old_version} to {new_version} already completed!"
             )
+            self._report_step_progress(1.0)
             return
 
         self.log(
@@ -973,129 +1061,154 @@ class ConfigMigrationService:
             True,
         )
 
+        # Count total files to migrate for progress tracking
+        files_to_migrate = []
         for root, _dirs, files in walk(old_config_path):
             for filename in files:
-                old_file = path.join(root, filename)
-                new_file = old_file.replace(old_config_path, new_config_path)
+                if filename != ".DS_Store" and filename != MIGRATION_LOG:
+                    files_to_migrate.append((root, filename))
 
-                if filename == ".DS_Store" or filename == MIGRATION_LOG:
-                    continue
-                # secrets
-                if filename == "secrets.yaml":
-                    if migrate_secrets:
-                        self.log("Migrating secrets.yaml...", True)
-                        old_secrets = self.config_manager.read_config(old_file) or {}
-                        migrated_secrets = migrate_secrets(old_secrets)
-                        # Write the migrated secrets
-                        new_dir = path.dirname(new_file)
-                        if not path.exists(new_dir):
-                            os.makedirs(new_dir)
-                        self.config_manager.write_config(new_file, migrated_secrets)
-                        self.log("Migrated secrets.yaml", highlight=True)
-                    else:
-                        self.copy_file(old_file, new_file)
+        total_files = len(files_to_migrate)
+        files_processed = 0
 
-                    if new_config_path == self.latest_config_path:
-                        secret_keeper = SecretKeeper()
-                        secret_keeper.secrets = secret_keeper.load()
-                # settings
-                elif filename == "settings.yaml":
-                    self.log("Migrating settings.yaml...", True)
-                    migrated_settings = migrate_settings(
-                        old=self.config_manager.read_config(old_file),
-                        new=self.config_manager.read_config(new_file),
-                    )
-                    try:
-                        if new_config_path == self.latest_config_path:
-                            self.config_manager.settings_config = SettingsConfig(
-                                **migrated_settings
-                            )
-                        self.config_manager.save_settings_config()
-                    except ValidationError as e:
-                        self.err(f"Unable to migrate settings.yaml:\n{str(e)}")
-                # defaults
-                elif filename == "defaults.yaml":
-                    self.log("Migrating defaults.yaml...", True)
-                    migrated_defaults = migrate_defaults(
-                        old=self.config_manager.read_config(old_file),
-                        new=self.config_manager.read_config(new_file),
-                    )
-                    try:
-                        self.config_manager.default_config = NestedConfig(
-                            **migrated_defaults
-                        )
-                        self.config_manager.save_defaults_config()
-                    except ValidationError as e:
-                        self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
-                # Wingmen
-                elif filename.endswith(".yaml"):
-                    self.log(f"Migrating Wingman {filename}...", True)
-                    # defaults are already migrated because the Wingman config is in a subdirectory
-                    try:
-                        default_config = self.config_manager.read_default_config()
-                        migrated_wingman = migrate_wingman(
-                            old=self.config_manager.read_config(old_file),
-                            new=(
-                                self.config_manager.read_config(new_file)
-                                if path.exists(new_file)
-                                else None
-                            ),
-                        )
-                        # validate the merged config
-                        if new_config_path == self.latest_config_path:
-                            _wingman_config = self.config_manager.merge_configs(
-                                default_config, migrated_wingman
-                            )
-                        # diff it
-                        wingman_diff = self.config_manager.deep_diff(
-                            default_config, migrated_wingman
-                        )
-                        # save it
-                        self.config_manager.write_config(new_file, wingman_diff)
+        # File migration is 45% to 95% of step progress (templates were 0-40%)
+        file_progress_start = 0.45
+        file_progress_end = 0.95
 
-                        # The old file was logically deleted and a new one exists that isn't yet
-                        new_base_file = path.join(
-                            root.replace(old_config_path, new_config_path),
-                            filename.replace(DELETED_PREFIX, "", 1),
-                        )
-                        if filename.startswith(DELETED_PREFIX) and path.exists(
-                            new_base_file
-                        ):
-                            os.remove(new_base_file)
+        for root, filename in files_to_migrate:
+            old_file = path.join(root, filename)
+            new_file = old_file.replace(old_config_path, new_config_path)
 
-                            avatar = new_base_file.replace(".yaml", ".png")
-                            if path.exists(avatar):
-                                os.remove(avatar)
-                            self.log(
-                                f"Logically deleting Wingman {filename} like in the previous version"
-                            )
-                    except FileNotFoundError as e:
-                        # Likely a custom skill that doesn't have templates
-                        error_str = str(e)
-                        if "skills" in error_str and "default_config.yaml" in error_str:
-                            self.log(
-                                f"Warning: {filename} uses custom skill(s) without templates. "
-                                f"Custom skills have been copied but may need manual review.",
-                                True,
-                            )
-                        else:
-                            self.err(f"Unable to migrate {filename}:\n{error_str}")
-                        # Copy the wingman file anyway so user doesn't lose it
-                        if not path.exists(new_file):
-                            new_file_dir = path.dirname(new_file)
-                            if not path.exists(new_file_dir):
-                                os.makedirs(new_file_dir)
-                            shutil.copyfile(old_file, new_file)
-                        continue
-                    except Exception as e:
-                        self.err(f"Unable to migrate {filename}:\n{str(e)}")
-                        # Copy the wingman file anyway so user doesn't lose it
-                        if not path.exists(new_file):
-                            shutil.copyfile(old_file, new_file)
-                        continue
+            # Report progress for each file
+            if total_files > 0:
+                file_fraction = files_processed / total_files
+                progress = file_progress_start + file_fraction * (
+                    file_progress_end - file_progress_start
+                )
+                self._report_step_progress(progress)
+
+            # secrets
+            if filename == "secrets.yaml":
+                if migrate_secrets:
+                    self.log("Migrating secrets.yaml...", True)
+                    old_secrets = self.config_manager.read_config(old_file) or {}
+                    migrated_secrets = migrate_secrets(old_secrets)
+                    # Write the migrated secrets
+                    new_dir = path.dirname(new_file)
+                    if not path.exists(new_dir):
+                        os.makedirs(new_dir)
+                    self.config_manager.write_config(new_file, migrated_secrets)
+                    self.log("Migrated secrets.yaml", highlight=True)
                 else:
                     self.copy_file(old_file, new_file)
 
+                if new_config_path == self.latest_config_path:
+                    secret_keeper = SecretKeeper()
+                    secret_keeper.secrets = secret_keeper.load()
+            # settings
+            elif filename == "settings.yaml":
+                self.log("Migrating settings.yaml...", True)
+                migrated_settings = migrate_settings(
+                    old=self.config_manager.read_config(old_file),
+                    new=self.config_manager.read_config(new_file),
+                )
+                try:
+                    if new_config_path == self.latest_config_path:
+                        self.config_manager.settings_config = SettingsConfig(
+                            **migrated_settings
+                        )
+                    self.config_manager.save_settings_config()
+                except ValidationError as e:
+                    self.err(f"Unable to migrate settings.yaml:\n{str(e)}")
+            # defaults
+            elif filename == "defaults.yaml":
+                self.log("Migrating defaults.yaml...", True)
+                migrated_defaults = migrate_defaults(
+                    old=self.config_manager.read_config(old_file),
+                    new=self.config_manager.read_config(new_file),
+                )
+                try:
+                    self.config_manager.default_config = NestedConfig(
+                        **migrated_defaults
+                    )
+                    self.config_manager.save_defaults_config()
+                except ValidationError as e:
+                    self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
+            # Wingmen
+            elif filename.endswith(".yaml"):
+                self.log(f"Migrating Wingman {filename}...", True)
+                # defaults are already migrated because the Wingman config is in a subdirectory
+                try:
+                    default_config = self.config_manager.read_default_config()
+                    migrated_wingman = migrate_wingman(
+                        old=self.config_manager.read_config(old_file),
+                        new=(
+                            self.config_manager.read_config(new_file)
+                            if path.exists(new_file)
+                            else None
+                        ),
+                    )
+                    # validate the merged config
+                    if new_config_path == self.latest_config_path:
+                        _wingman_config = self.config_manager.merge_configs(
+                            default_config, migrated_wingman
+                        )
+                    # diff it
+                    wingman_diff = self.config_manager.deep_diff(
+                        default_config, migrated_wingman
+                    )
+                    # save it
+                    self.config_manager.write_config(new_file, wingman_diff)
+
+                    # The old file was logically deleted and a new one exists that isn't yet
+                    new_base_file = path.join(
+                        root.replace(old_config_path, new_config_path),
+                        filename.replace(DELETED_PREFIX, "", 1),
+                    )
+                    if filename.startswith(DELETED_PREFIX) and path.exists(
+                        new_base_file
+                    ):
+                        os.remove(new_base_file)
+
+                        avatar = new_base_file.replace(".yaml", ".png")
+                        if path.exists(avatar):
+                            os.remove(avatar)
+                        self.log(
+                            f"Logically deleting Wingman {filename} like in the previous version"
+                        )
+                except FileNotFoundError as e:
+                    # Likely a custom skill that doesn't have templates
+                    error_str = str(e)
+                    if "skills" in error_str and "default_config.yaml" in error_str:
+                        self.log(
+                            f"Warning: {filename} uses custom skill(s) without templates. "
+                            f"Custom skills have been copied but may need manual review.",
+                            True,
+                        )
+                    else:
+                        self.err(f"Unable to migrate {filename}:\n{error_str}")
+                    # Copy the wingman file anyway so user doesn't lose it
+                    if not path.exists(new_file):
+                        new_file_dir = path.dirname(new_file)
+                        if not path.exists(new_file_dir):
+                            os.makedirs(new_file_dir)
+                        shutil.copyfile(old_file, new_file)
+                    files_processed += 1
+                    continue
+                except Exception as e:
+                    self.err(f"Unable to migrate {filename}:\n{str(e)}")
+                    # Copy the wingman file anyway so user doesn't lose it
+                    if not path.exists(new_file):
+                        shutil.copyfile(old_file, new_file)
+                    files_processed += 1
+                    continue
+            else:
+                self.copy_file(old_file, new_file)
+
+            files_processed += 1
+
+        # Handle directory deletions after processing all files
+        for root, _dirs, _files in walk(old_config_path):
             # the old dir was logically deleted and a new one exists that isn't yet
             new_base_dir = root.replace(old_config_path, new_config_path).replace(
                 DELETED_PREFIX, "", 1
@@ -1109,8 +1222,10 @@ class ConfigMigrationService:
                 if path.exists(new_undeleted_default_dir)
                 else new_base_dir if path.exists(new_base_dir) else None
             )
-            if os.path.basename(root).startswith(DELETED_PREFIX) and path.exists(
+            if (
                 target_dir
+                and os.path.basename(root).startswith(DELETED_PREFIX)
+                and path.exists(target_dir)
             ):
                 shutil.rmtree(target_dir)
                 self.log(

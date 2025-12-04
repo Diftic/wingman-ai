@@ -41,8 +41,8 @@ from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from api.commands import WebSocketCommandModel
-from api.interface import BenchmarkResult
-from api.enums import ENUM_TYPES, LogType, WingmanInitializationErrorType
+from api.interface import BenchmarkResult, CoreStatusResponse
+from api.enums import ENUM_TYPES, CoreState, LogType, WingmanInitializationErrorType
 import keyboard.keyboard as keyboard
 from services.command_handler import CommandHandler
 from services.config_manager import ConfigManager
@@ -406,9 +406,9 @@ async def start_secrets(secrets: dict[str, Any]):
     await core.config_service.load_config()
 
 
-@app.get("/ping", tags=["main"], response_model=str)
+@app.get("/ping", tags=["main"], response_model=CoreStatusResponse)
 async def ping():
-    return "Ok" if core.is_started else "Starting"
+    return core.get_status()
 
 
 @app.get("/client/plan", tags=["main"], response_model=str)
@@ -439,8 +439,21 @@ async def get_dummy_benchmark():
 
 
 async def async_main(host: str, port: int, sidecar: bool):
-    await core.config_service.migrate_configs(system_manager)
+    # Define migration progress callback
+    def on_migration_progress(progress: float):
+        # Use ensure_async since this is called from sync migration code
+        core.ensure_async(core.set_core_state(CoreState.MIGRATING, progress=progress))
+
+    # Set MIGRATING state before migrations
+    await core.set_core_state(CoreState.MIGRATING, progress=0.0)
+    await core.config_service.migrate_configs(
+        system_manager, progress_callback=on_migration_progress
+    )
+
+    # Set LOADING_CONFIG state
+    await core.set_core_state(CoreState.LOADING_CONFIG)
     await core.config_service.load_config()
+
     saved_secrets: list[str] = []
     for error in core.tower_errors:
         if (
@@ -463,7 +476,8 @@ async def async_main(host: str, port: int, sidecar: bool):
         event_loop = asyncio.get_running_loop()
         core.audio_player.set_event_loop(event_loop)
         asyncio.create_task(core.process_events())
-        core.is_started = True
+        # Set READY state - this also sets is_started = True
+        await core.set_core_state(CoreState.READY)
     except Exception as e:
         printr.print(f"Error starting Wingman AI Core: {str(e)}", color=LogType.ERROR)
         printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)

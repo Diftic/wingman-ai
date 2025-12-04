@@ -5,6 +5,7 @@ from api.enums import (
     AzureApiVersion,
     AzureRegion,
     ConversationProvider,
+    CoreState,
     ImageGenerationProvider,
     McpTransportType,
     CustomPropertyType,
@@ -71,6 +72,15 @@ class WingmanInitializationError(BaseModel):
     message: str
     error_type: WingmanInitializationErrorType
     secret_name: Optional[str] = None
+
+
+class CoreStatusResponse(BaseModel):
+    """Response model for /ping endpoint providing detailed Core status."""
+
+    state: CoreState
+    """The current lifecycle state of Wingman AI Core."""
+    progress: Optional[float] = None
+    """Optional progress indicator (0.0-1.0) for states like MIGRATING."""
 
 
 class VoiceInfo(BaseModel):

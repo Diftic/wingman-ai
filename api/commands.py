@@ -2,6 +2,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 from api.enums import (
     CommandTag,
+    CoreState,
     KeyboardRecordingType,
     LogSource,
     LogType,
@@ -104,3 +105,19 @@ class McpStateChangedCommand(WebSocketCommandModel):
     command: Literal["mcp_state_changed"] = "mcp_state_changed"
     wingman_name: str
     """The wingman whose MCP state changed."""
+
+
+class CoreStateChangedCommand(WebSocketCommandModel):
+    """Sent when the Core lifecycle state changes.
+
+    The client should use this to update UI accordingly (show loading spinner,
+    display progress, etc.). Note that if the Core crashes, it will NOT be able
+    to send a state change - the client must detect WebSocket disconnection and
+    failed /ping requests to determine that Core has crashed.
+    """
+
+    command: Literal["core_state_changed"] = "core_state_changed"
+    state: CoreState
+    """The current state of Wingman AI Core."""
+    progress: Optional[float] = None
+    """Optional progress indicator (0.0-1.0) for states like MIGRATING."""
