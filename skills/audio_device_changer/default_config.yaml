@@ -4,6 +4,15 @@ display_name: Audio Device Changer
 author: ShipBit
 tags:
   - Utility
+aliases:
+  - audio output
+  - sound device
+  - speaker
+  - headphones
+  - audio routing
+  - VTuber
+  - audio mixing
+  - change output
 description:
   en: Stores a separate audio device per Wingman and outputs TTS output to it. Useful for VTubers, audio mixing etc.
   de: Speichert ein separates Audiogerät pro Wingman und gibt TTS-Ausgaben darauf aus. Nützlich für VTuber, Audio-Mixing usw.

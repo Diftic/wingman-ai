@@ -3,10 +3,18 @@ name: RadioChatter
 display_name: Radio Chatter
 author: JayMatthew
 tags:
-  - Star Citizen
-  - No Man's Sky
-  - American/European Truck Simulator 2
   - Game
+  - Music
+aliases:
+  - radio
+  - comms
+  - communications
+  - ambient
+  - background chatter
+  - pilot chatter
+  - immersion
+  - NPC voices
+  - random dialog
 description:
   en: Randomly playback radio chatter over time. Customize the participants and their voices.
   de: Spielt zufällige Funkgespräche ab. Passe die Teilnehmer und ihre Stimmen an.

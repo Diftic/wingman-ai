@@ -713,6 +713,9 @@ class SkillConfig(CustomClassConfig):
     display_name: str
     author: Optional[str] = None
     tags: Optional[list[str]] = None
+    aliases: Optional[list[str]] = None
+    """Alternative search terms for this skill (e.g., ['news', 'current events'] for Perplexity).
+    Unlike tags which are categorical, aliases are optimized for search discoverability."""
     description: LocalizedMetadata
     prompt: Optional[str] = None
     """An additional prompt that extends the system prompt of the Wingman."""

@@ -9,6 +9,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
+from rapidfuzz import fuzz
+
 from api.enums import LogType
 from api.interface import McpServerConfig, McpToolInfo
 from services.mcp_client import McpClient, McpConnection
@@ -65,54 +67,77 @@ class McpServerManifest:
     def matches_query(self, query: str) -> float:
         """
         Returns a relevance score (0-1) for how well this server matches the query.
-        Uses word-based matching with alias support for fuzzy search.
+        Uses fuzzy matching with rapidfuzz for better discoverability.
         """
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
         query_words = set(query_lower.split())
-
-        # Check aliases first - if query matches an alias, high score
-        for alias in self.aliases:
-            alias_lower = alias.lower()
-            if alias_lower in query_lower or query_lower in alias_lower:
-                return 0.9  # High score for alias match
-
-        # Also check for the full query as a phrase
-        name_lower = self.display_name.lower()
-        desc_lower = self.description.lower()
 
         score = 0.0
 
-        # Check display name - word overlap (high weight)
-        name_words = set(name_lower.replace("-", " ").replace("_", " ").split())
-        name_overlap = query_words & name_words
-        if name_overlap:
-            score += 0.4 * (len(name_overlap) / len(query_words))
+        # Fuzzy match threshold (0-100 scale from rapidfuzz)
+        FUZZY_THRESHOLD = 75
 
-        # Full query in name (bonus)
+        # Check aliases first (highest priority) - exact and fuzzy match
+        for alias in self.aliases:
+            alias_lower = alias.lower()
+            # Exact substring match
+            if alias_lower in query_lower or query_lower in alias_lower:
+                return 0.95  # Very high score for alias match
+            # Fuzzy match on alias
+            ratio = fuzz.ratio(query_lower, alias_lower)
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.85 * (ratio / 100))
+            # Partial ratio for multi-word queries
+            partial = fuzz.partial_ratio(query_lower, alias_lower)
+            if partial >= FUZZY_THRESHOLD:
+                score = max(score, 0.8 * (partial / 100))
+
+        # Check display name (high weight) - exact and fuzzy
+        name_lower = self.display_name.lower()
         if query_lower in name_lower or name_lower in query_lower:
-            score += 0.2
+            score = max(score, 0.7)
+        else:
+            # Fuzzy match on name
+            ratio = fuzz.ratio(query_lower, name_lower)
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.6 * (ratio / 100))
+            # Token set ratio handles word reordering
+            token_ratio = fuzz.token_set_ratio(query_lower, name_lower)
+            if token_ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.55 * (token_ratio / 100))
 
-        # Check description - word overlap (medium weight)
-        desc_words = set(desc_lower.replace("-", " ").replace("_", " ").split())
-        desc_overlap = query_words & desc_words
-        if desc_overlap:
-            score += 0.3 * (len(desc_overlap) / len(query_words))
+        # Check description (medium weight) - fuzzy partial matching
+        desc_lower = self.description.lower()
+        if query_lower in desc_lower:
+            score = max(score, 0.5)
+        else:
+            # Partial ratio good for finding query within longer text
+            partial = fuzz.partial_ratio(query_lower, desc_lower)
+            if partial >= FUZZY_THRESHOLD:
+                score = max(score, 0.4 * (partial / 100))
 
-        # Check tool names (low weight)
+        # Check tool names (lower weight) - word overlap and fuzzy
         for tool_name in self.tool_names:
             tool_words = set(
                 tool_name.lower().replace("_", " ").replace("-", " ").split()
             )
             if query_words & tool_words:
-                score += 0.2
+                score = max(score, 0.3)
                 break
+            # Fuzzy match on tool name
+            ratio = fuzz.partial_ratio(query_lower, tool_name.lower().replace("_", " "))
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.25 * (ratio / 100))
 
-        # Check tool summaries
+        # Check tool summaries (lowest weight)
         for summary in self.tool_summaries:
-            summary_words = set(summary.lower().split())
-            if query_words & summary_words:
-                score += 0.1
+            summary_lower = summary.lower()
+            if any(word in summary_lower for word in query_words):
+                score = max(score, 0.2)
                 break
+            partial = fuzz.partial_ratio(query_lower, summary_lower)
+            if partial >= 80:  # Higher threshold for summaries
+                score = max(score, 0.15 * (partial / 100))
 
         return min(score, 1.0)
 
@@ -124,7 +149,10 @@ class McpServerManifest:
         )
         if len(self.tool_names) > 5:
             tools_str += f", and {len(self.tool_names) - 5} more"
-        return f"**{self.display_name}** (id: {self.name}) [{status}]\n  {self.description}\n  Tools: {tools_str}"
+        # Show aliases (search terms) - helps LLM understand why this server matched
+        aliases_str = ", ".join(self.aliases) if self.aliases else ""
+        alias_line = f"\n  Also known as: {aliases_str}" if aliases_str else ""
+        return f"**{self.display_name}** (id: {self.name}) [{status}]\n  {self.description}\n  Tools: {tools_str}{alias_line}"
 
 
 class McpRegistry:
@@ -267,14 +295,12 @@ class McpRegistry:
         # Special case: list all
         if query_lower in ("all", "*", "list", "list all", "everything", "show all"):
             results = list(self._manifests.values())[:limit]
-            if results:
-                prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
-                printr.print(
-                    f"{prefix}🔍 Searching MCP servers... found {len(self._manifests)} available",
-                    color=LogType.MCP,
-                    source_name=self._wingman_name if self._wingman_name else None,
-                    server_only=True,  # Search details only in terminal/log
-                )
+            printr.print(
+                f"🔍 MCP search 'list all' → {len(self._manifests)} servers available",
+                color=LogType.MCP,
+                source_name=self._wingman_name if self._wingman_name else None,
+                server_only=True,
+            )
             return results
 
         scored = []
@@ -303,30 +329,40 @@ class McpRegistry:
                 )
                 if has_discovery:
                     results = [manifest]
-                    prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
                     printr.print(
-                        f"{prefix}🔍 Searching for '{query}'... using {manifest.display_name} (has discovery tools)",
+                        f"🔍 MCP search '{query}' → {manifest.display_name}(fallback-discovery)",
                         color=LogType.MCP,
                         source_name=self._wingman_name if self._wingman_name else None,
-                        server_only=True,  # Search details only in terminal/log
+                        server_only=True,
                     )
                     return results
 
-        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
-        if results:
-            names = [m.display_name for m in results]
+        # Log search results with scores for debugging - server-only
+        # This helps debug "why didn't my wingman find the MCP server?" issues
+        if scored:
+            top_matches = scored[:3]  # Show top 3 for debugging
+            matches_str = ", ".join(
+                f"{m.display_name}({s:.2f})" for s, m in top_matches
+            )
             printr.print(
-                f"{prefix}Searching for '{query}'... found: {', '.join(names)}",
+                f"🔍 MCP search '{query}' → {matches_str}",
                 color=LogType.MCP,
                 source_name=self._wingman_name if self._wingman_name else None,
-                server_only=True,  # Search details only in terminal/log
+                server_only=True,
             )
         else:
+            # Log available servers when nothing matched - helps debug
+            available = [m.display_name for m in list(self._manifests.values())[:5]]
+            hint = (
+                f" [available: {', '.join(available)}...]"
+                if available
+                else " [no MCP servers connected]"
+            )
             printr.print(
-                f"{prefix}Searching for '{query}'... no matching MCP servers found",
+                f"🔍 MCP search '{query}' → no matches{hint}",
                 color=LogType.WARNING,
                 source_name=self._wingman_name if self._wingman_name else None,
-                server_only=True,  # Search details only in terminal/log
+                server_only=True,
             )
 
         return results

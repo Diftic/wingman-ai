@@ -13,6 +13,9 @@ Key concepts:
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Optional
+
+from rapidfuzz import fuzz
+
 from api.enums import LogType
 from services.printr import Printr
 
@@ -44,6 +47,9 @@ class SkillManifest:
     tool_summaries: list[str] = field(default_factory=list)
     """One-line descriptions of each tool"""
 
+    aliases: list[str] = field(default_factory=list)
+    """Alternative search terms for this skill (e.g., ['news', 'headlines'] for Perplexity)"""
+
     @classmethod
     def from_skill(cls, skill: "Skill") -> "SkillManifest":
         """Create a manifest from a Skill instance."""
@@ -68,52 +74,101 @@ class SkillManifest:
             tags=skill.config.tags or [],
             tool_names=tool_names,
             tool_summaries=tool_summaries,
+            aliases=skill.config.aliases or [],
         )
 
     def matches_query(self, query: str) -> float:
         """
         Returns a relevance score (0-1) for how well this skill matches the query.
-        Simple keyword matching - could be enhanced with embeddings later.
+        Uses fuzzy matching with rapidfuzz for better discoverability.
         """
-        query_lower = query.lower()
+        query_lower = query.lower().strip()
         query_words = set(query_lower.split())
 
         score = 0.0
 
-        # Check display name (high weight)
-        if query_lower in self.display_name.lower():
-            score += 0.4
+        # Fuzzy match threshold (0-100 scale from rapidfuzz)
+        FUZZY_THRESHOLD = 75
 
-        # Check description (medium weight)
-        if query_lower in self.description.lower():
-            score += 0.3
+        # Check aliases first (highest priority) - exact and fuzzy match
+        for alias in self.aliases:
+            alias_lower = alias.lower()
+            # Exact substring match
+            if alias_lower in query_lower or query_lower in alias_lower:
+                return 0.95  # Very high score for alias match
+            # Fuzzy match on alias
+            ratio = fuzz.ratio(query_lower, alias_lower)
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.85 * (ratio / 100))
+            # Partial ratio for multi-word queries
+            partial = fuzz.partial_ratio(query_lower, alias_lower)
+            if partial >= FUZZY_THRESHOLD:
+                score = max(score, 0.8 * (partial / 100))
 
-        # Check tags (medium weight)
+        # Check display name (high weight) - exact and fuzzy
+        name_lower = self.display_name.lower()
+        if query_lower in name_lower or name_lower in query_lower:
+            score = max(score, 0.7)
+        else:
+            # Fuzzy match on name
+            ratio = fuzz.ratio(query_lower, name_lower)
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.6 * (ratio / 100))
+            # Token set ratio handles word reordering
+            token_ratio = fuzz.token_set_ratio(query_lower, name_lower)
+            if token_ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.55 * (token_ratio / 100))
+
+        # Check description (medium weight) - fuzzy partial matching
+        desc_lower = self.description.lower()
+        if query_lower in desc_lower:
+            score = max(score, 0.5)
+        else:
+            # Partial ratio good for finding query within longer text
+            partial = fuzz.partial_ratio(query_lower, desc_lower)
+            if partial >= FUZZY_THRESHOLD:
+                score = max(score, 0.4 * (partial / 100))
+
+        # Check tags (medium weight) - fuzzy match on each tag
         for tag in self.tags:
-            if query_lower in tag.lower() or tag.lower() in query_lower:
-                score += 0.2
+            tag_lower = tag.lower()
+            if query_lower in tag_lower or tag_lower in query_lower:
+                score = max(score, 0.45)
                 break
+            ratio = fuzz.ratio(query_lower, tag_lower)
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.35 * (ratio / 100))
 
-        # Check tool names (low weight)
+        # Check tool names (lower weight) - word overlap and fuzzy
         for tool_name in self.tool_names:
             tool_words = set(tool_name.lower().replace("_", " ").split())
             if query_words & tool_words:
-                score += 0.1
+                score = max(score, 0.3)
                 break
+            # Fuzzy match on tool name
+            ratio = fuzz.partial_ratio(query_lower, tool_name.lower().replace("_", " "))
+            if ratio >= FUZZY_THRESHOLD:
+                score = max(score, 0.25 * (ratio / 100))
 
-        # Check tool summaries
+        # Check tool summaries (lowest weight)
         for summary in self.tool_summaries:
-            if any(word in summary.lower() for word in query_words):
-                score += 0.1
+            summary_lower = summary.lower()
+            if any(word in summary_lower for word in query_words):
+                score = max(score, 0.2)
                 break
+            partial = fuzz.partial_ratio(query_lower, summary_lower)
+            if partial >= 80:  # Higher threshold for summaries
+                score = max(score, 0.15 * (partial / 100))
 
         return min(score, 1.0)
 
     def to_summary(self) -> str:
         """Returns a compact string representation for LLM context."""
         tools_str = ", ".join(self.tool_names) if self.tool_names else "No tools"
-        tags_str = ", ".join(self.tags) if self.tags else "No tags"
-        return f"**{self.display_name}** (id: {self.name})\n  {self.description}\n  Tools: {tools_str}\n  Tags: {tags_str}"
+        # Show aliases (search terms) instead of tags - more useful for LLM to understand relevance
+        aliases_str = ", ".join(self.aliases) if self.aliases else ""
+        alias_line = f"\n  Also known as: {aliases_str}" if aliases_str else ""
+        return f"**{self.display_name}** (id: {self.name})\n  {self.description}\n  Tools: {tools_str}{alias_line}"
 
 
 class SkillRegistry:
@@ -181,13 +236,11 @@ class SkillRegistry:
         # Special case: list all skills
         if query_lower in ("all", "*", "list", "list all", "everything", "show all"):
             results = list(self._manifests.values())[:limit]
-            if results:
-                skill_names = [m.display_name for m in results]
-                printr.print(
-                    f"Searching skills... found {len(self._manifests)} available",
-                    color=LogType.SKILL,
-                    server_only=True,  # Search details only in terminal/log
-                )
+            printr.print(
+                f"🔍 Skill search 'list all' → {len(self._manifests)} skills available",
+                color=LogType.SKILL,
+                server_only=True,
+            )
             return results
 
         scored = []
@@ -200,19 +253,26 @@ class SkillRegistry:
         scored.sort(key=lambda x: x[0], reverse=True)
         results = [m for _, m in scored[:limit]]
 
-        # Log search results - server-only to avoid UI spam
-        if results:
-            skill_names = [m.display_name for m in results]
+        # Log search results with scores for debugging - server-only
+        # This helps debug "why didn't my wingman find the skill?" issues
+        if scored:
+            top_matches = scored[:3]  # Show top 3 for debugging
+            matches_str = ", ".join(
+                f"{m.display_name}({s:.2f})" for s, m in top_matches
+            )
             printr.print(
-                f"Searching for '{query}'... found: {', '.join(skill_names)}",
+                f"🔍 Skill search '{query}' → {matches_str}",
                 color=LogType.SKILL,
-                server_only=True,  # Search details only in terminal/log
+                server_only=True,
             )
         else:
+            # Log all available skills when nothing matched - helps debug
+            available = [m.display_name for m in list(self._manifests.values())[:5]]
+            hint = f" [available: {', '.join(available)}...]" if available else ""
             printr.print(
-                f"Searching for '{query}'... no matching skills found",
+                f"🔍 Skill search '{query}' → no matches{hint}",
                 color=LogType.WARNING,
-                server_only=True,  # Search details only in terminal/log
+                server_only=True,
             )
 
         return results
@@ -335,11 +395,9 @@ class SkillRegistry:
         Returns the meta-tools for progressive disclosure.
         These are the only tools sent to the LLM initially.
         """
-        # Build skills summary for the search tool description
+        # Build full skills list - no truncation so LLM knows all available skills
         all_skills = [m.display_name for m in self._manifests.values()]
-        skills_hint = ", ".join(all_skills[:10])
-        if len(all_skills) > 10:
-            skills_hint += f", and {len(all_skills) - 10} more"
+        skills_hint = ", ".join(all_skills)
 
         return [
             (
@@ -348,7 +406,7 @@ class SkillRegistry:
                     "type": "function",
                     "function": {
                         "name": "search_skills",
-                        "description": f"Search for built-in Wingman skills. These are bundled capabilities like game controls, timers, screenshots, image generation, etc. Available: {skills_hint}",
+                        "description": f"Search for built-in Wingman skills to get details and activate them. Available: {skills_hint}",
                         "parameters": {
                             "type": "object",
                             "properties": {
