@@ -523,8 +523,10 @@ class ConfigMigrationService:
             old["xai"] = new["xai"]
             self.log("- added new property: xai")
 
-            old["google"]["conversation_model"] = "gemini-2.5-flash"
-            self.log("- set google.conversation_model to new default: gemini-2.5-flash")
+            old["google"]["conversation_model"] = "gemini-flash-latest"
+            self.log(
+                "- set google.conversation_model to new default: gemini-flash-latest"
+            )
 
             # Force override prompts with new MCP-optimized versions
             # These new prompts establish tool-first behavior and cleaner TTS instructions
