@@ -581,10 +581,39 @@ class ConfigMigrationService:
                 if not old["inworld"]:
                     del old["inworld"]
 
-            # Remove old skills array (skills are now auto-loaded)
+            # Clean up old skills array but PRESERVE custom property and prompt overrides
+            # Skills are now auto-loaded, but overrides per wingman still need to be saved
+            # We keep overrides even for skills that may no longer exist - they're harmlessly ignored
             if "skills" in old:
-                del old["skills"]
-                changes_made.append("skills (now auto-loaded)")
+                skills_with_overrides = []
+                for skill in old["skills"]:
+                    has_custom_props = skill.get("custom_properties")
+                    has_prompt = skill.get("prompt")
+
+                    if has_custom_props or has_prompt:
+                        stripped_skill = {"module": skill.get("module")}
+
+                        # Keep prompt override if present
+                        if has_prompt:
+                            stripped_skill["prompt"] = has_prompt
+
+                        # Keep only id and value for each custom property
+                        if has_custom_props:
+                            stripped_skill["custom_properties"] = [
+                                {"id": prop.get("id"), "value": prop.get("value")}
+                                for prop in skill.get("custom_properties", [])
+                            ]
+
+                        skills_with_overrides.append(stripped_skill)
+
+                if skills_with_overrides:
+                    old["skills"] = skills_with_overrides
+                    changes_made.append(
+                        f"skills (kept {len(skills_with_overrides)} skill(s) with overrides)"
+                    )
+                else:
+                    del old["skills"]
+                    changes_made.append("skills (removed - no overrides)")
 
             # Set disabled_skills for known wingmen (opt-out model)
             wingman_name = old.get("name", "")

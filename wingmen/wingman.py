@@ -235,11 +235,18 @@ class Wingman:
         errors = []
         self.skills = []
 
-        # Build a lookup of user config overrides by skill name
+        # Helper function to extract skill folder name from module path
+        def get_skill_folder_from_module(module: str) -> str:
+            """Extract folder name from module path like 'skills.star_head.main' -> 'star_head'"""
+            return module.replace(".main", "").replace(".", "/").split("/")[1]
+
+        # Build a lookup of user config overrides by skill folder name
+        # The key must be the folder name (e.g., 'star_head') not the class name (e.g., 'StarHead')
         user_skill_configs: dict[str, "SkillConfig"] = {}
         if self.config.skills:
             for skill_config in self.config.skills:
-                user_skill_configs[skill_config.name] = skill_config
+                folder_name = get_skill_folder_from_module(skill_config.module)
+                user_skill_configs[folder_name] = skill_config
 
         # Get all available skill configs
         available_skills = ModuleManager.read_available_skill_configs()
@@ -366,11 +373,17 @@ class Wingman:
         # Find the skill config
         available_skills = ModuleManager.read_available_skill_configs()
 
-        # Build user config lookup
+        # Helper function to extract skill folder name from module path
+        def get_skill_folder_from_module(module: str) -> str:
+            """Extract folder name from module path like 'skills.star_head.main' -> 'star_head'"""
+            return module.replace(".main", "").replace(".", "/").split("/")[1]
+
+        # Build user config lookup by skill folder name
         user_skill_configs: dict[str, "SkillConfig"] = {}
         if self.config.skills:
             for skill_config in self.config.skills:
-                user_skill_configs[skill_config.name] = skill_config
+                folder_name = get_skill_folder_from_module(skill_config.module)
+                user_skill_configs[folder_name] = skill_config
 
         for skill_folder_name, skill_config_path in available_skills:
             try:
