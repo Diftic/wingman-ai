@@ -186,6 +186,7 @@ class SkillRegistry:
                 printr.print(
                     f"Searching skills... found {len(self._manifests)} available",
                     color=LogType.SKILL,
+                    server_only=True,  # Search details only in terminal/log
                 )
             return results
 
@@ -199,17 +200,19 @@ class SkillRegistry:
         scored.sort(key=lambda x: x[0], reverse=True)
         results = [m for _, m in scored[:limit]]
 
-        # Log search results - visible to users
+        # Log search results - server-only to avoid UI spam
         if results:
             skill_names = [m.display_name for m in results]
             printr.print(
                 f"Searching for '{query}'... found: {', '.join(skill_names)}",
                 color=LogType.SKILL,
+                server_only=True,  # Search details only in terminal/log
             )
         else:
             printr.print(
                 f"Searching for '{query}'... no matching skills found",
                 color=LogType.WARNING,
+                server_only=True,  # Search details only in terminal/log
             )
 
         return results
@@ -232,6 +235,7 @@ class SkillRegistry:
             printr.print(
                 f"Skill '{skill_name}' not found",
                 color=LogType.WARNING,
+                server_only=True,  # Internal warning, keep in log
             )
             return (
                 False,
@@ -250,6 +254,7 @@ class SkillRegistry:
             printr.print(
                 f"Activating skill: {manifest.display_name} (validating...)",
                 color=LogType.SKILL,
+                # Always show activation in UI - important for users to know
             )
             return (
                 True,
@@ -260,6 +265,7 @@ class SkillRegistry:
         printr.print(
             f"Skill activated: {manifest.display_name}",
             color=LogType.SKILL,
+            # Always show activation in UI - important for users to know
         )
         return (
             True,
@@ -278,6 +284,7 @@ class SkillRegistry:
         printr.print(
             f"Skill deactivated: {display_name}",
             color=LogType.SKILL,
+            server_only=True,  # Deactivation is internal, keep in log
         )
         return True, f"Deactivated skill '{skill_name}'."
 
@@ -292,6 +299,7 @@ class SkillRegistry:
             printr.print(
                 f"Conversation reset: deactivating {count} skill(s)",
                 color=LogType.SKILL,
+                server_only=True,  # Reset is internal, keep in log
             )
         self._active_skills.clear()
 

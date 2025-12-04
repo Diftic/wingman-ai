@@ -273,6 +273,7 @@ class McpRegistry:
                     f"{prefix}🔍 Searching MCP servers... found {len(self._manifests)} available",
                     color=LogType.MCP,
                     source_name=self._wingman_name if self._wingman_name else None,
+                    server_only=True,  # Search details only in terminal/log
                 )
             return results
 
@@ -307,6 +308,7 @@ class McpRegistry:
                         f"{prefix}🔍 Searching for '{query}'... using {manifest.display_name} (has discovery tools)",
                         color=LogType.MCP,
                         source_name=self._wingman_name if self._wingman_name else None,
+                        server_only=True,  # Search details only in terminal/log
                     )
                     return results
 
@@ -317,12 +319,14 @@ class McpRegistry:
                 f"{prefix}Searching for '{query}'... found: {', '.join(names)}",
                 color=LogType.MCP,
                 source_name=self._wingman_name if self._wingman_name else None,
+                server_only=True,  # Search details only in terminal/log
             )
         else:
             printr.print(
                 f"{prefix}Searching for '{query}'... no matching MCP servers found",
                 color=LogType.WARNING,
                 source_name=self._wingman_name if self._wingman_name else None,
+                server_only=True,  # Search details only in terminal/log
             )
 
         return results
@@ -356,6 +360,7 @@ class McpRegistry:
             f"{prefix}🌐 MCP activated: {manifest.display_name}",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
+            # Always show activation in UI - important for users to know
         )
         return (
             True,
@@ -376,6 +381,7 @@ class McpRegistry:
             f"{prefix}MCP deactivated: {display_name}",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
+            server_only=True,  # Deactivation is internal, keep in log
         )
         return True, f"Deactivated '{display_name}'."
 
@@ -388,6 +394,7 @@ class McpRegistry:
                 f"{prefix}Conversation reset: deactivating {count} MCP server(s)",
                 color=LogType.MCP,
                 source_name=self._wingman_name if self._wingman_name else None,
+                server_only=True,  # Reset is internal, keep in log
             )
         self._active_servers.clear()
 

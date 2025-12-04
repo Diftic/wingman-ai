@@ -1803,10 +1803,18 @@ class OpenAiWingman(Wingman):
                 benchmark = Benchmark(
                     f"MCP '{connection.config.name}' - {original_name}"
                 )
+
+                # Always show simple 'called' message in UI so users know the wingman is working
                 await printr.print_async(
-                    f"{display_name}: calling `{original_name}`",
+                    f"{display_name}: called `{original_name}`",
                     color=LogType.MCP,
-                    server_only=not self.settings.debug_mode,
+                )
+
+                # Detailed 'calling' log only in terminal/log file
+                await printr.print_async(
+                    f"{display_name}: calling `{original_name}`...",
+                    color=LogType.MCP,
+                    server_only=True,
                 )
 
                 try:
@@ -1823,6 +1831,7 @@ class OpenAiWingman(Wingman):
                     )
                     function_response = "ERROR DURING MCP TOOL EXECUTION"
                 finally:
+                    # Detailed 'completed' with timing only in terminal/log file (or UI if debug)
                     await printr.print_async(
                         f"{display_name}: `{original_name}` completed",
                         color=LogType.MCP,
@@ -1850,11 +1859,20 @@ class OpenAiWingman(Wingman):
             tool_label = f"⚡ {display_name}: {function_name}"
 
             benchmark = Benchmark(f"Skill '{skill.name}' - {function_name}")
+
+            # Always show simple 'called' message in UI so users know the wingman is working
             await printr.print_async(
-                f"{display_name}: calling `{function_name}`",
+                f"{display_name}: called `{function_name}`",
                 color=LogType.SKILL,
                 skill_name=skill.name,
-                server_only=not self.settings.debug_mode,
+            )
+
+            # Detailed 'calling' log only in terminal/log file
+            await printr.print_async(
+                f"{display_name}: calling `{function_name}`...",
+                color=LogType.SKILL,
+                skill_name=skill.name,
+                server_only=True,
             )
 
             try:
