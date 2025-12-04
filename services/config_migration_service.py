@@ -12,7 +12,7 @@ from services.config_manager import (
     DELETED_PREFIX,
     ConfigManager,
 )
-from services.file import get_users_dir, get_custom_skills_dir
+from services.file import get_users_dir, get_custom_skills_dir, get_audio_library_dir
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
 from services.system_manager import SystemManager
@@ -89,6 +89,10 @@ class ConfigMigrationService:
             self.log(
                 f"Skipping custom skills copy - latest_existing_version: {latest_existing_version}, latest_version: {self.latest_version}"
             )
+
+        # Migrate audio library from versioned location to non-versioned location
+        # Only check 1.8.1 and 1.8.2 (most users come from 1.8.1, 1.8.2 was dev-only)
+        self.migrate_audio_library()
 
         # Perform migrations
         current_version = earliest_version
@@ -249,6 +253,86 @@ class ConfigMigrationService:
         except Exception as e:
             self.err(f"Failed to reset to fresh configs: {str(e)}")
             raise
+
+    def migrate_audio_library(self) -> None:
+        """Migrate audio library from versioned location to non-versioned location.
+
+        Starting with 1.9.0, audio library is stored in a non-versioned location:
+        APPDATA/WingmanAI/audio_library/ (persists across updates)
+
+        This method checks 1.8.1 and 1.8.2 for existing audio libraries and migrates them.
+        """
+        # Target: non-versioned audio library directory
+        target_audio_library = get_audio_library_dir()
+
+        # Check 1.8.2 first (dev version), then 1.8.1 (most users)
+        versions_to_check = ["1_8_2", "1_8_1"]
+        source_audio_library = None
+        source_version = None
+
+        for version in versions_to_check:
+            potential_path = path.join(self.users_dir, version, "audio_library")
+            if path.exists(potential_path) and path.isdir(potential_path):
+                # Check if it has any audio files
+                has_audio_files = any(
+                    f.endswith((".mp3", ".wav"))
+                    for _, _, files in os.walk(potential_path)
+                    for f in files
+                )
+                if has_audio_files:
+                    source_audio_library = potential_path
+                    source_version = version
+                    break
+
+        if not source_audio_library:
+            self.log("No audio library found in 1.8.1 or 1.8.2, skipping migration")
+            return
+
+        self.log(
+            f"Found audio library in {source_version.replace('_', '.')}, migrating to non-versioned location",
+            highlight=True,
+        )
+
+        files_copied = 0
+        files_skipped = 0
+
+        # Walk through all files in the source audio library
+        for root, dirs, files in os.walk(source_audio_library):
+            for file in files:
+                if not file.endswith((".mp3", ".wav")):
+                    continue
+
+                # Calculate relative path from source audio library
+                rel_path = path.relpath(root, source_audio_library)
+                rel_path = "" if rel_path == "." else rel_path
+
+                # Create target directory structure
+                if rel_path:
+                    target_dir = path.join(target_audio_library, rel_path)
+                else:
+                    target_dir = target_audio_library
+
+                if not path.exists(target_dir):
+                    os.makedirs(target_dir)
+
+                source_file = path.join(root, file)
+                target_file = path.join(target_dir, file)
+
+                # Skip if file already exists (don't overwrite)
+                if path.exists(target_file):
+                    files_skipped += 1
+                    continue
+
+                try:
+                    shutil.copy2(source_file, target_file)
+                    files_copied += 1
+                except Exception as e:
+                    self.err(f"Failed to copy audio file '{file}': {str(e)}")
+
+        self.log(
+            f"Audio library migration complete: {files_copied} files copied, {files_skipped} files skipped (already exist)",
+            highlight=True,
+        )
 
     def copy_custom_skills(self, old_version: str, new_version: str) -> list[str]:
         """Copy custom skills from old versioned location to new non-versioned custom_skills directory.

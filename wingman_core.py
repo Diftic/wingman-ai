@@ -41,7 +41,7 @@ from providers.wingman_pro import WingmanPro
 from providers.xvasynth import XVASynth
 from wingmen.open_ai_wingman import OpenAiWingman
 from wingmen.wingman import Wingman
-from services.file import get_writable_dir
+from services.file import get_writable_dir, get_audio_library_dir
 from services.voice_service import VoiceService
 from services.settings_service import SettingsService
 from services.config_service import ConfigService
@@ -1103,7 +1103,7 @@ class WingmanCore(WebSocketUser):
 
     # POST /open-filemanager/audio-library
     def open_audio_library_directory(self):
-        show_in_file_manager(get_writable_dir("audio_library"))
+        show_in_file_manager(get_audio_library_dir())
 
     # GET /models/openrouter
     async def get_openrouter_models(self):
@@ -1308,7 +1308,8 @@ class WingmanCore(WebSocketUser):
             if not name.endswith(".mp3"):
                 name += ".mp3"
 
-            directory = get_writable_dir(os.path.join("audio_library", path))
+            directory = os.path.join(get_audio_library_dir(), path)
+            os.makedirs(directory, exist_ok=True)
 
             if os.path.exists(os.path.join(directory, name)):
 

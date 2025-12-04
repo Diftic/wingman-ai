@@ -49,3 +49,21 @@ def get_custom_skills_dir() -> str:
     if not path.exists(custom_skills_path):
         makedirs(custom_skills_path)
     return custom_skills_path
+
+
+def get_audio_library_dir() -> str:
+    """Get the path to the audio library directory.
+
+    Unlike get_writable_dir(), this is NOT versioned - audio library persists
+    across Wingman AI updates. Location: APPDATA/WingmanAI/audio_library/
+    """
+    dirs = PlatformDirs(
+        appname=APP_NAME,
+        appauthor=APP_AUTHOR,
+        ensure_exists=True,
+        roaming=True,
+    )
+    audio_library_path = path.join(dirs.user_data_dir, "audio_library")
+    if not path.exists(audio_library_path):
+        makedirs(audio_library_path)
+    return audio_library_path
