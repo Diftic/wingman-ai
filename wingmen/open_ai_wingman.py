@@ -1464,7 +1464,10 @@ class OpenAiWingman(Wingman):
                 and self.config.elevenlabs.tts_prompt
             ):
                 tts_prompt = self.config.elevenlabs.tts_prompt
-        elif self.config.features.tts_provider == TtsProvider.INWORLD:
+        elif self.config.features.tts_provider == TtsProvider.INWORLD or (
+            self.config.features.tts_provider == TtsProvider.WINGMAN_PRO
+            and self.config.wingman_pro.tts_provider == WingmanProTtsProvider.INWORLD
+        ):
             if self.config.inworld.use_tts_prompt and self.config.inworld.tts_prompt:
                 tts_prompt = self.config.inworld.tts_prompt
 
