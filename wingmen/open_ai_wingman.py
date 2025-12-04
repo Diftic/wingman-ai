@@ -1532,7 +1532,7 @@ class OpenAiWingman(Wingman):
                 completion = self.mistral.ask(
                     messages=messages,
                     tools=tools,
-                    model=self.config.mistral.conversation_model.value,
+                    model=self.config.mistral.conversation_model,
                 )
             elif (
                 self.config.features.conversation_provider == ConversationProvider.GROQ

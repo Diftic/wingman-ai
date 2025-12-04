@@ -7,7 +7,6 @@ from api.enums import (
     ConversationProvider,
     ImageGenerationProvider,
     McpTransportType,
-    MistralModel,
     CustomPropertyType,
     TtsVoiceGender,
     SoundEffect,
@@ -393,7 +392,7 @@ class PromptConfig(BaseModel):
 
 
 class MistralConfig(BaseModel):
-    conversation_model: MistralModel
+    conversation_model: str
     endpoint: str
 
 

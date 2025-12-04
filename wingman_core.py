@@ -237,6 +237,13 @@ class WingmanCore(WebSocketUser):
         )
         self.router.add_api_route(
             methods=["GET"],
+            path="/models/mistral",
+            response_model=list,
+            endpoint=self.get_mistral_models,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
             path="/models/openai",
             response_model=list,
             endpoint=self.get_openai_models,
@@ -1156,6 +1163,22 @@ class WingmanCore(WebSocketUser):
             timeout=10,
             headers={
                 "Authorization": f"Bearer {xia_api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        content = response.json()
+        return content.get("data", [])
+
+    async def get_mistral_models(self):
+        mistral_api_key = await self.secret_keeper.retrieve(
+            key="mistral", requester="Mistral"
+        )
+        response = requests.get(
+            url="https://api.mistral.ai/v1/models",
+            timeout=10,
+            headers={
+                "Authorization": f"Bearer {mistral_api_key}",
                 "Content-Type": "application/json",
             },
         )

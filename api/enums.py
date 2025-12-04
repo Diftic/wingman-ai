@@ -88,17 +88,6 @@ class TtsVoiceGender(Enum):
     NEUTRAL = "Neutral"
 
 
-class MistralModel(Enum):
-    """https://docs.mistral.ai/getting-started/models/"""
-
-    MISTRAL_7B = "open-mistral-7b"
-    OPEN_MIXTRAL_8X7B = "open-mixtral-8x7b"
-    OPEN_MIXTRAL_8X22B = "open-mixtral-8x22b"
-    MISTRAL_SMALL = "mistral-small-latest"
-    MISTRAL_MEDIUM = "mistral-medium-latest"
-    MISTRAL_LARGE = "mistral-large-latest"
-
-
 class PerplexityModel(Enum):
     """https://docs.perplexity.ai/models/model-cards"""
 
@@ -244,10 +233,6 @@ class TtsVoiceGenderEnumModel(BaseEnumModel):
     gender: TtsVoiceGender
 
 
-class MistralModelEnumModel(BaseEnumModel):
-    model: MistralModel
-
-
 class PerplexityModelEnumModel(BaseEnumModel):
     model: PerplexityModel
 
@@ -306,7 +291,6 @@ ENUM_TYPES = {
     "AzureApiVersion": AzureApiVersionEnumModel,
     "AzureRegion": AzureRegionEnumModel,
     "TtsVoiceGender": TtsVoiceGenderEnumModel,
-    "MistralModel": MistralModelEnumModel,
     "SoundEffect": SoundEffectEnumModel,
     "TtsProvider": TtsProviderEnumModel,
     "SttProvider": SttProviderEnumModel,
