@@ -77,7 +77,7 @@ openai_compatible_tts:
   speed: 1.0
   output_streaming: true
 mistral:
-  conversation_model: mistral-large-latest
+  conversation_model: mistral-medium-latest
   endpoint: https://api.mistral.ai/v1
 perplexity:
   conversation_model: sonar
@@ -86,15 +86,15 @@ xai:
   conversation_model: grok-4-fast-non-reasoning
   endpoint: https://api.x.ai/v1
 groq:
-  conversation_model: llama3-70b-8192
+  conversation_model: qwen/qwen3-32b
   endpoint: https://api.groq.com/openai/v1
 cerebras:
-  conversation_model: llama3.1-70b
+  conversation_model: qwen-3-32b
   endpoint: https://api.cerebras.ai/v1
 google:
   conversation_model: gemini-flash-latest
 openrouter:
-  conversation_model: meta-llama/llama-3-8b-instruct:free
+  conversation_model: google/gemini-2.5-flash
   endpoint: https://openrouter.ai/api/v1
 local_llm:
   endpoint: http://localhost:1234/v1 # LMStudio

@@ -524,9 +524,15 @@ class ConfigMigrationService:
             self.log("- added new property: xai")
 
             old["google"]["conversation_model"] = "gemini-flash-latest"
-            self.log(
-                "- set google.conversation_model to new default: gemini-flash-latest"
-            )
+            self.log("- set Google default model to gemini-flash-latest")
+            old["mistral"]["conversation_model"] = "mistral-medium-latest"
+            self.log("- set Mistral default model to mistral-medium-latest")
+            old["cerebras"]["conversation_model"] = "qwen-3-32b"
+            self.log("- set Cerebras default model to qwen-3-32b")
+            old["openrouter"]["conversation_model"] = "google/gemini-2.5-flash"
+            self.log("- set OpenRouter default model to google/gemini-2.5-flash")
+            old["groq"]["conversation_model"] = "qwen/qwen3-32b"
+            self.log("- set Groq default model to qwen/qwen3-32b")
 
             # Force override prompts with new MCP-optimized versions
             # These new prompts establish tool-first behavior and cleaner TTS instructions
