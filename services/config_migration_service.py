@@ -40,10 +40,11 @@ class ConfigMigrationService:
 
     def migrate_to_latest(self):
 
-        # Find the earliest existing version that needs migration
-        earliest_version = self.find_earliest_existing_version(self.users_dir)
+        # Find the latest migratable version to start migration from
+        # (skips legacy versions and any intermediate versions the user already has)
+        start_version = self.find_latest_migratable_version(self.users_dir)
 
-        if not earliest_version:
+        if not start_version:
             self.log("No valid version directories found for migration.", True)
             # Fresh install - apply CUDA auto-detection for FasterWhisper
             self._apply_fresh_install_cuda_settings()
@@ -60,31 +61,24 @@ class ConfigMigrationService:
             return
 
         self.log(
-            f"Starting migration from version {earliest_version.replace('_', '.')} to {self.latest_version.replace('_', '.')}",
+            f"Starting migration from version {start_version.replace('_', '.')} to {self.latest_version.replace('_', '.')}",
             True,
         )
 
         # If the latest version directory already exists (e.g., created by ConfigManager),
         # clean up any template configs that will be migrated from old versions
-        latest_existing_version = self.find_latest_existing_version(self.users_dir)
-        if path.exists(self.latest_config_path) and latest_existing_version:
-            self.remove_duplicate_template_configs(
-                latest_existing_version, self.latest_version
-            )
+        if path.exists(self.latest_config_path) and start_version:
+            self.remove_duplicate_template_configs(start_version, self.latest_version)
 
         # Copy custom skills from the LATEST existing version to new version
         # This ensures we get the most up-to-date custom skills
-        self.log(
-            f"Found latest existing version for custom skills: {latest_existing_version}"
-        )
+        self.log(f"Found latest existing version for custom skills: {start_version}")
         custom_skills = []
-        if latest_existing_version and latest_existing_version != self.latest_version:
-            custom_skills = self.copy_custom_skills(
-                latest_existing_version, self.latest_version
-            )
+        if start_version and start_version != self.latest_version:
+            custom_skills = self.copy_custom_skills(start_version, self.latest_version)
         else:
             self.log(
-                f"Skipping custom skills copy - latest_existing_version: {latest_existing_version}, latest_version: {self.latest_version}"
+                f"Skipping custom skills copy - start_version: {start_version}, latest_version: {self.latest_version}"
             )
 
         # Migrate audio library from versioned location to non-versioned location
@@ -92,7 +86,7 @@ class ConfigMigrationService:
         self.migrate_audio_library()
 
         # Perform migrations
-        current_version = earliest_version
+        current_version = start_version
         while current_version != self.latest_version:
             next_version = self.find_next_version(current_version)
             self.perform_migration(current_version, next_version)
@@ -142,34 +136,6 @@ class ConfigMigrationService:
                 continue
             return version
 
-        return None
-
-    def find_latest_existing_version(self, users_dir):
-        """Find the most recent existing version directory (excluding the target latest version)."""
-        # Get all version directories
-        all_versions = next(os.walk(users_dir))[1]
-        # Filter to version-like directories (format: X_Y_Z)
-        version_dirs = [
-            v for v in all_versions if v.replace("_", "").replace(".", "").isdigit()
-        ]
-        # Sort by version number (newest first)
-        version_dirs.sort(key=lambda v: [int(n) for n in v.split("_")], reverse=True)
-
-        self.log(f"All version directories found: {version_dirs}")
-        self.log(f"Latest version (target): {self.latest_version}")
-
-        # Return the first one that's not the latest version and is migratable
-        for version in version_dirs:
-            # Skip the target version
-            if version == self.latest_version:
-                continue
-            # Skip versions that are too old to migrate
-            if self.is_version_too_old(version):
-                continue
-            self.log(f"Selected latest existing version: {version}")
-            return version
-
-        self.log("No suitable version found for custom skills migration")
         return None
 
     def find_next_version(self, current_version):
