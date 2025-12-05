@@ -111,7 +111,7 @@ class CoreStateChangedCommand(WebSocketCommandModel):
     """Sent when the Core lifecycle state changes.
 
     The client should use this to update UI accordingly (show loading spinner,
-    display progress, etc.). Note that if the Core crashes, it will NOT be able
+    etc.). Note that if the Core crashes, it will NOT be able
     to send a state change - the client must detect WebSocket disconnection and
     failed /ping requests to determine that Core has crashed.
     """
@@ -119,5 +119,3 @@ class CoreStateChangedCommand(WebSocketCommandModel):
     command: Literal["core_state_changed"] = "core_state_changed"
     state: CoreState
     """The current state of Wingman AI Core."""
-    progress: Optional[float] = None
-    """Optional progress indicator (0.0-1.0) for states like MIGRATING."""

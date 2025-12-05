@@ -335,7 +335,6 @@ class WingmanCore(WebSocketUser):
 
         self.is_started = False
         self.core_state: CoreState = CoreState.STARTING
-        self.core_state_progress: Optional[float] = None
         self._last_logged_state: Optional[CoreState] = None
         self.startup_errors: list[WingmanInitializationError] = []
         self.tower_errors: list[WingmanInitializationError] = []
@@ -397,24 +396,20 @@ class WingmanCore(WebSocketUser):
         if self.settings_service.settings.voice_activation.enabled:
             await self.set_voice_activation(is_enabled=True)
 
-    async def set_core_state(
-        self, state: CoreState, progress: Optional[float] = None
-    ) -> None:
+    async def set_core_state(self, state: CoreState) -> None:
         """Update the core state and broadcast to all connected clients.
 
         Args:
             state: The new CoreState
-            progress: Optional progress indicator (0.0-1.0) for states like MIGRATING
         """
         self.core_state = state
-        self.core_state_progress = progress
 
         # Update is_started for backwards compatibility
         self.is_started = state == CoreState.READY
 
         # Broadcast state change to connected clients
         if self._connection_manager:
-            command = CoreStateChangedCommand(state=state, progress=progress)
+            command = CoreStateChangedCommand(state=state)
             await self._connection_manager.broadcast(command)
 
         # Only log actual state changes, not progress updates within the same state
@@ -430,7 +425,6 @@ class WingmanCore(WebSocketUser):
         """Get the current core status for the /ping endpoint."""
         return CoreStatusResponse(
             state=self.core_state,
-            progress=self.core_state_progress,
         )
 
     def is_mouse_configured(self, config: Config) -> bool:

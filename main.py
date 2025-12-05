@@ -439,16 +439,9 @@ async def get_dummy_benchmark():
 
 
 async def async_main(host: str, port: int, sidecar: bool):
-    # Define migration progress callback
-    def on_migration_progress(progress: float):
-        # Use ensure_async since this is called from sync migration code
-        core.ensure_async(core.set_core_state(CoreState.MIGRATING, progress=progress))
-
     # Set MIGRATING state before migrations
-    await core.set_core_state(CoreState.MIGRATING, progress=0.0)
-    await core.config_service.migrate_configs(
-        system_manager, progress_callback=on_migration_progress
-    )
+    await core.set_core_state(CoreState.MIGRATING)
+    await core.config_service.migrate_configs(system_manager)
 
     # Set LOADING_CONFIG state
     await core.set_core_state(CoreState.LOADING_CONFIG)
