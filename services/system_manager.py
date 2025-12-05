@@ -1,5 +1,4 @@
 import platform
-import re
 import subprocess
 import shutil
 from typing import Optional
@@ -64,7 +63,6 @@ class SystemManager:
         This checks for:
         1. nvidia-smi command availability (indicates NVIDIA driver is installed)
         2. Successfully running nvidia-smi (indicates a working NVIDIA GPU)
-        3. Captures the GPU model name for feature detection (e.g., RTX 50xx series)
         """
         if self._gpu_checked:
             return
@@ -115,12 +113,6 @@ class SystemManager:
                 color=LogType.STARTUP,
                 server_only=True,
             )
-            if self.is_rtx_50xx_series():
-                printr.print(
-                    "RTX 50xx series detected - will use float16 compute type for FasterWhisper",
-                    color=LogType.STARTUP,
-                    server_only=True,
-                )
         else:
             printr.print(
                 "No NVIDIA GPU detected - CUDA acceleration disabled",
@@ -144,25 +136,6 @@ class SystemManager:
         """
         self._detect_gpu()
         return self._gpu_name
-
-    def is_rtx_50xx_series(self) -> bool:
-        """
-        Check if the GPU is an RTX 50xx series card (Blackwell architecture).
-
-        RTX 50xx cards require compute_type='float16' for FasterWhisper/ctranslate2
-        due to changes in the Blackwell architecture.
-
-        Returns:
-            True if GPU is RTX 5060, 5070, 5080, 5090, etc.
-        """
-        gpu_name = self.get_gpu_name()
-        if not gpu_name:
-            return False
-
-        # Match patterns like "RTX 5060", "RTX 5070 Ti", "RTX 5080", "RTX 5090", etc.
-        # Also handles laptop variants like "RTX 5070 Laptop GPU"
-        pattern = r"RTX\s*50[0-9]{2}"
-        return bool(re.search(pattern, gpu_name, re.IGNORECASE))
 
     # GET /system-info
     def get_system_info(self):
