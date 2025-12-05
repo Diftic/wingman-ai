@@ -644,9 +644,26 @@ class ConfigMigrationService:
 
             return old
 
+        # Models removed from Wingman Pro - migrate to gpt-4o-mini
+        removed_wingman_pro_models = [
+            "gpt-4o",
+            "mistral-large-latest",
+            "llama3-8b",
+            "llama3-70b",
+        ]
+
         def migrate_defaults(old: dict, new: dict) -> dict:
             old["xai"] = new["xai"]
             self.log("- added new property: xai")
+
+            # Migrate deprecated Wingman Pro conversation models
+            if "wingman_pro" in old and "conversation_deployment" in old["wingman_pro"]:
+                current_model = old["wingman_pro"]["conversation_deployment"]
+                if current_model in removed_wingman_pro_models:
+                    old["wingman_pro"]["conversation_deployment"] = "gpt-4o-mini"
+                    self.log(
+                        f"- migrated wingman_pro.conversation_deployment from '{current_model}' to 'gpt-4o-mini' (model removed)"
+                    )
 
             old["google"]["conversation_model"] = "gemini-flash-latest"
             self.log("- set Google default model to gemini-flash-latest")
@@ -688,6 +705,15 @@ class ConfigMigrationService:
             # Clear prompt overrides so everyone uses the new defaults
             # IMPORTANT: We keep 'backstory' - only clear system_prompt and tts_prompt
             changes_made = []
+
+            # Migrate deprecated Wingman Pro conversation models
+            if "wingman_pro" in old and "conversation_deployment" in old["wingman_pro"]:
+                current_model = old["wingman_pro"]["conversation_deployment"]
+                if current_model in removed_wingman_pro_models:
+                    old["wingman_pro"]["conversation_deployment"] = "gpt-4o-mini"
+                    changes_made.append(
+                        f"wingman_pro.conversation_deployment ('{current_model}' -> 'gpt-4o-mini')"
+                    )
 
             # Clear system_prompt override (force use of new default)
             if "prompts" in old:
