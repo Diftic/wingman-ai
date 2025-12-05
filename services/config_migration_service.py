@@ -68,6 +68,8 @@ class ConfigMigrationService:
 
         if not earliest_version:
             self.log("No valid version directories found for migration.", True)
+            # Fresh install - apply CUDA auto-detection for FasterWhisper
+            self._apply_fresh_install_cuda_settings()
             self._report_progress(1.0)
             return
 
@@ -89,6 +91,8 @@ class ConfigMigrationService:
                 True,
             )
             self.reset_to_fresh_configs()
+            # Apply CUDA auto-detection for the fresh configs
+            self._apply_fresh_install_cuda_settings()
             self._report_progress(1.0)
             return
 
@@ -287,6 +291,41 @@ class ConfigMigrationService:
         version_parts = [int(n) for n in version.split("_")]
         min_parts = [int(n) for n in MINIMUM_SUPPORTED_VERSION.split("_")]
         return version_parts < min_parts
+
+    def _apply_fresh_install_cuda_settings(self):
+        """Auto-detect CUDA availability and update FasterWhisper settings for fresh installs.
+
+        This ensures that fresh installations automatically use CUDA if available,
+        rather than defaulting to CPU.
+        """
+        cuda_available = self.system_manager.is_cuda_available()
+        gpu_name = self.system_manager.get_gpu_name()
+
+        device = "cuda" if cuda_available else "cpu"
+        compute_type = "auto"
+
+        self.log(
+            "Fresh install detected - configuring FasterWhisper for optimal performance"
+        )
+        self.log(f"- detected GPU: {gpu_name or 'None'}")
+        self.log(
+            f"- setting voice_activation.fasterwhisper.device to '{device}' (CUDA {'available' if cuda_available else 'not available'})"
+        )
+        self.log(
+            f"- setting voice_activation.fasterwhisper.compute_type to '{compute_type}'"
+        )
+
+        # Update the settings config
+        settings = self.config_manager.settings_config
+        if (
+            settings
+            and settings.voice_activation
+            and settings.voice_activation.fasterwhisper
+        ):
+            settings.voice_activation.fasterwhisper.device = device
+            settings.voice_activation.fasterwhisper.compute_type = compute_type
+            self.config_manager.save_settings_config()
+            self.log("- settings saved successfully")
 
     def reset_to_fresh_configs(self):
         """Copy fresh configs from templates to the latest version directory.
