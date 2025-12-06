@@ -677,6 +677,11 @@ class ConfigMigrationService:
                     self.log(
                         "- removed inworld.audio_config.pitch (no longer supported)"
                     )
+                    # Add streaming_sample_rate_hertz for better streaming quality
+                    old["inworld"]["audio_config"]["streaming_sample_rate_hertz"] = new[
+                        "inworld"
+                    ]["audio_config"]["streaming_sample_rate_hertz"]
+                    self.log("- added inworld.audio_config.streaming_sample_rate_hertz")
 
             return old
 

@@ -278,7 +278,10 @@ class WingmanPro:
             # For streaming, we need LINEAR16 format for raw PCM playback
             if data["audio_config"]:
                 data["audio_config"]["audio_encoding"] = "LINEAR16"
-                data["audio_config"]["sample_rate_hertz"] = 16000
+                # Use streaming sample rate from config
+                data["audio_config"][
+                    "sample_rate_hertz"
+                ] = config.audio_config.streaming_sample_rate_hertz
 
             def buffer_generator():
                 with requests.post(
@@ -332,6 +335,9 @@ class WingmanPro:
                 buffer_callback=buffer_callback,
                 config=sound_config,
                 wingman_name=wingman_name,
+                sample_rate=config.audio_config.streaming_sample_rate_hertz,
+                channels=1,  # LINEAR16 is typically mono
+                dtype="int16",  # LINEAR16 uses 16-bit integers
                 use_gain_boost=True,  # Streaming audio needs gain boost for radio effects
             )
         else:

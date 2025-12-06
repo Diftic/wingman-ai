@@ -59,9 +59,9 @@ class Inworld:
         if config.output_streaming:
             # Override encoding for streaming
             audio_config["audioEncoding"] = "LINEAR16"
-            # Use standard sample rate for LINEAR16 streaming (better performance)
+            # Use streaming sample rate from config for LINEAR16 streaming
             audio_config["sampleRateHertz"] = (
-                24000  # Good balance of quality and performance
+                config.audio_config.streaming_sample_rate_hertz
             )
 
         payload = {

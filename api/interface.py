@@ -301,6 +301,8 @@ class InworldAudioConfig(BaseModel):
     """The bitrate to use for the audio encoding in bps. Default is 128k"""
     sample_rate_hertz: float
     """The synthesis sample rate (in hertz) for this audio. Accepts values within the range [8000, 48000]. Default is 48k"""
+    streaming_sample_rate_hertz: int
+    """The sample rate (in hertz) to use for streaming audio (LINEAR16 format). Accepts values within the range [8000, 48000]. Default is 24000 for good balance of quality and performance."""
     speaking_rate: float
     """Speaking rate/speed, in the range [0.5, 1.5]. 1.0 is the normal native speed supported by the specific voice. The default is 1.0."""
 
