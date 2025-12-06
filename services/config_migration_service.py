@@ -5,7 +5,7 @@ import shutil
 from typing import Callable, Optional
 from pydantic import ValidationError
 from api.enums import LogType
-from api.interface import NestedConfig, SettingsConfig
+from api.interface import CustomProperty, NestedConfig, SettingsConfig
 from services.config_manager import (
     CONFIGS_DIR,
     DEFAULT_PREFIX,
@@ -425,10 +425,10 @@ class ConfigMigrationService:
                 continue
 
             is_custom = skill_name not in builtin_skills
-            self.log(f"Evaluating skill: {skill_name} - Is custom? {is_custom}")
 
             # If skill is not in built-in skills, it's a custom skill
             if is_custom:
+                self.log(f"Found custom skill: {skill_name}", warning=True)
                 new_skill_path = path.join(custom_skills_target_dir, skill_name)
 
                 try:
@@ -735,14 +735,59 @@ class ConfigMigrationService:
                         if has_prompt:
                             stripped_skill["prompt"] = has_prompt
 
-                        # Keep only id and value for each custom property
+                        # Custom properties in wingman config are diffs - they only contain
+                        # the id and overridden values. We need to merge with the skill's
+                        # default_config.yaml to get complete valid CustomProperty objects.
                         if has_custom_props:
-                            stripped_skill["custom_properties"] = [
-                                {"id": prop.get("id"), "value": prop.get("value")}
-                                for prop in skill.get("custom_properties", [])
-                            ]
+                            valid_props = []
+                            skill_module = skill.get("module", "")
 
-                        skills_with_overrides.append(stripped_skill)
+                            # Get the skill's default custom properties
+                            skill_default_props = (
+                                self._get_skill_default_custom_properties(skill_module)
+                            )
+
+                            for prop in has_custom_props:
+                                prop_id = prop.get("id")
+                                if not prop_id:
+                                    continue
+
+                                # Find the default property with this id
+                                default_prop = skill_default_props.get(prop_id)
+                                if default_prop:
+                                    # Merge: start with default, override with wingman values
+                                    merged_prop = default_prop.copy()
+                                    merged_prop.update(prop)
+                                    # Remove examples field if present (not needed in wingman config)
+                                    merged_prop.pop("examples", None)
+
+                                    try:
+                                        CustomProperty(**merged_prop)
+                                        valid_props.append(merged_prop)
+                                    except ValidationError as e:
+                                        self.log(
+                                            f"- skipped custom property '{prop_id}' in skill '{skill_module}': validation failed after merge",
+                                            warning=True,
+                                        )
+                                else:
+                                    # No default found - try to validate as-is (might be a custom skill prop)
+                                    try:
+                                        CustomProperty(**prop)
+                                        valid_props.append(prop)
+                                    except ValidationError:
+                                        self.log(
+                                            f"- skipped custom property '{prop_id}' in skill '{skill_module}': no default found and incomplete",
+                                            warning=True,
+                                        )
+
+                            if valid_props:
+                                stripped_skill["custom_properties"] = valid_props
+
+                        # Only add skill if it still has overrides
+                        if stripped_skill.get("prompt") or stripped_skill.get(
+                            "custom_properties"
+                        ):
+                            skills_with_overrides.append(stripped_skill)
 
                 if skills_with_overrides:
                     old["skills"] = skills_with_overrides
@@ -852,10 +897,70 @@ class ConfigMigrationService:
 
     # INTERNAL
 
-    def log(self, message: str, highlight: bool = False):
+    def _get_skill_default_custom_properties(
+        self, skill_module: str
+    ) -> dict[str, dict]:
+        """Get the default custom properties from a skill's default_config.yaml.
+
+        Args:
+            skill_module: The skill module path (e.g., 'skills.vision_ai.main')
+
+        Returns:
+            A dict mapping property id to the full property dict from default_config.yaml
+        """
+        from services.module_manager import get_bundled_skills_dir
+
+        # Extract skill directory name from module path
+        # e.g., 'skills.vision_ai.main' -> 'vision_ai'
+        skill_dir = skill_module.replace(".main", "").replace(".", "/").split("/")[-1]
+
+        # Search for default_config.yaml in multiple locations
+        search_paths = []
+
+        # 1. Bundled skills (in the app)
+        bundled_dir = get_bundled_skills_dir()
+        if bundled_dir:
+            search_paths.append(
+                path.join(bundled_dir, skill_dir, "default_config.yaml")
+            )
+
+        # 2. Source skills directory (dev mode)
+        from services.module_manager import SKILLS_DIR
+
+        search_paths.append(path.join(SKILLS_DIR, skill_dir, "default_config.yaml"))
+
+        # 3. Custom skills directory
+        search_paths.append(
+            path.join(get_custom_skills_dir(), skill_dir, "default_config.yaml")
+        )
+
+        # Find and read the default_config.yaml
+        for config_path in search_paths:
+            if path.exists(config_path):
+                try:
+                    config = self.config_manager.read_config(config_path)
+                    if config and "custom_properties" in config:
+                        # Build a dict keyed by id for easy lookup
+                        return {
+                            prop["id"]: prop
+                            for prop in config["custom_properties"]
+                            if "id" in prop
+                        }
+                except Exception:
+                    pass
+
+        return {}
+
+    def log(self, message: str, highlight: bool = False, warning: bool = False):
+        if warning:
+            color = LogType.WARNING
+        elif highlight:
+            color = LogType.STARTUP
+        else:
+            color = LogType.SYSTEM
         self.printr.print(
             message,
-            color=LogType.SYSTEM if not highlight else LogType.STARTUP,
+            color=color,
             server_only=True,
         )
         self.log_message += f"{message}\n"
@@ -1027,121 +1132,121 @@ class ConfigMigrationService:
                 old_file = path.join(root, filename)
                 new_file = old_file.replace(old_config_path, new_config_path)
 
-            # secrets
-            if filename == "secrets.yaml":
-                if migrate_secrets:
-                    self.log("Migrating secrets.yaml...", True)
-                    old_secrets = self.config_manager.read_config(old_file) or {}
-                    migrated_secrets = migrate_secrets(old_secrets)
-                    # Write the migrated secrets
-                    new_dir = path.dirname(new_file)
-                    if not path.exists(new_dir):
-                        os.makedirs(new_dir)
-                    self.config_manager.write_config(new_file, migrated_secrets)
-                    self.log("Migrated secrets.yaml", highlight=True)
-                else:
-                    self.copy_file(old_file, new_file)
+                # secrets
+                if filename == "secrets.yaml":
+                    if migrate_secrets:
+                        self.log("Migrating secrets.yaml...", True)
+                        old_secrets = self.config_manager.read_config(old_file) or {}
+                        migrated_secrets = migrate_secrets(old_secrets)
+                        # Write the migrated secrets
+                        new_dir = path.dirname(new_file)
+                        if not path.exists(new_dir):
+                            os.makedirs(new_dir)
+                        self.config_manager.write_config(new_file, migrated_secrets)
+                        self.log("Migrated secrets.yaml", highlight=True)
+                    else:
+                        self.copy_file(old_file, new_file)
 
-                if new_config_path == self.latest_config_path:
-                    secret_keeper = SecretKeeper()
-                    secret_keeper.secrets = secret_keeper.load()
-            # settings
-            elif filename == "settings.yaml":
-                self.log("Migrating settings.yaml...", True)
-                migrated_settings = migrate_settings(
-                    old=self.config_manager.read_config(old_file),
-                    new=self.config_manager.read_config(new_file),
-                )
-                try:
                     if new_config_path == self.latest_config_path:
-                        self.config_manager.settings_config = SettingsConfig(
-                            **migrated_settings
-                        )
-                    self.config_manager.save_settings_config()
-                except ValidationError as e:
-                    self.err(f"Unable to migrate settings.yaml:\n{str(e)}")
-            # defaults
-            elif filename == "defaults.yaml":
-                self.log("Migrating defaults.yaml...", True)
-                migrated_defaults = migrate_defaults(
-                    old=self.config_manager.read_config(old_file),
-                    new=self.config_manager.read_config(new_file),
-                )
-                try:
-                    self.config_manager.default_config = NestedConfig(
-                        **migrated_defaults
-                    )
-                    self.config_manager.save_defaults_config()
-                except ValidationError as e:
-                    self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
-            # Wingmen
-            elif filename.endswith(".yaml"):
-                self.log(f"Migrating Wingman {filename}...", True)
-                # defaults are already migrated because the Wingman config is in a subdirectory
-                try:
-                    default_config = self.config_manager.read_default_config()
-                    migrated_wingman = migrate_wingman(
+                        secret_keeper = SecretKeeper()
+                        secret_keeper.secrets = secret_keeper.load()
+                # settings
+                elif filename == "settings.yaml":
+                    self.log("Migrating settings.yaml...", True)
+                    migrated_settings = migrate_settings(
                         old=self.config_manager.read_config(old_file),
-                        new=(
-                            self.config_manager.read_config(new_file)
-                            if path.exists(new_file)
-                            else None
-                        ),
+                        new=self.config_manager.read_config(new_file),
                     )
-                    # validate the merged config
-                    if new_config_path == self.latest_config_path:
-                        _wingman_config = self.config_manager.merge_configs(
+                    try:
+                        if new_config_path == self.latest_config_path:
+                            self.config_manager.settings_config = SettingsConfig(
+                                **migrated_settings
+                            )
+                        self.config_manager.save_settings_config()
+                    except ValidationError as e:
+                        self.err(f"Unable to migrate settings.yaml:\n{str(e)}")
+                # defaults
+                elif filename == "defaults.yaml":
+                    self.log("Migrating defaults.yaml...", True)
+                    migrated_defaults = migrate_defaults(
+                        old=self.config_manager.read_config(old_file),
+                        new=self.config_manager.read_config(new_file),
+                    )
+                    try:
+                        self.config_manager.default_config = NestedConfig(
+                            **migrated_defaults
+                        )
+                        self.config_manager.save_defaults_config()
+                    except ValidationError as e:
+                        self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
+                # Wingmen
+                elif filename.endswith(".yaml"):
+                    self.log(f"Migrating Wingman {filename}...", True)
+                    # defaults are already migrated because the Wingman config is in a subdirectory
+                    try:
+                        default_config = self.config_manager.read_default_config()
+                        migrated_wingman = migrate_wingman(
+                            old=self.config_manager.read_config(old_file),
+                            new=(
+                                self.config_manager.read_config(new_file)
+                                if path.exists(new_file)
+                                else None
+                            ),
+                        )
+                        # validate the merged config
+                        if new_config_path == self.latest_config_path:
+                            _wingman_config = self.config_manager.merge_configs(
+                                default_config, migrated_wingman
+                            )
+                        # diff it
+                        wingman_diff = self.config_manager.deep_diff(
                             default_config, migrated_wingman
                         )
-                    # diff it
-                    wingman_diff = self.config_manager.deep_diff(
-                        default_config, migrated_wingman
-                    )
-                    # save it
-                    self.config_manager.write_config(new_file, wingman_diff)
+                        # save it
+                        self.config_manager.write_config(new_file, wingman_diff)
 
-                    # The old file was logically deleted and a new one exists that isn't yet
-                    new_base_file = path.join(
-                        root.replace(old_config_path, new_config_path),
-                        filename.replace(DELETED_PREFIX, "", 1),
-                    )
-                    if filename.startswith(DELETED_PREFIX) and path.exists(
-                        new_base_file
-                    ):
-                        os.remove(new_base_file)
+                        # The old file was logically deleted and a new one exists that isn't yet
+                        new_base_file = path.join(
+                            root.replace(old_config_path, new_config_path),
+                            filename.replace(DELETED_PREFIX, "", 1),
+                        )
+                        if filename.startswith(DELETED_PREFIX) and path.exists(
+                            new_base_file
+                        ):
+                            os.remove(new_base_file)
 
-                        avatar = new_base_file.replace(".yaml", ".png")
-                        if path.exists(avatar):
-                            os.remove(avatar)
-                        self.log(
-                            f"Logically deleting Wingman {filename} like in the previous version"
-                        )
-                except FileNotFoundError as e:
-                    # Likely a custom skill that doesn't have templates
-                    error_str = str(e)
-                    if "skills" in error_str and "default_config.yaml" in error_str:
-                        self.log(
-                            f"Warning: {filename} uses custom skill(s) without templates. "
-                            f"Custom skills have been copied but may need manual review.",
-                            True,
-                        )
-                    else:
-                        self.err(f"Unable to migrate {filename}:\n{error_str}")
-                    # Copy the wingman file anyway so user doesn't lose it
-                    if not path.exists(new_file):
-                        new_file_dir = path.dirname(new_file)
-                        if not path.exists(new_file_dir):
-                            os.makedirs(new_file_dir)
-                        shutil.copyfile(old_file, new_file)
-                    continue
-                except Exception as e:
-                    self.err(f"Unable to migrate {filename}:\n{str(e)}")
-                    # Copy the wingman file anyway so user doesn't lose it
-                    if not path.exists(new_file):
-                        shutil.copyfile(old_file, new_file)
-                    continue
-            else:
-                self.copy_file(old_file, new_file)
+                            avatar = new_base_file.replace(".yaml", ".png")
+                            if path.exists(avatar):
+                                os.remove(avatar)
+                            self.log(
+                                f"Logically deleting Wingman {filename} like in the previous version"
+                            )
+                    except FileNotFoundError as e:
+                        # Likely a custom skill that doesn't have templates
+                        error_str = str(e)
+                        if "skills" in error_str and "default_config.yaml" in error_str:
+                            self.log(
+                                f"Warning: {filename} uses custom skill(s) without templates. "
+                                f"Custom skills have been copied but may need manual review.",
+                                True,
+                            )
+                        else:
+                            self.err(f"Unable to migrate {filename}:\n{error_str}")
+                        # Copy the wingman file anyway so user doesn't lose it
+                        if not path.exists(new_file):
+                            new_file_dir = path.dirname(new_file)
+                            if not path.exists(new_file_dir):
+                                os.makedirs(new_file_dir)
+                            shutil.copyfile(old_file, new_file)
+                        continue
+                    except Exception as e:
+                        self.err(f"Unable to migrate {filename}:\n{str(e)}")
+                        # Copy the wingman file anyway so user doesn't lose it
+                        if not path.exists(new_file):
+                            shutil.copyfile(old_file, new_file)
+                        continue
+                else:
+                    self.copy_file(old_file, new_file)
 
         # Handle directory deletions after processing all files
         for root, _dirs, _files in walk(old_config_path):
