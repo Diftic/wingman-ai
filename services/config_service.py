@@ -7,7 +7,9 @@ from api.interface import (
     ConfigDirInfo,
     ConfigWithDirInfo,
     ConfigsInfo,
+    McpConfig,
     McpConnectResult,
+    McpServerConfig,
     McpServerState,
     NestedConfig,
     NewWingmanTemplate,
@@ -175,6 +177,18 @@ class ConfigService:
             path="/wingman-mcps/connect",
             endpoint=self.connect_wingman_mcp,
             response_model=McpConnectResult,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/mcp-servers",
+            endpoint=self.save_mcp_server,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/mcp-servers",
+            endpoint=self.delete_mcp_server,
             tags=tags,
         )
         self.router.add_api_route(
@@ -477,6 +491,89 @@ class ConfigService:
             self.printr.toast_error(str(e))
             raise e
 
+    # POST /mcp-servers
+    async def save_mcp_server(self, mcp_server: McpServerConfig):
+        """Save an MCP server to the central mcp.yaml and refresh all active wingmen."""
+        try:
+            mcp_config = self.config_manager.mcp_config
+            if not mcp_config:
+                mcp_config = McpConfig(servers=[])
+                self.config_manager.mcp_config = mcp_config
+
+            # Check if server already exists (update) or is new (add)
+            existing_index = next(
+                (
+                    i
+                    for i, s in enumerate(mcp_config.servers)
+                    if s.name == mcp_server.name
+                ),
+                None,
+            )
+
+            if existing_index is not None:
+                # Update existing server
+                mcp_config.servers[existing_index] = mcp_server
+                self.printr.print(
+                    f"Updated MCP server '{mcp_server.name}' in mcp.yaml",
+                    server_only=True,
+                )
+            else:
+                # Add new server
+                mcp_config.servers.append(mcp_server)
+                self.printr.print(
+                    f"Added MCP server '{mcp_server.name}' to mcp.yaml",
+                    server_only=True,
+                )
+
+            # Save to file
+            self.config_manager.save_mcp_config()
+
+            # Refresh MCPs on all active wingmen so they can use the new/updated server
+            if self.tower:
+                for wingman in self.tower.wingmen:
+                    if hasattr(wingman, "init_mcps"):
+                        await wingman.init_mcps()
+
+            self.printr.toast(
+                f"MCP server '{mcp_server.display_name or mcp_server.name}' saved."
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # DELETE /mcp-servers
+    async def delete_mcp_server(self, mcp_name: str):
+        """Delete an MCP server from the central mcp.yaml and refresh all active wingmen."""
+        try:
+            mcp_config = self.config_manager.mcp_config
+            if not mcp_config or not mcp_config.servers:
+                self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+                return
+
+            # Find and remove the server
+            original_count = len(mcp_config.servers)
+            mcp_config.servers = [s for s in mcp_config.servers if s.name != mcp_name]
+
+            if len(mcp_config.servers) == original_count:
+                self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+                return
+
+            # Save to file
+            self.config_manager.save_mcp_config()
+
+            # Refresh MCPs on all active wingmen to disconnect from removed server
+            if self.tower:
+                for wingman in self.tower.wingmen:
+                    if hasattr(wingman, "init_mcps"):
+                        await wingman.init_mcps()
+
+            self.printr.toast(f"MCP server '{mcp_name}' deleted.")
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
     # POST /wingman-mcps/connect
     async def connect_wingman_mcp(
         self,
@@ -737,14 +834,6 @@ class ConfigService:
                 "Cannot save wingman config: Tower not initialized. Please wait for the config to fully load."
             )
             return
-
-        # Debug: Log MCP configs being saved
-        if wingman_config.mcp:
-            for mcp in wingman_config.mcp:
-                self.printr.print(
-                    f"[DEBUG] Saving MCP '{mcp.name}': headers={mcp.headers}, type={mcp.type}",
-                    server_only=True,
-                )
 
         # update the wingman
         wingman = self.tower.get_wingman_by_name(wingman_file.name)

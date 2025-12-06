@@ -748,7 +748,7 @@ class ConfigManager:
                     (
                         content
                         if isinstance(content, dict)
-                        else content.dict(exclude_none=True)
+                        else content.model_dump(exclude_none=True)
                     ),
                     stream,
                 )
