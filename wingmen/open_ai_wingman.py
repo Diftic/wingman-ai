@@ -4,6 +4,7 @@ import asyncio
 import random
 import traceback
 import uuid
+from datetime import datetime
 from typing import (
     Mapping,
     Optional,
@@ -1471,12 +1472,68 @@ class OpenAiWingman(Wingman):
             if self.config.inworld.use_tts_prompt and self.config.inworld.tts_prompt:
                 tts_prompt = self.config.inworld.tts_prompt
 
+        # Add TTS header only if there's a prompt
+        if tts_prompt:
+            tts_prompt = "# TEXT-TO-SPEECH\n" + tts_prompt
+
+        # Build user context with environment metadata
+        user_context = self._build_user_context()
+
         context = self.config.prompts.system_prompt.format(
             backstory=self.config.prompts.backstory,
             skills=skill_prompts,
             ttsprompt=tts_prompt,
+            user_context=user_context,
         )
+
         return context
+
+    def _build_user_context(self) -> str:
+        """Build user context metadata for the system prompt.
+
+        Includes timezone, config context, username, and wingman name.
+        """
+        context_parts = []
+        backstory = self.config.prompts.backstory or ""
+        backstory_lower = backstory.lower()
+
+        # Timezone information
+        try:
+            local_tz = datetime.now().astimezone().tzinfo
+            tz_name = str(local_tz)
+            # Get UTC offset in a readable format
+            utc_offset = datetime.now().astimezone().strftime("%z")
+            # Format as +HH:MM or -HH:MM
+            if len(utc_offset) >= 5:
+                utc_offset = f"{utc_offset[:3]}:{utc_offset[3:]}"
+            context_parts.append(f"- Timezone: {tz_name} (UTC{utc_offset})")
+        except Exception:
+            context_parts.append("- Timezone: Unknown")
+
+        # Config/context name (e.g., "Star Citizen", "Elite Dangerous")
+        # This helps the LLM understand which game/context tools are relevant for
+        if self.tower and self.tower.config_dir and self.tower.config_dir.name:
+            context_parts.append(f"- Active context: {self.tower.config_dir.name}")
+
+        # Username (only if not explicitly named in backstory)
+        if self.settings.user_name:
+            # Check if username is mentioned in backstory as a standalone word
+            import re
+
+            name_pattern = r"\b" + re.escape(self.settings.user_name.lower()) + r"\b"
+            if not re.search(name_pattern, backstory_lower):
+                context_parts.append(
+                    f"- User's name (default): {self.settings.user_name}"
+                )
+
+        # Wingman name - always include as it's useful context
+        # The system prompt already tells LLM to prioritize backstory names
+        if self.name:
+            context_parts.append(f"- Your name (default): {self.name}")
+
+        if context_parts:
+            return "\n".join(context_parts)
+        return "No additional context available."
 
     async def add_context(self, messages):
         messages.insert(0, {"role": "system", "content": (await self.get_context())})
@@ -1640,6 +1697,15 @@ class OpenAiWingman(Wingman):
 
         messages = self.messages.copy()
         await self.add_context(messages)
+
+        # DEBUG: Print compiled context (dev-only, remove before release)
+        if messages and messages[0].get("role") == "system":
+            print("\n" + "=" * 80)
+            print("COMPILED CONTEXT:")
+            print("=" * 80)
+            print(messages[0].get("content", ""))
+            print("=" * 80 + "\n")
+
         completion = await self.actual_llm_call(messages, tools)
 
         # if request isnt most recent, ignore the response

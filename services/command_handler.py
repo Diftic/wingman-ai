@@ -315,6 +315,9 @@ class CommandHandler:
         self.core.client_plan = command.plan
         self.core.client_account_name = command.account_name
 
+        # Store username in settings for wingman access
+        self.core.config_manager.settings_config.user_name = command.account_name
+
         self.printr.print(
             f"User {command.account_name} logged in ({command.plan})",
             toast=ToastType.NORMAL,
@@ -335,6 +338,9 @@ class CommandHandler:
         self.core.is_client_logged_in = False
         self.core.client_plan = "Free"
         self.core.client_account_name = ""
+
+        # Clear username from settings
+        self.core.config_manager.settings_config.user_name = None
 
         self.printr.print(
             "User {command.account_name} logged out",
