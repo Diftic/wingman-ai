@@ -19,6 +19,7 @@ disabled_skills:
   - VoiceChanger
 disabled_mcps:
   - wingman_websearch
+  - wingman_perplexity
 prompts:
   backstory: |
     Your name is "Computer" and you are the AI board computer of a spacecraft in the Star Citizen universe.
