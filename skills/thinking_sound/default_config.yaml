@@ -5,17 +5,10 @@ author: JayMatthew
 tags:
   - Utility
   - Music
-aliases:
-  - waiting sound
-  - loading sound
-  - processing sound
-  - hold music
-  - background sound
-  - ambient sound
-  - thinking music
 description:
   en: Plays back sounds while waiting on AI response.
   de: Spielt Sounds ab, während auf die Antwort der AI gewartet wird.
+enabled_by_default: false
 custom_properties:
   - id: audio_config
     name: Audio Configuration
