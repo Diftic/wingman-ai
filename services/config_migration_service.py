@@ -406,6 +406,7 @@ class ConfigMigrationService:
             "time_and_date_retriever",
             "ask_perplexity",
             "nms_assistant",
+            "star_head",
         }
 
         builtin_skills.update(removed_builtin_skills)
@@ -637,6 +638,14 @@ class ConfigMigrationService:
         def migrate_defaults(old: dict, new: dict) -> dict:
             old["xai"] = new["xai"]
             self.log("- added new property: xai")
+
+            # Disable AI instant responses (feature removed in 1.9)
+            if "features" not in old:
+                old["features"] = {}
+            old["features"]["use_generic_instant_responses"] = False
+            self.log(
+                "- disabled features.use_generic_instant_responses (feature removed)"
+            )
 
             # Migrate deprecated Wingman Pro conversation models
             if "wingman_pro" in old and "conversation_deployment" in old["wingman_pro"]:
@@ -1223,10 +1232,17 @@ class ConfigMigrationService:
                         new=self.config_manager.read_config(new_file),
                     )
                     try:
-                        self.config_manager.default_config = NestedConfig(
-                            **migrated_defaults
-                        )
-                        self.config_manager.save_defaults_config()
+                        # Only validate on final migration step (current schema may not match intermediate versions)
+                        if new_config_path == self.latest_config_path:
+                            self.config_manager.default_config = NestedConfig(
+                                **migrated_defaults
+                            )
+                            self.config_manager.save_defaults_config()
+                        else:
+                            # Intermediate step - just write the file without validation
+                            self.config_manager.write_config(
+                                new_file, migrated_defaults
+                            )
                     except ValidationError as e:
                         self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
                 # Wingmen
