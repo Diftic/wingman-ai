@@ -4,7 +4,6 @@ import datetime
 from typing import TYPE_CHECKING
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
 from api.enums import LogType
-from services.file import get_writable_dir
 from skills.skill_base import Skill
 
 if TYPE_CHECKING:
@@ -22,7 +21,7 @@ class QuickCommands(Skill):
         super().__init__(config=config, settings=settings, wingman=wingman)
 
         # get file paths
-        self.data_path = get_writable_dir(path.join("skills", "quick_commands", "data"))
+        self.data_path = path.join(self.get_generated_files_dir(), "data")
         self.file_ipl = path.join(self.data_path, "instant_phrase_learning.json")
 
         # learning data
@@ -30,20 +29,25 @@ class QuickCommands(Skill):
         self.learning_data = {}
         self.learning_learned = {}
 
-        # rules
-        self.rule_count = 3
-
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
 
-        self.rule_count = self.retrieve_custom_property_value(
+        self.retrieve_custom_property_value(
             "quick_commands_learning_rule_count", errors
         )
-        if not self.rule_count or self.rule_count < 0:
-            self.rule_count = 3
 
         self.threaded_execution(self._init_skill)
         return errors
+
+    def _get_rule_count(self) -> int:
+        """Get rule_count property value just-in-time."""
+        errors = []
+        rule_count = self.retrieve_custom_property_value(
+            "quick_commands_learning_rule_count", errors
+        )
+        if not rule_count or rule_count < 0:
+            return 3
+        return rule_count
 
     async def _init_skill(self) -> None:
         """Initialize the skill."""
@@ -139,7 +143,7 @@ class QuickCommands(Skill):
             for command in commands:
                 if not self.wingman.get_command(command):
                     pops.append(phrase)
-                elif self.learning_data[phrase]["count"] >= self.rule_count:
+                elif self.learning_data[phrase]["count"] >= self._get_rule_count():
                     finished.append(phrase)
 
         if pops:
@@ -187,7 +191,7 @@ class QuickCommands(Skill):
         else:
             self.learning_data[phrase] = {"commands": command_names, "count": 1}
 
-        if self.learning_data[phrase]["count"] >= self.rule_count:
+        if self.learning_data[phrase]["count"] >= self._get_rule_count():
             await self._finish_learning(phrase)
 
         # save the learning data
