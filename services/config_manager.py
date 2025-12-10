@@ -682,6 +682,56 @@ class ConfigManager:
 
         return self.write_config(config_path, wingman_config_diff)
 
+    def save_wingman_commands(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        commands: list,
+    ):
+        """Save only the commands section of a wingman config.
+
+        This performs a partial YAML update - it reads the existing YAML file,
+        updates only the commands field, and writes it back. This avoids
+        serializing the entire wingman config and reduces the risk of data loss.
+
+        Args:
+            config_dir: The config directory info
+            wingman_file: The wingman file info
+            commands: The commands list from wingman.config.commands
+        """
+        config_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            wingman_file.file,
+        )
+
+        # Read existing YAML
+        existing_yaml = {}
+        if path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as file:
+                existing_yaml = yaml.safe_load(file) or {}
+
+        # Convert commands to dict format
+        commands_dict = []
+        if commands:
+            for command in commands:
+                command_dict = self.convert_to_dict(command)
+                commands_dict.append(command_dict)
+
+        # Get default config to diff against
+        default_config = self.read_default_config()
+        default_commands = default_config.get("commands", [])
+
+        # Only save commands if they differ from defaults
+        if commands_dict != default_commands:
+            existing_yaml["commands"] = commands_dict
+        elif "commands" in existing_yaml:
+            # Remove commands key if it matches defaults (keep config minimal)
+            del existing_yaml["commands"]
+
+        # Write back the YAML with only commands changed
+        return self.write_config(config_path, existing_yaml)
+
     def get_wingman_avatar_path(
         self, config_dir: ConfigDirInfo, wingman_file_base_name: str, create=False
     ):

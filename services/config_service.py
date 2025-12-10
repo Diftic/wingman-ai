@@ -139,6 +139,12 @@ class ConfigService:
             tags=tags,
         )
         self.router.add_api_route(
+            methods=["POST"],
+            path="/config/save-commands",
+            endpoint=self.save_commands,
+            tags=tags,
+        )
+        self.router.add_api_route(
             methods=["GET"],
             path="/available-skills",
             endpoint=self.get_available_skills,
@@ -896,6 +902,57 @@ class ConfigService:
         )
 
         message = f"Wingman {wingman_config.name}'s config changed."
+        if not silent:
+            self.printr.toast(message)
+        else:
+            self.printr.print(text=message, server_only=True)
+
+    # POST config/save-commands
+    async def save_commands(
+        self,
+        wingman_name: str,
+        silent: bool = True,
+    ):
+        """Save only the commands section of a wingman config.
+
+        This is a targeted save operation for skills that modify commands
+        (e.g., QuickCommands adding instant_activation phrases).
+
+        Args:
+            wingman_name: Name of the wingman whose commands to save
+            silent: If True, don't show toast notification (default: True)
+        """
+        if not self.tower:
+            self.printr.toast_error("Cannot save commands: Tower not initialized.")
+            return
+
+        wingman = self.tower.get_wingman_by_name(wingman_name)
+        if not wingman:
+            self.printr.toast_error(f"Wingman '{wingman_name}' not found.")
+            return
+
+        # Get the wingman file info
+        wingman_file = None
+        for wf in self.config_manager.get_wingmen_configs(
+            self.config_manager.config_dir
+        ):
+            if wf.name == wingman_name:
+                wingman_file = wf
+                break
+
+        if not wingman_file:
+            self.printr.toast_error(f"Config file for '{wingman_name}' not found.")
+            return
+
+        # Use targeted save that only updates the commands field in YAML
+        # This avoids full config serialization and preserves other fields
+        self.config_manager.save_wingman_commands(
+            config_dir=self.config_manager.config_dir,
+            wingman_file=wingman_file,
+            commands=wingman.config.commands,
+        )
+
+        message = f"Commands saved for {wingman_name}."
         if not silent:
             self.printr.toast(message)
         else:

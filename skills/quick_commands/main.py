@@ -55,7 +55,7 @@ class QuickCommands(Skill):
             added = True
 
         if added:
-            await self.wingman.save_config()
+            await self.wingman.save_commands()
 
     async def _add_instant_activation_phrase(
         self, phrase: str, commands: list[str], save_wingman: bool = True
@@ -73,7 +73,7 @@ class QuickCommands(Skill):
                 changed = True
 
         if changed and save_wingman:
-            await self.wingman.save_config()
+            await self.wingman.save_commands()
 
     async def on_add_assistant_message(self, message: str, tool_calls: list) -> None:
         """Hook to start learning process."""

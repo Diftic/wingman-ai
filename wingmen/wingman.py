@@ -934,6 +934,24 @@ class Wingman:
         """Save the config of the Wingman."""
         self.tower.save_wingman(self.name)
 
+    async def save_commands(self):
+        """Save only the commands section of this wingman's config.
+
+        This performs a partial YAML update - only the commands field is modified
+        in the config file, avoiding full config serialization. This is much safer
+        than save_config() for command-only changes as it won't accidentally
+        overwrite other fields.
+
+        Use this instead of save_config() when you only changed command definitions,
+        instant_activation phrases, or other command-related fields.
+
+        Example use cases:
+        - QuickCommands learning instant activation phrases
+        - Skills dynamically adding/modifying commands
+        - Skills updating command responses or actions
+        """
+        self.tower.save_wingman_commands(self.name)
+
     async def update_settings(self, settings: SettingsConfig):
         """Update the settings of the Wingman. This method should always be called when the user Settings have changed."""
         self.settings = settings

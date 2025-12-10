@@ -275,6 +275,40 @@ class Tower:
         )
         return False
 
+    def save_wingman_commands(self, wingman_name: str):
+        """Save only the commands section of a wingman config.
+
+        Uses partial YAML update to avoid full config serialization.
+        """
+        for wingman in self.wingmen:
+            if wingman.name == wingman_name:
+                for wingman_file in self.config_manager.get_wingmen_configs(
+                    self.config_dir
+                ):
+                    if wingman_file.name == wingman_name:
+                        self.config_manager.save_wingman_commands(
+                            config_dir=self.config_dir,
+                            wingman_file=wingman_file,
+                            commands=wingman.config.commands,
+                        )
+                        printr.print(
+                            f"Saved commands for {wingman_name}.",
+                            color=LogType.SYSTEM,
+                            server_only=True,
+                            source_name=self.log_source_name,
+                            source=LogSource.SYSTEM,
+                        )
+                        return True
+
+        printr.print(
+            f"Unable to save commands for {wingman_name}.",
+            color=LogType.WARNING,
+            server_only=True,
+            source_name=self.log_source_name,
+            source=LogSource.SYSTEM,
+        )
+        return False
+
     def save_last_message(self, wingman_name: str, last_message: str):
         for wingman in self.wingmen:
             if wingman.name == wingman_name:
