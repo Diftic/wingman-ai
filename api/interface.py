@@ -740,7 +740,7 @@ class SkillConfig(CustomClassConfig):
     """Whether this skill is discoverable by default when creating new wingmen.
     Set to False for specialized skills that most users won't need immediately.
     Users can still make skills discoverable per wingman."""
-    discovery_keywords: Optional[LocalizedMetadata] = None
+    discovery_keywords: Optional[list[str]] = None
     """Optional keywords to help LLMs discover this skill during activation.
 
     Guidelines:
@@ -748,13 +748,12 @@ class SkillConfig(CustomClassConfig):
     2. Focus on terms users might say (not developer jargon)
     3. Include alternate names, specific examples, common queries
     4. Keep it concise - 5-10 keywords is usually enough
-    5. English is required, other languages optional
-    6. Comma-separated for readability
+    5. Always in English only
 
     Examples:
-    - 'trading, routes, cargo, commodities, ships'
-    - 'screenshots, OCR, image analysis, text recognition'
-    - 'flight simulator, altitude, speed, autopilot, navigation'
+    - ['trading', 'routes', 'cargo', 'commodities', 'ships']
+    - ['screenshots', 'OCR', 'image analysis', 'text recognition']
+    - ['flight simulator', 'altitude', 'speed', 'autopilot', 'navigation']
     """
 
 
@@ -834,7 +833,7 @@ class McpServerConfig(BaseModel):
     version: Optional[str] = None
     """Version of the MCP server, if known."""
 
-    discovery_keywords: Optional[str] = None
+    discovery_keywords: Optional[list[str]] = None
     """Optional keywords to help LLMs discover this MCP server during activation.
 
     Guidelines:
@@ -842,13 +841,12 @@ class McpServerConfig(BaseModel):
     2. Focus on terms users might say (not technical jargon)
     3. Include alternate names, specific use cases, common queries
     4. Keep it concise - 5-10 keywords is usually enough
-    5. English only (MCP descriptions are not localized)
-    6. Comma-separated for readability
+    5. Always in English only
 
     Examples:
-    - 'web search, internet, Google, research, find information'
-    - 'documentation, API docs, library reference, code examples'
-    - 'Docker containers, images, compose, Kubernetes, registry'
+    - ['web search', 'internet', 'Google', 'research', 'find information']
+    - ['documentation', 'API docs', 'library reference', 'code examples']
+    - ['Docker containers', 'images', 'compose', 'Kubernetes', 'registry']
     """
 
 

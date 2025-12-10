@@ -654,20 +654,25 @@ class ConfigManager:
         default_config = self.read_default_config()
         wingman_config_dict = self.convert_to_dict(wingman_config)
 
-        # Strip skills to only keep module, prompt, and custom_properties with overridden values
+        # Strip skills to only keep module, prompt, custom_properties, and discovery_keywords with overridden values
         # Other skill fields come from skill default_config.yaml and shouldn't be saved per wingman
         if "skills" in wingman_config_dict and wingman_config_dict["skills"]:
             stripped_skills = []
             for skill in wingman_config_dict["skills"]:
                 has_custom_props = skill.get("custom_properties")
                 has_prompt = skill.get("prompt")
+                has_discovery_keywords = skill.get("discovery_keywords")
 
-                if has_custom_props or has_prompt:
+                if has_custom_props or has_prompt or has_discovery_keywords:
                     stripped_skill = {"module": skill.get("module")}
 
                     # Keep prompt override if present
                     if has_prompt:
                         stripped_skill["prompt"] = has_prompt
+
+                    # Keep discovery_keywords override if present
+                    if has_discovery_keywords:
+                        stripped_skill["discovery_keywords"] = has_discovery_keywords
 
                     # Only keep id and value for each custom property
                     # Other fields (name, hint, property_type, etc.) come from skill defaults

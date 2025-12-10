@@ -52,6 +52,11 @@ class McpServerManifest:
         tool_names = [t.prefixed_name for t in connection.tools]
         tool_summaries = [t.description[:100] for t in connection.tools]
 
+        # Join discovery keywords list into string
+        discovery_keywords = ""
+        if connection.config.discovery_keywords:
+            discovery_keywords = ", ".join(connection.config.discovery_keywords)
+
         return cls(
             name=connection.config.name,
             display_name=connection.config.display_name,
@@ -60,7 +65,7 @@ class McpServerManifest:
             tool_names=tool_names,
             tool_summaries=tool_summaries,
             is_connected=connection.is_connected,
-            discovery_keywords=connection.config.discovery_keywords or "",
+            discovery_keywords=discovery_keywords,
         )
 
     def get_short_description(self, max_length: int = 80) -> str:

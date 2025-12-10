@@ -72,10 +72,10 @@ class SkillManifest:
             else:
                 tool_summaries.append("No description")
 
-        # Extract discovery keywords (English only)
+        # Extract discovery keywords (English only, join list into string)
         discovery_keywords = ""
         if skill.config.discovery_keywords:
-            discovery_keywords = skill.config.discovery_keywords.en
+            discovery_keywords = ", ".join(skill.config.discovery_keywords)
 
         return cls(
             name=skill.name,
