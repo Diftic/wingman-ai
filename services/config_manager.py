@@ -887,7 +887,10 @@ class ConfigManager:
 
     def convert_to_dict(self, obj):
         if isinstance(obj, BaseModel):
-            json_obj = obj.model_dump_json(exclude_none=True, exclude_unset=True)
+            # Use exclude_unset=False to preserve runtime-set fields like disabled_skills.
+            # Without this, fields not in the original YAML get dropped during save,
+            # causing them to revert to defaults on reload.
+            json_obj = obj.model_dump_json(exclude_none=True, exclude_unset=False)
             return json.loads(json_obj)
         elif isinstance(obj, dict):
             return {k: self.convert_to_dict(v) for k, v in obj.items()}
