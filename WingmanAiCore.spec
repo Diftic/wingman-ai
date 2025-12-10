@@ -147,7 +147,7 @@ hiddenimports = [
     'pdfminer.high_level',
     'cryptography',
     # control_windows
-    'clip_util',
+    'clipboard',
     # msfs2020_control
     'SimConnect',
     # ats_telemetry
