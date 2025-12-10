@@ -878,8 +878,8 @@ class ConfigMigrationService:
                     f"disabled_skills (Clippy: {len(clippy_blacklist)} skills disabled)"
                 )
             else:
-                # For all other wingmen, remove deprecated skills from disabled_skills
-                # (these skills have been removed, replaced by MCP servers)
+                # For all other wingmen (custom wingmen), handle disabled_skills
+                # Remove deprecated skills that have been removed/replaced by MCP servers
                 removed_skill_names = {
                     "AskPerplexity",
                     "GoogleSearch",
@@ -888,7 +888,9 @@ class ConfigMigrationService:
                     "NMSAssistant",
                     "StarHead",
                 }
+
                 if "disabled_skills" in old and old["disabled_skills"]:
+                    # Custom wingman has existing disabled_skills - clean up deprecated skills
                     removed_from_disabled = [
                         s for s in old["disabled_skills"] if s in removed_skill_names
                     ]
@@ -904,6 +906,15 @@ class ConfigMigrationService:
                     # Clean up empty disabled_skills list
                     if not old["disabled_skills"]:
                         del old["disabled_skills"]
+                else:
+                    # Custom wingman has no disabled_skills - initialize with skills that have enabled_by_default=false
+                    # This ensures opt-in skills are disabled by default for custom wingmen
+                    default_disabled = self._get_skills_disabled_by_default()
+                    if default_disabled:
+                        old["disabled_skills"] = default_disabled
+                        changes_made.append(
+                            f"disabled_skills (custom wingman: {len(default_disabled)} opt-in skills disabled by default)"
+                        )
 
             # MCP servers are now centralized in mcp.yaml
             # Remove old per-wingman mcp array if it exists (shouldn't in 1.8.2, but clean up)
@@ -955,6 +966,28 @@ class ConfigMigrationService:
         )
 
     # INTERNAL
+
+    def _get_skills_disabled_by_default(self) -> list[str]:
+        """Get list of skill names that have enabled_by_default=False.
+
+        Returns:
+            List of skill names that should be disabled by default
+        """
+        from services.module_manager import ModuleManager
+
+        disabled_by_default = []
+        try:
+            all_skills = ModuleManager.read_available_skills()
+            for skill in all_skills:
+                if skill.config.enabled_by_default is False:
+                    disabled_by_default.append(skill.name)
+        except Exception as e:
+            self.log(
+                f"Warning: Could not read skills for disabled_by_default check: {e}",
+                warning=True,
+            )
+
+        return disabled_by_default
 
     def _get_skill_default_custom_properties(
         self, skill_module: str
