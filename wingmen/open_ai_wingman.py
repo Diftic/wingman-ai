@@ -1991,8 +1991,10 @@ class OpenAiWingman(Wingman):
         # Handle legacy meta-tools for progressive skill discovery/activation
         # These are kept for backward compatibility but shouldn't be called
         if self.skill_registry.is_meta_tool(function_name):
-            function_response, tools_changed = self.skill_registry.execute_meta_tool(
-                function_name, function_args
+            function_response, tools_changed = (
+                await self.skill_registry.execute_meta_tool(
+                    function_name, function_args
+                )
             )
 
             # If skill was activated, perform lazy validation

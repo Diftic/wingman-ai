@@ -263,7 +263,6 @@ class McpRegistry:
             f"MCP activated: {manifest.display_name}",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
-            # Always show activation in UI - important for users to know
         )
         return (
             True,

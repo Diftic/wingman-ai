@@ -117,7 +117,7 @@ class CapabilityRegistry:
             }
             if capability_name in skill_manifests:
                 # Delegate to SkillRegistry - preserves [SKILL] logging and validation
-                return self.skill_registry.execute_meta_tool(
+                return await self.skill_registry.execute_meta_tool(
                     "activate_skill", {"skill_name": capability_name}
                 )
 

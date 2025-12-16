@@ -193,7 +193,7 @@ class SkillRegistry:
         """
         return [m for m in self._manifests.values() if not m.is_auto_activated]
 
-    def activate_skill(self, skill_name: str) -> tuple[bool, str, bool]:
+    async def activate_skill(self, skill_name: str) -> tuple[bool, str, bool]:
         """
         Activate a skill, making its tools available to the LLM.
 
@@ -227,21 +227,19 @@ class SkillRegistry:
         tools_str = ", ".join(manifest.tool_names)
 
         if needs_validation:
-            printr.print(
-                f"Activating skill: {manifest.display_name} (validating...)",
-                color=LogType.SKILL,
-                # Always show activation in UI - important for users to know
-            )
+            # await printr.print_async(
+            #     f"Activating skill: {manifest.display_name} (validating...)",
+            #     color=LogType.SKILL,
+            # )
             return (
                 True,
                 f"Activating '{manifest.display_name}' (validation pending). Tools: {tools_str}",
                 True,
             )
 
-        printr.print(
+        await printr.print_async(
             f"Skill activated: {manifest.display_name}",
             color=LogType.SKILL,
-            # Always show activation in UI - important for users to know
         )
         return (
             True,
@@ -370,7 +368,9 @@ class SkillRegistry:
             ),
         ]
 
-    def execute_meta_tool(self, tool_name: str, parameters: dict) -> tuple[str, bool]:
+    async def execute_meta_tool(
+        self, tool_name: str, parameters: dict
+    ) -> tuple[str, bool]:
         """
         Execute a meta-tool.
 
@@ -387,7 +387,7 @@ class SkillRegistry:
 
         if tool_name == "activate_skill":
             skill_name = parameters.get("skill_name", "")
-            success, message, _ = self.activate_skill(skill_name)
+            success, message, _ = await self.activate_skill(skill_name)
             # Return success status and whether tools changed
             # Note: needs_validation is handled async in OpenAiWingman
             return message, success
