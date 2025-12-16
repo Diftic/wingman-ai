@@ -231,7 +231,7 @@ No translation layer needed - the LLM handles all language mapping internally.
 
 ## Implementation Details
 
-### SkillRegistry (`services/tool_registry.py`)
+### SkillRegistry (`services/skill_registry.py`)
 
 The `SkillRegistry` class manages skill lifecycle:
 

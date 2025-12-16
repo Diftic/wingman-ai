@@ -9,7 +9,7 @@ and mcp_registry, preserving their separate logging, validation, and lifecycle l
 """
 
 from services.mcp_registry import McpRegistry
-from services.tool_registry import SkillRegistry
+from services.skill_registry import SkillRegistry
 
 
 class CapabilityRegistry:

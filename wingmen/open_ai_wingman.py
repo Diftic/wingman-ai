@@ -48,7 +48,7 @@ from api.commands import McpStateChangedCommand
 from services.benchmark import Benchmark
 from services.markdown import cleanup_text
 from services.printr import Printr
-from services.tool_registry import SkillRegistry
+from services.skill_registry import SkillRegistry
 from services.mcp_client import McpClient
 from services.mcp_registry import McpRegistry
 from services.capability_registry import CapabilityRegistry
