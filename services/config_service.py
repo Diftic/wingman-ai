@@ -682,7 +682,6 @@ class ConfigService:
                     wingman.mcp_registry.register_server(
                         config=server_config,
                         headers=headers if headers else None,
-                        auto_activate=True,
                     ),
                     timeout=timeout,
                 )

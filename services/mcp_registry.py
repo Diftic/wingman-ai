@@ -176,7 +176,7 @@ class McpRegistry:
         self,
         config: McpServerConfig,
         headers: Optional[dict[str, str]] = None,
-        auto_activate: bool = True,
+        auto_activate: bool = False,
     ) -> McpConnection:
         """
         Register and connect to an MCP server.

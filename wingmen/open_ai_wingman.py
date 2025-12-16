@@ -398,7 +398,6 @@ class OpenAiWingman(Wingman):
                 self.mcp_registry.register_server(
                     config=mcp_config,
                     headers=headers if headers else None,
-                    auto_activate=True,
                 ),
                 timeout=timeout,
             )
@@ -579,7 +578,6 @@ class OpenAiWingman(Wingman):
                         self.mcp_registry.register_server(
                             config=mcp_config,
                             headers=headers if headers else None,
-                            auto_activate=True,  # MCP servers are active by default
                         ),
                         timeout=timeout,
                     )
