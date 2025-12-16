@@ -329,8 +329,8 @@ class Wingman:
         # Log summary of discoverable skills for this wingman
         if self.skills:
             skill_names = [s.config.name for s in self.skills]
-            printr.print(
-                f"[{self.name}] Discoverable skills ({len(skill_names)}): {', '.join(skill_names)}",
+            await printr.print_async(
+                f"Discoverable skills ({len(skill_names)}): {', '.join(skill_names)}",
                 color=LogType.WINGMAN,
                 source=LogSource.WINGMAN,
                 source_name=self.name,
@@ -432,7 +432,7 @@ class Wingman:
 
             except Exception as e:
                 error_msg = f"Error activating skill '{skill_name}': {str(e)}"
-                printr.print(error_msg, color=LogType.ERROR)
+                await printr.print_async(error_msg, color=LogType.ERROR)
                 printr.print(
                     traceback.format_exc(), color=LogType.ERROR, server_only=True
                 )
@@ -478,7 +478,7 @@ class Wingman:
 
         except Exception as e:
             error_msg = f"Error deactivating skill '{skill_name}': {str(e)}"
-            printr.print(error_msg, color=LogType.ERROR)
+            await printr.print_async(error_msg, color=LogType.ERROR)
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
             return False, error_msg
 

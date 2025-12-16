@@ -235,7 +235,7 @@ class McpRegistry:
         """Get all connected MCP server manifests."""
         return [m for m in self._manifests.values() if m.is_connected]
 
-    def activate_server(self, server_name: str) -> tuple[bool, str]:
+    async def activate_server(self, server_name: str) -> tuple[bool, str]:
         """
         Activate an MCP server, making its tools available to the LLM.
 
@@ -259,9 +259,8 @@ class McpRegistry:
         if len(manifest.tool_names) > 5:
             tools_str += f", +{len(manifest.tool_names) - 5} more"
 
-        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
-        printr.print(
-            f"{prefix} MCP activated: {manifest.display_name}",
+        await printr.print_async(
+            f"MCP activated: {manifest.display_name}",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
             # Always show activation in UI - important for users to know
@@ -280,9 +279,8 @@ class McpRegistry:
         manifest = self._manifests.get(server_name)
         display_name = manifest.display_name if manifest else server_name
 
-        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         printr.print(
-            f"{prefix}MCP deactivated: {display_name}",
+            f"MCP deactivated: {display_name}",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
             server_only=True,  # Deactivation is internal, keep in log
@@ -293,9 +291,8 @@ class McpRegistry:
         """Reset all server activations (called on conversation reset)."""
         if self._active_servers:
             count = len(self._active_servers)
-            prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
             printr.print(
-                f"{prefix}Conversation reset: deactivating {count} MCP server(s)",
+                f"Conversation reset: deactivating {count} MCP server(s)",
                 color=LogType.MCP,
                 source_name=self._wingman_name if self._wingman_name else None,
                 server_only=True,  # Reset is internal, keep in log
@@ -401,7 +398,9 @@ class McpRegistry:
             ),
         ]
 
-    def execute_meta_tool(self, tool_name: str, parameters: dict) -> tuple[str, bool]:
+    async def execute_meta_tool(
+        self, tool_name: str, parameters: dict
+    ) -> tuple[str, bool]:
         """
         Execute an MCP meta-tool.
 
@@ -410,9 +409,8 @@ class McpRegistry:
             should receive an updated tool list
         """
         # Debug logging for developers (server-only)
-        prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
         printr.print(
-            f"{prefix}Meta-tool called: {tool_name}({parameters})",
+            f"Meta-tool called: {tool_name}({parameters})",
             color=LogType.MCP,
             source_name=self._wingman_name if self._wingman_name else None,
             server_only=True,
@@ -420,7 +418,7 @@ class McpRegistry:
 
         if tool_name == "activate_mcp_server":
             server_name = parameters.get("server_name", "")
-            success, message = self.activate_server(server_name)
+            success, message = await self.activate_server(server_name)
             return message, success
 
         elif tool_name == "list_active_mcp_servers":

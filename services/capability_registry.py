@@ -95,7 +95,9 @@ class CapabilityRegistry:
             ),
         ]
 
-    def execute_meta_tool(self, tool_name: str, parameters: dict) -> tuple[str, bool]:
+    async def execute_meta_tool(
+        self, tool_name: str, parameters: dict
+    ) -> tuple[str, bool]:
         """
         Execute a unified meta-tool.
 
@@ -125,7 +127,7 @@ class CapabilityRegistry:
             }
             if capability_name in mcp_manifests:
                 # Delegate to McpRegistry - preserves [MCP] logging
-                return self.mcp_registry.execute_meta_tool(
+                return await self.mcp_registry.execute_meta_tool(
                     "activate_mcp_server", {"server_name": capability_name}
                 )
 

@@ -512,8 +512,9 @@ class ConfigService:
 
             action = "enabled" if enabled else "disabled"
             self.printr.print(
-                f"[{wingman_file.name}] MCP server '{mcp_name}' {action}.",
+                f"MCP server '{mcp_name}' {action}.",
                 server_only=True,
+                source_name=wingman_file.name,
             )
 
         except Exception as e:

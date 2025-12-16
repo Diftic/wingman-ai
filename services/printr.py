@@ -158,8 +158,10 @@ class Printr(WebSocketUser):
         command_tag: CommandTag = None,
         additional_data: dict = None,
     ):
-        # print to server (terminal)
-        self.print_colored(text, color=self.get_terminal_color(color))
+        # print to server (terminal) with source_name prefix
+        self.print_colored(
+            text, color=self.get_terminal_color(color), source_name=source_name
+        )
 
         if not server_only and self._connection_manager is not None:
             # send to GUI without print() having to be async
@@ -188,7 +190,7 @@ class Printr(WebSocketUser):
         additional_data: dict = None,
         benchmark_result: BenchmarkResult = None,
     ):
-        # print to server (terminal)
+        # print to server (terminal) with source_name prefix
         self.print_colored(
             (
                 text
@@ -196,12 +198,14 @@ class Printr(WebSocketUser):
                 else f"{text} ({benchmark_result.formatted_execution_time})"
             ),
             color=self.get_terminal_color(color),
+            source_name=source_name,
         )
         if benchmark_result and benchmark_result.snapshots:
             for snapshot in benchmark_result.snapshots:
                 self.print_colored(
                     f"  - {snapshot.label}: {snapshot.formatted_execution_time}",
                     color=self.get_terminal_color(color),
+                    source_name=source_name,
                 )
 
         if not server_only and self._connection_manager is not None:
@@ -268,6 +272,8 @@ class Printr(WebSocketUser):
     def clr(self, text, color):
         return f"{color}{text}{Printr.CLEAR}"
 
-    def print_colored(self, text, color):
-        self.console_logger.info(self.clr(text, color))
-        self.logger.info(text)
+    def print_colored(self, text, color, source_name: str = ""):
+        # Add source_name prefix for console and file output only
+        display_text = f"[{source_name}] {text}" if source_name else text
+        self.console_logger.info(self.clr(display_text, color))
+        self.logger.info(display_text)

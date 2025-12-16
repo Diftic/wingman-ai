@@ -416,7 +416,7 @@ class OpenAiWingman(Wingman):
 
         except Exception as e:
             error_msg = f"Error enabling MCP '{mcp_name}': {str(e)}"
-            printr.print(error_msg, color=LogType.ERROR)
+            await printr.print_async(error_msg, color=LogType.ERROR)
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
             return False, error_msg
 
@@ -439,7 +439,7 @@ class OpenAiWingman(Wingman):
 
         except Exception as e:
             error_msg = f"Error disabling MCP '{mcp_name}': {str(e)}"
-            printr.print(error_msg, color=LogType.ERROR)
+            await printr.print_async(error_msg, color=LogType.ERROR)
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
             return False, error_msg
 
@@ -553,8 +553,9 @@ class OpenAiWingman(Wingman):
                 # Debug: Log whether secret was found (without revealing the actual key)
                 if api_key:
                     printr.print(
-                        f"[{self.name}] MCP secret '{secret_key}' found ({len(api_key)} chars)",
+                        f"MCP secret '{secret_key}' found ({len(api_key)} chars)",
                         color=LogType.INFO,
+                        source_name=self.name,
                         server_only=True,
                     )
                     # Add to headers - common header names for API keys
@@ -584,8 +585,9 @@ class OpenAiWingman(Wingman):
                 except asyncio.TimeoutError:
                     error_msg = f"MCP '{mcp_config.display_name}' connection timed out ({int(timeout)}s)."
                     printr.print(
-                        f"[{self.name}] {error_msg}",
+                        error_msg,
                         color=LogType.WARNING,
+                        source_name=self.name,
                         server_only=True,
                     )
                     errors.append(
@@ -617,8 +619,9 @@ class OpenAiWingman(Wingman):
             except Exception as e:
                 error_msg = f"MCP '{mcp_config.name}' initialization error: {str(e)}"
                 printr.print(
-                    f"[{self.name}] {error_msg}",
+                    error_msg,
                     color=LogType.ERROR,
+                    source_name=self.name,
                     server_only=True,
                 )
                 printr.print(
@@ -634,8 +637,8 @@ class OpenAiWingman(Wingman):
 
         # Log consolidated MCP status for this wingman
         if connected_count > 0:
-            printr.print(
-                f"[{self.name}] Discoverable MCP servers connected ({connected_count}): {', '.join(connected_names)}",
+            await printr.print_async(
+                f"Discoverable MCP servers connected ({connected_count}): {', '.join(connected_names)}",
                 color=LogType.WINGMAN,
                 source=LogSource.WINGMAN,
                 source_name=self.name,
@@ -1953,7 +1956,9 @@ class OpenAiWingman(Wingman):
         # Handle unified capability meta-tools (activate_capability, list_active_capabilities)
         if self.capability_registry.is_meta_tool(function_name):
             function_response, tools_changed = (
-                self.capability_registry.execute_meta_tool(function_name, function_args)
+                await self.capability_registry.execute_meta_tool(
+                    function_name, function_args
+                )
             )
 
             # If a skill was activated, perform lazy validation
@@ -2019,8 +2024,8 @@ class OpenAiWingman(Wingman):
 
         # Handle MCP meta-tools for server discovery/activation
         if self.mcp_registry.is_meta_tool(function_name):
-            function_response, tools_changed = self.mcp_registry.execute_meta_tool(
-                function_name, function_args
+            function_response, tools_changed = (
+                await self.mcp_registry.execute_meta_tool(function_name, function_args)
             )
             return function_response, None, None, None  # Meta-tool, no timing label
 

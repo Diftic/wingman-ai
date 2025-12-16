@@ -199,9 +199,8 @@ class McpClient:
 
             if connection.is_connected:
                 self._connections[config.name] = connection
-                prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
                 printr.print(
-                    f"{prefix}MCP connected: {config.display_name} ({len(connection.tools)} tools)",
+                    f"MCP connected: {config.display_name} ({len(connection.tools)} tools)",
                     color=LogType.MCP,
                     source_name=self._wingman_name if self._wingman_name else None,
                     server_only=True,
@@ -213,9 +212,8 @@ class McpClient:
             # Format error with special handling for authentication errors
             connection.error = self._format_auth_error(config, e)
             connection.is_connected = False
-            prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
             await printr.print_async(
-                f"{prefix}MCP connection failed ({config.display_name}): {connection.error}",
+                f"MCP connection failed ({config.display_name}): {connection.error}",
                 color=LogType.ERROR,
                 source_name=self._wingman_name if self._wingman_name else None,
                 server_only=False,
