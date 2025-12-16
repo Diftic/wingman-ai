@@ -2,6 +2,7 @@ module: skills.quick_commands.main
 name: QuickCommands
 display_name: Quick Commands
 author: JayMatthew
+auto_activate: true
 tags:
   - Utility
 description:
