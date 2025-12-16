@@ -87,6 +87,54 @@ class McpClient:
         self._connections: dict[str, McpConnection] = {}
         self._wingman_name = wingman_name
 
+    @staticmethod
+    def _format_auth_error(config: McpServerConfig, exception: Exception) -> str:
+        """
+        Format authentication errors with clear instructions.
+
+        Checks if the exception is a 401 authentication error and returns
+        a user-friendly message with instructions on how to add the required secret.
+
+        Args:
+            config: The MCP server configuration
+            exception: The exception that occurred
+
+        Returns:
+            Formatted error message
+        """
+        # Check if this is an ExceptionGroup (from anyio TaskGroup)
+        # and extract nested exceptions
+        exceptions_to_check = [exception]
+
+        if hasattr(exception, "exceptions"):
+            # This is an ExceptionGroup, get the nested exceptions
+            exceptions_to_check.extend(exception.exceptions)
+
+        # Check all exceptions for 401/auth errors
+        for exc in exceptions_to_check:
+            error_str = str(exc).lower()
+
+            # Check for 401 in string representation
+            if (
+                "401" in error_str
+                or "unauthorized" in error_str
+                or "authentication" in error_str
+            ):
+                return f"MCP server '{config.display_name}' requires authentication. Please add a secret called mcp_{config.name}."
+
+            # Check if it's an httpx.HTTPStatusError with 401 status code
+            if hasattr(exc, "response"):
+                response = getattr(exc, "response", None)
+                if (
+                    response
+                    and hasattr(response, "status_code")
+                    and response.status_code == 401
+                ):
+                    return f"MCP server '{config.display_name}' requires authentication. Please add a secret called mcp_{config.name}."
+
+        # Return original error for non-auth issues
+        return str(exception)
+
     @property
     def is_available(self) -> bool:
         """Check if MCP SDK is installed and available."""
@@ -162,16 +210,16 @@ class McpClient:
                 # it has updated its own state
 
         except Exception as e:
-            connection.error = str(e)
+            # Format error with special handling for authentication errors
+            connection.error = self._format_auth_error(config, e)
             connection.is_connected = False
             prefix = f"[{self._wingman_name}] " if self._wingman_name else ""
-            printr.print(
-                f"{prefix}MCP connection failed ({config.display_name}): {e}",
+            await printr.print_async(
+                f"{prefix}MCP connection failed ({config.display_name}): {connection.error}",
                 color=LogType.ERROR,
                 source_name=self._wingman_name if self._wingman_name else None,
-                server_only=True,
+                server_only=False,
             )
-            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
 
         return connection
 

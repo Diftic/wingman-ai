@@ -603,12 +603,8 @@ class OpenAiWingman(Wingman):
                         f"{mcp_config.display_name} ({len(connection.tools)} tools)"
                     )
                 else:
+                    # Error already logged in mcp_client.py with clear message
                     error_msg = f"MCP '{mcp_config.display_name}' failed to connect: {connection.error}"
-                    printr.print(
-                        f"[{self.name}] {error_msg}",
-                        color=LogType.WARNING,
-                        server_only=True,
-                    )
                     errors.append(
                         WingmanInitializationError(
                             wingman_name=self.name,

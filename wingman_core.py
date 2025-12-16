@@ -537,8 +537,10 @@ class WingmanCore(WebSocketUser):
         self.tower_errors = await self.tower.instantiate_wingmen(
             self.config_manager.settings_config
         )
+        # Only show toast errors for non-MCP errors (MCP errors are already logged in mcp_client.py)
         for error in self.tower_errors:
-            self.printr.toast_error(error.message)
+            if error.error_type != WingmanInitializationErrorType.MCP_CONNECTION_FAILED:
+                self.printr.toast_error(error.message)
 
         self.config_service.set_tower(self.tower)
 
