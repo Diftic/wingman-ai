@@ -20,6 +20,7 @@ from api.enums import (
     CoreState,
     LogType,
     VoiceActivationSttProvider,
+    WingmanInitializationErrorType,
 )
 from api.interface import (
     AudioDevice,
