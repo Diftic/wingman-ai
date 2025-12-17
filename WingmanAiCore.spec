@@ -150,6 +150,10 @@ hiddenimports = [
     'clipboard',
     # msfs2020_control
     'SimConnect',
+    'SimConnect.SimConnect',
+    'SimConnect.Enum',
+    'SimConnect.RequestList',
+    'SimConnect.dll_handle',
     # ats_telemetry
     'truck_telemetry',
     'pyproj',
