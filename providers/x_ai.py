@@ -1,5 +1,4 @@
 from openai import OpenAI, APIStatusError
-
 from providers.open_ai import OpenAi
 
 
@@ -45,7 +44,7 @@ class XAi(OpenAi):
                     "name": tool.get("function", {}).get("name"),
                     "description": tool.get("function", {}).get("description"),
                     "parameters": tool.get("function", {}).get("parameters", {}),
-                }
+                },
             }
             fixed_tools.append(fixed_tool)
         return fixed_tools

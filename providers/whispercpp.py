@@ -1,5 +1,5 @@
 import requests
-from api.enums import LogType, WingmanInitializationErrorType
+from api.enums import LogType
 from api.interface import (
     WhispercppSettings,
     WhispercppSttConfig,

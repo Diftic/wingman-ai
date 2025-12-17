@@ -1,11 +1,11 @@
 aiofiles==24.1.0
 azure-cognitiveservices-speech==1.47.0
 backports-tarfile>=1.0.0
-edge-tts==7.2.3
+edge-tts==7.2.7
 elevenlabslib==0.32.1
 fastapi==0.115.7
 faster_whisper==1.2.1
-google-genai==1.51.0
+google-genai==1.55.0
 
 # setuptools vendored dependencies - required for PyInstaller bundling
 jaraco-context>=6.0.0
@@ -19,18 +19,18 @@ nvidia-cuda-runtime-cu12>=12.4.99,<13.0
 nvidia-cudnn-cu12>=9.1.0,<10.0
 nvidia-cuda-nvrtc-cu12>=12.4.99,<13.0
 httptools==0.6.4
-hume==0.13.4
+hume==0.13.5
 markdown==3.10
 mcp==1.22.0
 numpy==1.26.4
-openai==2.8.1
+openai==2.13.0
 packaging==24.2
 pedalboard==0.9.19
 platformdirs==4.3.6
 pyaudio==0.2.14
 pydantic==2.11.4
 pydirectinput-rgx==2.1.2
-pyinstaller==6.16.0
+pyinstaller==6.17.0
 pygame==2.6.1
 python-multipart==0.0.20
 rapidfuzz==3.10.1
