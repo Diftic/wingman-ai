@@ -314,7 +314,7 @@ class ConfigMigrationService:
     def migrate_audio_library(self) -> None:
         """Migrate audio library from versioned location to non-versioned location.
 
-        Starting with 1.9.0, audio library is stored in a non-versioned location:
+        Starting with 2.0, audio library is stored in a non-versioned location:
         APPDATA/WingmanAI/audio_library/ (persists across updates)
 
         This method checks 1.8.1 and 1.8.2 for existing audio libraries and migrates them.
@@ -392,7 +392,7 @@ class ConfigMigrationService:
     def copy_custom_skills(self, old_version: str, new_version: str) -> list[str]:
         """Copy custom skills from old versioned location to new non-versioned custom_skills directory.
 
-        Starting with 1.9.0, custom skills are stored in a non-versioned location:
+        Starting with 2.0.0, custom skills are stored in a non-versioned location:
         APPDATA/WingmanAI/custom_skills/ (persists across updates)
 
         This method migrates custom skills from the old versioned location to the new one.
@@ -433,7 +433,7 @@ class ConfigMigrationService:
                 if self.is_valid_skill_directory(item_path):
                     builtin_skills.add(item)
 
-        # Skills that were removed in 1.9.0 (converted to MCP servers)
+        # Skills that were removed in 2.0.0 (converted to MCP servers)
         # These should NOT be detected as custom skills during migration
         removed_builtin_skills = {
             "google_search",
@@ -1033,7 +1033,7 @@ class ConfigMigrationService:
                     secret_keeper = SecretKeeper()
                     secret_keeper.secrets = secret_keeper.load()
 
-        # Handle mcp.yaml - this is a new file in 1.9.0
+        # Handle mcp.yaml - this is a new file in 2.0.0
         if migrate_mcp:
             new_mcp_file = path.join(new_config_path, "mcp.yaml")
             old_mcp_file = path.join(old_config_path, "mcp.yaml")

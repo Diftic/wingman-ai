@@ -104,7 +104,7 @@ hiddenimports = [
     'jaraco.text',
     'jaraco.functools',
 
-    # MCP (Model Context Protocol) - new in 1.9
+    # MCP (Model Context Protocol)
     'mcp',
     'mcp.client',
     'mcp.client.stdio',

@@ -1,4 +1,4 @@
-"""Migration from version 1.8.2 to 1.9.0.
+"""Migration from version 1.8.2 to 2.0.0.
 
 Major changes:
 - CUDA auto-detection for FasterWhisper
@@ -18,14 +18,12 @@ Major changes:
 - Adds local_llm secret
 """
 
-import os
 from os import path
 from typing import Optional
 
 from pydantic import ValidationError
 
 from api.interface import CustomProperty
-from services.file import get_custom_skills_dir
 from services.migrations.base_migration import BaseMigration
 
 # Models removed from Wingman Pro - migrate to gpt-4o-mini
@@ -36,7 +34,7 @@ REMOVED_WINGMAN_PRO_MODELS = [
     "llama3-70b",
 ]
 
-# Skills removed in 1.9.0 (converted to MCP servers or deprecated)
+# Skills removed in 2.0.0 (converted to MCP servers or deprecated)
 REMOVED_SKILL_MODULES = {
     "skills.google_search.main",
     "skills.web_search.main",
@@ -46,14 +44,14 @@ REMOVED_SKILL_MODULES = {
 }
 
 
-class Migration182To190(BaseMigration):
-    """Migration from 1.8.2 to 1.9.0."""
+class Migration182To200(BaseMigration):
+    """Migration from 1.8.2 to 2.0.0."""
 
     old_version = "1_8_2"
-    new_version = "1_9_0"
+    new_version = "2_0_0"
 
     def migrate_settings(self, old: dict, new: dict) -> dict:
-        """Migrate settings.yaml from 1.8.2 to 1.9.0."""
+        """Migrate settings.yaml from 1.8.2 to 2.0.0."""
         # Auto-detect CUDA availability and set FasterWhisper device accordingly
         cuda_available = self.system_manager.is_cuda_available()
         gpu_name = self.system_manager.get_gpu_name()
@@ -81,12 +79,12 @@ class Migration182To190(BaseMigration):
         return old
 
     def migrate_defaults(self, old: dict, new: dict) -> dict:
-        """Migrate defaults.yaml from 1.8.2 to 1.9.0."""
+        """Migrate defaults.yaml from 1.8.2 to 2.0.0."""
         # Add xAI provider
         old["xai"] = new["xai"]
         self.log("- added new property: xai")
 
-        # Disable AI instant responses (feature removed in 1.9)
+        # Disable AI instant responses (feature removed in 2.0)
         if "features" not in old:
             old["features"] = {}
         old["features"]["use_generic_instant_responses"] = False
@@ -139,7 +137,7 @@ class Migration182To190(BaseMigration):
         return old
 
     def migrate_wingman(self, old: dict, new: Optional[dict]) -> dict:
-        """Migrate wingman configs from 1.8.2 to 1.9.0."""
+        """Migrate wingman configs from 1.8.2 to 2.0.0."""
         changes_made = []
 
         # Migrate deprecated Wingman Pro conversation models
@@ -247,15 +245,15 @@ class Migration182To190(BaseMigration):
         return old
 
     def migrate_secrets(self, old: dict) -> dict:
-        """Migrate secrets.yaml from 1.8.2 to 1.9.0."""
+        """Migrate secrets.yaml from 1.8.2 to 2.0.0."""
         if "local_llm" not in old:
             old["local_llm"] = "not-set"
             self.log("- added new secret: local_llm")
         return old
 
     def migrate_mcp(self, old: dict, new: dict) -> dict:
-        """Migrate mcp.yaml from 1.8.2 to 1.9.0."""
-        # For 1.8.2 -> 1.9.0, we're creating mcp.yaml fresh from template
+        """Migrate mcp.yaml from 1.8.2 to 2.0.0."""
+        # For 1.8.2 -> 2.0.0, we're creating mcp.yaml fresh from template
         return new
 
     # Helper methods specific to this migration

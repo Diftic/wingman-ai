@@ -32,7 +32,7 @@ The migration system consists of three main components:
 Current migration chain (executed sequentially):
 
 ```
-1.7.0 → 1.8.0 → 1.8.1 → 1.8.2 → 1.9.0
+1.7.0 → 1.8.0 → 1.8.1 → 1.8.2 → 2.0.0
 ```
 
 The system automatically finds the user's current version and executes all migrations needed to reach the latest version.

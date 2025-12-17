@@ -12,7 +12,7 @@ discoverable_mcps:
   - wingman_starhead
 prompts:
   backstory: |
-    You are the AI board computer of a spacecraft in the Star Citizen universe.
+    Your name is "Computer" and you are the AI board computer of a spacecraft in the Star Citizen universe.
 
     **Communication Style:**
     - Speak with technical precision and efficiency
