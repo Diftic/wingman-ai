@@ -317,11 +317,6 @@ class InworldConfig(BaseModel):
     temperature: float
     """Determines the degree of randomness when sampling audio tokens to generate the response. Accepts values between 0 and 2. Defaults to 0.8"""
     output_streaming: bool
-    apply_text_normalization: Optional[bool] = None
-    """When enabled, text normalization automatically expands and standardizes things like numbers, dates, times, and abbreviations before converting them to speech.
-    For example, Dr. Smith becomes Doctor Smith, and 3/10/25 is spoken as March tenth, twenty twenty-five.
-    Turning this off may reduce latency, but the speech output will read the text exactly as written.
-    Defaults to automatically deciding whether to apply text normalization."""
     use_tts_prompt: bool
     tts_prompt: str
 

@@ -267,10 +267,6 @@ class WingmanPro:
             "model_id": config.model_id,
             "temperature": config.temperature,
         }
-        if config.apply_text_normalization is not None:
-            data["apply_text_normalization"] = (
-                "ON" if config.apply_text_normalization else "OFF"
-            )
         if config.audio_config is not None:
             data["audio_config"] = config.audio_config.model_dump()
 

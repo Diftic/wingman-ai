@@ -7,6 +7,7 @@ import queue
 import time
 import requests
 import aiofiles
+from api.enums import LogType
 from api.interface import (
     SoundConfig,
     VoiceInfo,
@@ -71,10 +72,6 @@ class Inworld:
             "audioConfig": audio_config,
             "temperature": config.temperature,
         }
-        if config.apply_text_normalization is not None:
-            payload["applyTextNormalization"] = (
-                "ON" if config.apply_text_normalization else "OFF"
-            )
 
         response = requests.request(
             "POST",
