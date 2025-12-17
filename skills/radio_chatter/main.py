@@ -561,6 +561,10 @@ class RadioChatter(Skill):
             elif voice_setting.subprovider == WingmanProTtsProvider.AZURE:
                 voice_name = voice
                 self.wingman.config.azure.tts.voice = voice
+            elif voice_setting.subprovider == WingmanProTtsProvider.INWORLD:
+                voice_name = voice
+                self.wingman.config.inworld.voice_id = voice
+                self.wingman.config.inworld.output_streaming = inworld_streaming
         elif voice_provider == TtsProvider.OPENAI:
             voice_name = voice.value
             self.wingman.config.openai.tts_voice = voice

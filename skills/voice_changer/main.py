@@ -198,6 +198,11 @@ class VoiceChanger(Skill):
                 voice_name = voice
                 provider_name = "Wingman Pro / Azure TTS"
                 self.wingman.config.azure.tts.voice = voice
+            elif voice_setting.subprovider == WingmanProTtsProvider.INWORLD:
+                voice_name = voice
+                provider_name = "Wingman Pro / Inworld"
+                self.wingman.config.inworld.voice_id = voice
+                self.wingman.config.inworld.output_streaming = False
         elif voice_provider == TtsProvider.OPENAI:
             voice_name = voice.value
             provider_name = "OpenAI"
