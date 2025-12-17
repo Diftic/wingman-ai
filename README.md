@@ -287,6 +287,18 @@ Please follow our guides to setup your dev environment:
 - [Windows development](docs/develop-windows.md)
 - [MacOS development](docs/develop-macos.md)
 
+### Creating Custom Skills
+
+Want to extend Wingman AI with your own skills? We have comprehensive documentation:
+
+- **[Skills Developer Guide](skills/README.md)** - Complete guide for creating custom skills, including:
+  - How skills work and are discovered
+  - Tool-based vs hook-based skills
+  - Skill vs MCP decision guide
+  - Available custom property types
+  - Bundling dependencies
+  - Best practices and examples
+
 If you want to read some code first and understand how it all works, we recommend you start here (in this order):
 
 - `http://127.0.0.1:49111/docs` - The OpenAPI (ex: Swagger) spec
