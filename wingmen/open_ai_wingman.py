@@ -1597,6 +1597,12 @@ class OpenAiWingman(Wingman):
         ):
             if self.config.inworld.use_tts_prompt and self.config.inworld.tts_prompt:
                 tts_prompt = self.config.inworld.tts_prompt
+        elif self.config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE:
+            if (
+                self.config.openai_compatible_tts.use_tts_prompt
+                and self.config.openai_compatible_tts.tts_prompt
+            ):
+                tts_prompt = self.config.openai_compatible_tts.tts_prompt
 
         # Add TTS header only if there's a prompt
         if tts_prompt:

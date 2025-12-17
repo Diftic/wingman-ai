@@ -343,6 +343,8 @@ class OpenAiCompatibleTtsConfig(BaseModel):
     model: Optional[str] = None
     speed: float
     output_streaming: bool
+    use_tts_prompt: bool
+    tts_prompt: str
 
 
 class XVASynthVoiceConfig(BaseModel):

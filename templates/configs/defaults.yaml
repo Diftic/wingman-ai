@@ -75,6 +75,26 @@ openai_compatible_tts:
   base_url: ""
   speed: 1.0
   output_streaming: true
+  use_tts_prompt: false
+  tts_prompt: |
+    Audio markups make your speech more expressive and human-like. Use them regularly to bring your personality to life and react naturally to the conversation.
+
+    **Non-verbal sounds** (can be placed ANYWHERE in your response):
+    [clear_throat] [sigh] [shush] [cough] [groan] [sniff] [gasp] [chuckle] [laugh]
+
+    **When to use audio markups:**
+    - Match your character's personality from the BACKSTORY - if playful, use [chuckle] or [laugh] often; if serious, use [sigh] when frustrated or [groan] when dealing with problems
+    - React naturally to conversation flow - [gasp] at shocking revelations, [sigh] at disappointments, [laugh] or [chuckle] at humor, [groan] at complications
+    - Place sounds where a human would naturally make them - mid-sentence or between thoughts for maximum realism
+    - Aim to use markups in roughly 1 out of 3-4 responses when contextually appropriate
+    - You can use multiple sounds in one response if it feels natural: "[clear_throat] Listen carefully. [sigh] This isn't going to be easy."
+
+    **Examples:**
+    - "Well, [sigh] that didn't go as planned."
+    - "[clear_throat] Attention please. The mission starts in 5 minutes."
+    - "I found the data you were looking for [chuckle] but you might not like what it says."
+    - "[gasp] Wait, WHAT? [laugh] Are you kidding me right now?"
+    - "Look, [groan] I've told you three times already. [sigh] Let me explain it one more time."
 mistral:
   conversation_model: mistral-medium-latest
   endpoint: https://api.mistral.ai/v1
@@ -112,7 +132,7 @@ elevenlabs:
     use_speaker_boost: true
   use_tts_prompt: true
   tts_prompt: |
-    Audio tags are available for expressive speech (v3 model only). Use sparingly for emphasis.
+    Audio tags make your speech more expressive and human-like. Use them regularly when they fit your personality and the conversation context.
 
     **Emotional delivery** (place before text):
     [excited] [curious] [sarcastic] [mischievously] [crying] [whispers]
@@ -125,13 +145,17 @@ elevenlabs:
     - CAPITALIZATION for emphasis
     - Standard punctuation for natural rhythm
 
-    **Guidelines:**
-    - Match tags to your character's voice and personality
-    - Use only when emotion genuinely fits the context
-    - Most responses need no tags at all
-    - One emotional tag per response is usually enough
+    **When to use audio tags:**
+    - Match your character's personality from the BACKSTORY - if you're playful, use [laughs] or [mischievously] more often; if serious, use [sighs] when frustrated
+    - React emotionally to conversation context - use [excited] for good news, [sighs] for setbacks, [curious] when exploring topics
+    - Add non-verbal sounds naturally where a human would - [laughs] at humor, [exhales] after effort, [snorts] at absurdity
+    - Aim to use tags in roughly 1 out of 3-4 responses when contextually appropriate
+    - You can combine one emotional tag with non-verbal sounds: "[whispers] Listen… [sighs] this is serious"
 
-    **Example:** "[sighs] That was a VERY close call… we barely made it."
+    **Examples:**
+    - "[sighs] That was a VERY close call… we barely made it."
+    - "[excited] YES! We found it! [laughs] I told you it would work!"
+    - "[mischievously] Oh, you want to try THAT approach? [snorts] This should be interesting…"
 hume:
   description: ""
   voice:
@@ -142,7 +166,7 @@ inworld:
   tts_endpoint: https://api.inworld.ai/tts/v1/voice
   model_id: inworld-tts-1
   voice_id: Hades
-  temperature: 0.8
+  temperature: 1.1
   output_streaming: true
   audio_config:
     audio_encoding: MP3
@@ -152,27 +176,33 @@ inworld:
     speaking_rate: 1.0
   use_tts_prompt: true
   tts_prompt: |
-    You can use audio markups to add emotion and vocal effects to your speech. Use them sparingly for emphasis - not in every response.
+    Audio markups make your speech more expressive and human-like. Use them regularly to bring your personality to life and react naturally to the conversation.
 
-    **Emotions** (place at START of text, use only ONE per response):
-    [happy] [sad] [angry] [surprised] [fearful] [disgusted]
+    **EMOTION AND DELIVERY STYLE MARKUPS** (place at START of text, ONE per response):
+    Emotions: [happy], [sad], [angry], [surprised], [fearful]
+    Delivery: [laughing] [whispering]
+    - These apply to the ENTIRE text that follows
+    - Use only ONE emotion or delivery markup at the beginning
+    - Choose based on your personality and the conversation context
 
-    **Delivery styles** (place at START of text):
-    [laughing] [whispering]
+    **NON-VERBAL VOCALIZATION MARKUPS** (place anywhere in text):
+    [breathe], [clear_throat], [cough], [laugh], [sigh], [yawn]
+    - These add vocal sounds where placed
+    - Can use multiple in one response
+    - Place where a human would naturally make these sounds
 
-    **Non-verbal sounds** (can be placed anywhere, use sparingly):
-    [breathe] [clear_throat] [cough] [laugh] [sigh] [yawn]
-
-    **Guidelines:**
-    - Use markups only when they genuinely fit the emotional context
-    - Don't overuse - most responses need no markups at all
-    - For emotions/delivery: ONE tag at the start, applies to entire response
-    - Only use the exact tags listed above - no others exist
+    **When to use markups - aim for 1 in 3-4 responses:**
+    - Match your BACKSTORY personality: cheerful → [happy] + [laugh]; serious → [fearful] + [sigh]; grumpy → [angry] + [sigh]
+    - React to context: good news → [happy]; setbacks → [sad] + [sigh]; shocking → [surprised]; humor → [laughing] or [laugh]
+    - Add natural sounds: [clear_throat] before announcements, [breathe] when stressed, [yawn] when tired
+    - Avoid conflicting markups: don't mix [angry] with [laugh], or [sad] with [laughing]
+    - Choose contextually appropriate markups that match your text content
 
     **Examples:**
-    - "[happy] Great news, the mission was a success!"
-    - "[sigh] Unfortunately, that didn't go as planned."
-    - "[clear_throat] Attention please. [laugh] Just kidding, at ease."
+    - "[happy] Great news! The mission was a complete success!"
+    - "[clear_throat] Did you hear me? [sigh] You never listen!"
+    - "[angry] Are you serious right now? [sigh] Fine, I'll fix it."
+    - "[surprised] Wait, what? [laugh] I did not see that coming!"
 azure:
   whisper:
     api_base_url: https://openai-w-eu.openai.azure.com/
