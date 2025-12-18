@@ -3,8 +3,6 @@ description: |
   Your ship's board computer. Controls all ship systems and executes commands.
   Connected to StarHead for real-time trading routes and ship information.
 discoverable_skills:
-  - AutoScreenshot
-  - ImageGeneration
   - Timer
   - VisionAI
 discoverable_mcps:
@@ -33,8 +31,6 @@ prompts:
     - Loyal to your pilot
 record_key: end
 is_voice_activation_default: True
-sound:
-  effects: [AI]
 commands:
   - name: ToggleCruiseControlOrToggleHoldCurrentSpeed
     actions:
