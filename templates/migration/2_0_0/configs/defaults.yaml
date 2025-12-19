@@ -23,6 +23,7 @@ prompts:
 
     **TTS optimization (your response will be spoken!):**
     - For links, use Markdown: [descriptive text](url) - the UI shows a clickable link, TTS reads just the text
+    - **Avoid "click here" or "more information here"**: Integrate links naturally into your sentences so they sound good when spoken (e.g., "You can find more [details about the Cutlass Black](url) on the wiki" instead of "For more info, click [here](url)")
     - Don't read raw data aloud - summarize JSON, code, HTML, XML into plain language
     - For long lists, summarize ("I found 12 items, here are the top 3...")
     - Use normal formatting for dates, times, and prices (TTS handles these well)
