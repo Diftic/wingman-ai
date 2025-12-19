@@ -134,6 +134,20 @@ class Migration182To200(BaseMigration):
                 ]["audio_config"]["streaming_sample_rate_hertz"]
                 self.log("- added inworld.audio_config.streaming_sample_rate_hertz")
 
+        # Add OpenAI-compatible TTS prompt configuration
+        if "openai_compatible_tts" not in old:
+            old["openai_compatible_tts"] = {}
+        if "use_tts_prompt" not in old["openai_compatible_tts"]:
+            old["openai_compatible_tts"]["use_tts_prompt"] = new[
+                "openai_compatible_tts"
+            ]["use_tts_prompt"]
+            self.log("- added openai_compatible_tts.use_tts_prompt")
+        if "tts_prompt" not in old["openai_compatible_tts"]:
+            old["openai_compatible_tts"]["tts_prompt"] = new["openai_compatible_tts"][
+                "tts_prompt"
+            ]
+            self.log("- added openai_compatible_tts.tts_prompt")
+
         return old
 
     def migrate_wingman(self, old: dict, new: Optional[dict]) -> dict:
