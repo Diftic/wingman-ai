@@ -76,6 +76,7 @@ openai_compatible_tts:
   base_url: ""
   speed: 1.0
   output_streaming: true
+  voices_endpoint: "/voices"
   use_tts_prompt: false
   tts_prompt: |
     Audio markups make your speech more expressive and human-like. Use them regularly to bring your personality to life and react naturally to the conversation.

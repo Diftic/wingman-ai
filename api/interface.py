@@ -340,6 +340,7 @@ class OpenAiCompatibleTtsConfig(BaseModel):
     output_streaming: bool
     use_tts_prompt: bool
     tts_prompt: str
+    voices_endpoint: Optional[str] = None
 
 
 class XVASynthVoiceConfig(BaseModel):

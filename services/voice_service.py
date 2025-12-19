@@ -61,6 +61,13 @@ class VoiceService:
         )
         self.router.add_api_route(
             methods=["GET"],
+            path="/voices/openai-compatible",
+            endpoint=self.get_openai_compatible_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
             path="/voices/azure",
             endpoint=self.get_azure_voices,
             response_model=list[VoiceInfo],
@@ -195,6 +202,18 @@ class VoiceService:
         inworld = Inworld(api_key=api_key, wingman_name="")
         result = await inworld.get_available_voices()
         return result
+
+    # GET /voices/openai-compatible
+    async def get_openai_compatible_voices(
+        self,
+        api_key: str,
+        base_url: str,
+        voices_endpoint: str | None = None,
+    ) -> list[VoiceInfo]:
+        openai_compatible = OpenAiCompatibleTts(api_key=api_key, base_url=base_url)
+        return await openai_compatible.get_available_voices(
+            voices_endpoint=voices_endpoint
+        )
 
     # GET /voices/azure
     def get_azure_voices(self, api_key: str, region: AzureRegion, locale: str = ""):

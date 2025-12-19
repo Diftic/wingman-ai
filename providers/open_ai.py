@@ -1,15 +1,18 @@
 from abc import ABC, abstractmethod
+import json
 import re
 from typing import Literal, Mapping, Union
+import httpx
 from openai import NOT_GIVEN, NotGiven, Omit, OpenAI, APIStatusError, AzureOpenAI
 import azure.cognitiveservices.speech as speechsdk
-from api.enums import AzureRegion
+from api.enums import AzureRegion, LogType
 
 from api.interface import (
     AzureInstanceConfig,
     AzureSttConfig,
     AzureTtsConfig,
     SoundConfig,
+    VoiceInfo,
 )
 from services.audio_player import AudioPlayer
 from services.openai_utils import get_minimal_reasoning_by_model
@@ -404,10 +407,78 @@ class OpenAiCompatibleTts:
         base_url: str | None = None,
     ):
         super().__init__()
+        self._api_key = api_key
+        self._base_url = base_url
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
         )
+
+    async def get_available_voices(
+        self, voices_endpoint: str | None
+    ) -> list[VoiceInfo]:
+        """Retrieve available voices from an OpenAI-compatible endpoint.
+
+        If `voices_endpoint` is not provided, or the request fails for any reason,
+        returns an empty list.
+        """
+
+        if not voices_endpoint:
+            return []
+
+        if not self._base_url:
+            return []
+
+        url = f"{self._base_url.rstrip('/')}/{voices_endpoint.lstrip('/')}"
+
+        try:
+            headers: dict[str, str] = {}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as e:
+                printr.print(
+                    f"OpenAI-compatible voices: invalid JSON from {url}: {e}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                return []
+
+            items = payload.get("data", []) if isinstance(payload, dict) else []
+            if not isinstance(items, list):
+                return []
+
+            voices: list[VoiceInfo] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                voice_id = item.get("id")
+                if not voice_id:
+                    continue
+                voices.append(VoiceInfo(id=str(voice_id), name=str(voice_id)))
+            return voices
+        except httpx.HTTPStatusError as e:
+            # Non-2xx response
+            printr.print(
+                f"OpenAI-compatible voices: HTTP {e.response.status_code} from {url}: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return []
+        except httpx.RequestError as e:
+            # Intentionally silent for UI polling; callers expect [] on failures.
+            printr.print(
+                f"OpenAI-compatible voices: request failed for {url}: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return []
 
     async def play_audio(
         self,

@@ -147,6 +147,9 @@ class Migration182To200(BaseMigration):
                 "tts_prompt"
             ]
             self.log("- added openai_compatible_tts.tts_prompt")
+        if "voices_endpoint" not in old["openai_compatible_tts"]:
+            old["openai_compatible_tts"]["voices_endpoint"] = "/voices"
+            self.log("- added openai_compatible_tts.voices_endpoint ('/voices')")
 
         return old
 
