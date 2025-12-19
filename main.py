@@ -266,8 +266,9 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive_text()
             await command_handler.dispatch(message, websocket)
     except WebSocketDisconnect:
-        await connection_manager.disconnect(websocket)
         await printr.print_async("Client disconnected", server_only=True)
+    finally:
+        await connection_manager.disconnect(websocket)
 
 
 # Websocket for ESP32 clients to stream audio to and from
