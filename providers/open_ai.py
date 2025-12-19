@@ -12,6 +12,7 @@ from api.interface import (
     SoundConfig,
 )
 from services.audio_player import AudioPlayer
+from services.openai_utils import get_minimal_reasoning_by_model
 from services.printr import Printr
 
 printr = Printr()
@@ -62,6 +63,37 @@ class BaseOpenAi(ABC):
 
         return None
 
+    def get_minimal_reasoning_by_model(self, model_name: str) -> dict:
+        """
+        Returns the minimal reasoning effort setting based on the model name.
+        This helps reduce latency by setting the lowest supported reasoning effort.
+        See https://platform.openai.com/docs/api-reference/chat/create#chat_create-reasoning_effort
+
+        Args:
+            model_name: The name of the OpenAI model
+
+        Returns:
+            dict: Dictionary with reasoning_effort key if applicable, empty dict otherwise
+        """
+        # Models that don't support reasoning effort parameter
+        if model_name in ["o1-mini", "gpt-5.2-chat-latest"]:
+            return {}
+
+        # o-series models (o1, o3, etc.) support "low" as minimal
+        if model_name.startswith("o"):
+            return {"reasoning_effort": "low"}
+
+        # gpt-5.x models (5.1, 5.2, etc.) support "none" as minimal
+        if model_name.startswith("gpt-5."):
+            return {"reasoning_effort": "none"}
+
+        # gpt-5 base models support "minimal" as lowest effort
+        if model_name.startswith("gpt-5"):
+            return {"reasoning_effort": "minimal"}
+
+        # Other models don't support reasoning effort
+        return {}
+
     def _perform_ask(
         self,
         client: OpenAI | AzureOpenAI,
@@ -71,11 +103,17 @@ class BaseOpenAi(ABC):
         model: str = None,
     ):
         try:
+            # Get minimal reasoning effort for the model to reduce latency
+            reasoning_params = (
+                self.get_minimal_reasoning_by_model(model) if model else {}
+            )
+
             if not tools:
                 completion = client.chat.completions.create(
                     stream=stream,
                     messages=messages,
                     model=model,
+                    **reasoning_params,
                 )
             else:
                 completion = client.chat.completions.create(
@@ -84,6 +122,7 @@ class BaseOpenAi(ABC):
                     model=model,
                     tools=tools,
                     tool_choice="auto",
+                    **reasoning_params,
                 )
             return completion
         except APIStatusError as e:
@@ -212,7 +251,7 @@ class OpenAi(BaseOpenAi):
                         sample_rate=24000,
                         dtype="int16",
                         channels=1,
-                        use_gain_boost=True, # All streaming PCM TTS providers need this
+                        use_gain_boost=True,  # All streaming PCM TTS providers need this
                     )
 
         except APIStatusError as e:
@@ -450,7 +489,7 @@ class OpenAiCompatibleTts:
                         sample_rate=24000,
                         dtype="int16",
                         channels=1,
-                        use_gain_boost=True, # All streaming PCM TTS providers need this
+                        use_gain_boost=True,  # All streaming PCM TTS providers need this
                     )
 
         except APIStatusError as e:

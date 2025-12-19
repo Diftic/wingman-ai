@@ -12,6 +12,7 @@ from api.interface import (
     WingmanProSettings,
 )
 from services.audio_player import AudioPlayer
+from services.openai_utils import get_minimal_reasoning_by_model
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
 
@@ -95,11 +96,15 @@ class WingmanPro:
             else:
                 serialized_messages.append(message)
 
+        # Get minimal reasoning effort for the model to reduce latency
+        reasoning_params = get_minimal_reasoning_by_model(deployment)
+
         data = {
             "messages": serialized_messages,
             "deployment": deployment,
             "stream": stream,
             "tools": tools,
+            **reasoning_params,
         }
         response = requests.post(
             url=f"{self.settings.base_url}/ask",
