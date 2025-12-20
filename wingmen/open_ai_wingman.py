@@ -2357,31 +2357,57 @@ class OpenAiWingman(Wingman):
         Returns:
             list[dict]: A list of tool descriptors in OpenAI format.
         """
+
+        def _command_has_effective_actions(command: CommandConfig) -> bool:
+            if command.is_system_command:
+                return True
+
+            if not command.actions:
+                return False
+
+            for action in command.actions:
+                if not action:
+                    continue
+                if (
+                    action.keyboard is not None
+                    or action.mouse is not None
+                    or action.joystick is not None
+                    or action.audio is not None
+                    or action.write is not None
+                    or action.wait is not None
+                ):
+                    return True
+
+            return False
+
         commands = [
             command.name
             for command in self.config.commands
-            if not command.force_instant_activation
+            if (not command.force_instant_activation)
+            and _command_has_effective_actions(command)
         ]
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_command",
-                    "description": "Executes a command",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command_name": {
-                                "type": "string",
-                                "description": "The name of the command to execute",
-                                "enum": commands,
+        tools: list[dict] = []
+        if commands:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "execute_command",
+                        "description": "Executes a command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command_name": {
+                                    "type": "string",
+                                    "description": "The name of the command to execute",
+                                    "enum": commands,
+                                },
                             },
+                            "required": ["command_name"],
                         },
-                        "required": ["command_name"],
                     },
-                },
-            },
-        ]
+                }
+            )
 
         # Unified capability discovery: single activate_capability meta-tool
         # Combines skills and MCP servers - LLM doesn't need to know the difference
