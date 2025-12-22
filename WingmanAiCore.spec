@@ -18,7 +18,7 @@ These libraries enable GPU acceleration without requiring users to install CUDA 
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
 # Determine the venv site-packages path based on the platform
 if sys.platform == 'win32':
@@ -175,6 +175,24 @@ hiddenimports = [
     # ctranslate2 for FasterWhisper
     'ctranslate2',
 ]
+
+# Ensure Pillow (PIL) is fully bundled.
+# Custom skills may rely on Core-provided Pillow, and Pillow has many submodules and
+# compiled extensions (e.g., freetype) that PyInstaller may not find automatically.
+try:
+    hiddenimports += collect_submodules('PIL')
+except Exception as e:
+    print(f"Warning: Could not collect PIL submodules: {e}")
+
+try:
+    datas += collect_data_files('PIL')
+except Exception as e:
+    print(f"Warning: Could not collect PIL data files: {e}")
+
+try:
+    binaries += collect_dynamic_libs('PIL')
+except Exception as e:
+    print(f"Warning: Could not collect PIL dynamic libs: {e}")
 
 # ============================================================================
 # ANALYSIS
