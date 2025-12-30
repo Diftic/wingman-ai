@@ -43,15 +43,23 @@ class ToolHandler:
                     f"LLM called for '{tool_name}' with parameters: {parameters}"
                 )
 
-                if not self.__helper.is_ready():
+                if self.__helper.get_handler_import().get_imported_percent() not in [100, 0]:
                     await self.__helper.get_handler_debug().write_async(
-                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Please wait a moment.", True
+                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Giving it 5 more seconds ..", True
                     )
-                    function_response = (
-                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Please wait a moment and try again."
-                    )
-                    self.__helper.set_request_while_not_loaded(True)
-                    return function_response, instant_response
+                    self.__helper.wait(5)
+                    if self.__helper.get_handler_import().get_imported_percent() not in [100, 0]:
+                        await self.__helper.get_handler_debug().write_async(
+                            f"UEX skill is still loading after 5s: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Deciding to retry later.",
+                            True
+                        )
+                        function_response = (
+                            f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Inform user, this will take a moment. User should initiate request again in a moment."
+                        )
+                        self.__helper.set_request_while_not_loaded(True)
+                        return function_response, instant_response
+                    else:
+                        self.__helper.set_request_while_not_loaded(False)
 
                 self.__helper.start_timer(tool_name)
                 tool = self.__functions[tool_name]()
