@@ -3,10 +3,37 @@ import asyncio
 import atexit
 from enum import Enum
 from os import path
+import os
 import signal
 import sys
 import traceback
 from typing import Any, Literal, get_args, get_origin
+
+# =============================================================================
+# NVIDIA CUDA DLL PATH SETUP (must be done before any CUDA-dependent imports)
+# =============================================================================
+# When running as a PyInstaller bundle, the NVIDIA CUDA DLLs are in subdirectories
+# of _internal/nvidia/. We need to add these to PATH so ctranslate2 can find them.
+# This must happen before any import that might load ctranslate2 or CUDA libraries.
+if getattr(sys, "frozen", False):
+    # Running as bundled exe
+    _internal_dir = sys._MEIPASS
+    _nvidia_paths = [
+        path.join(_internal_dir, "nvidia", "cublas", "bin"),
+        path.join(_internal_dir, "nvidia", "cudnn", "bin"),
+        path.join(_internal_dir, "nvidia", "cuda_runtime", "bin"),
+        path.join(_internal_dir, "nvidia", "cuda_nvrtc", "bin"),
+        path.join(_internal_dir, "nvidia", "nvrtc", "bin"),
+    ]
+    # Prepend existing paths that exist
+    _existing_nvidia_paths = [p for p in _nvidia_paths if path.isdir(p)]
+    if _existing_nvidia_paths:
+        os.environ["PATH"] = (
+            os.pathsep.join(_existing_nvidia_paths)
+            + os.pathsep
+            + os.environ.get("PATH", "")
+        )
+
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import asynccontextmanager
@@ -14,8 +41,8 @@ from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.utils import get_openapi
 from api.commands import WebSocketCommandModel
-from api.interface import BenchmarkResult
-from api.enums import ENUM_TYPES, LogType, WingmanInitializationErrorType
+from api.interface import BenchmarkResult, CoreStatusResponse
+from api.enums import ENUM_TYPES, CoreState, LogType, WingmanInitializationErrorType
 import keyboard.keyboard as keyboard
 from services.command_handler import CommandHandler
 from services.config_manager import ConfigManager
@@ -38,12 +65,23 @@ Printr.set_connection_manager(connection_manager)
 app_is_bundled = getattr(sys, "frozen", False)
 app_root_path = sys._MEIPASS if app_is_bundled else path.dirname(path.abspath(__file__))
 
+# Set the bundled skills directory for ModuleManager
+from services.module_manager import set_bundled_skills_dir
+
+bundled_skills_path = path.join(app_root_path, "skills")
+set_bundled_skills_dir(bundled_skills_path)
+printr.print(
+    f"Skills directory: {bundled_skills_path}",
+    server_only=True,
+    color=LogType.STARTUP,
+)
+
 # creates all the configs from templates - do this first!
 config_manager = ConfigManager(app_root_path)
 printr.print(
     f"Config directory: {config_manager.config_dir}",
     server_only=True,
-    color=LogType.HIGHLIGHT,
+    color=LogType.STARTUP,
 )
 
 secret_keeper = SecretKeeper()
@@ -53,7 +91,7 @@ system_manager = SystemManager()
 printr.print(
     f"Wingman AI Core v{system_manager.local_version}",
     server_only=True,
-    color=LogType.HIGHLIGHT,
+    color=LogType.STARTUP,
 )
 
 is_latest_version = system_manager.check_version()
@@ -69,6 +107,7 @@ core = WingmanCore(
     config_manager=config_manager,
     app_root_path=app_root_path,
     app_is_bundled=app_is_bundled,
+    system_manager=system_manager,
 )
 core.set_connection_manager(connection_manager)
 
@@ -103,7 +142,7 @@ async def shutdown():
 
 def exit_handler():
     printr.print(
-        "atexit handler shutting down...", color=LogType.SUBTLE, server_only=True
+        "atexit handler shutting down...", color=LogType.SYSTEM, server_only=True
     )
     asyncio.run(shutdown())
 
@@ -117,7 +156,7 @@ async def lifespan(_app: FastAPI):
 
     # executed after the application has finished
     printr.print(
-        "Lifespan end - shutting down...", color=LogType.SUBTLE, server_only=True
+        "Lifespan end - shutting down...", color=LogType.SYSTEM, server_only=True
     )
     await shutdown()
 
@@ -227,8 +266,9 @@ async def websocket_endpoint(websocket: WebSocket):
             message = await websocket.receive_text()
             await command_handler.dispatch(message, websocket)
     except WebSocketDisconnect:
-        await connection_manager.disconnect(websocket)
         await printr.print_async("Client disconnected", server_only=True)
+    finally:
+        await connection_manager.disconnect(websocket)
 
 
 # Websocket for ESP32 clients to stream audio to and from
@@ -251,7 +291,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
     printr.print(
         f"Audio client {websocket.client.host} connected",
         server_only=True,
-        color=LogType.SUBTLE,
+        color=LogType.SYSTEM,
     )
 
     # Track connection state
@@ -299,7 +339,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
                     printr.print(
                         "Audio subscription successful",
                         server_only=True,
-                        color=LogType.SUBTLE,
+                        color=LogType.SYSTEM,
                     )
                     break
 
@@ -333,7 +373,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
 
     except WebSocketDisconnect:
         printr.print(
-            f"Audio client disconnected", server_only=True, color=LogType.SUBTLE
+            f"Audio client disconnected", server_only=True, color=LogType.SYSTEM
         )
     except Exception as e:
         printr.print(f"Audio error: {str(e)}", server_only=True, color=LogType.ERROR)
@@ -350,7 +390,7 @@ async def websocket_global_audio_endpoint(websocket: WebSocket):
                 printr.print(
                     "Audio unsubscribed successfully",
                     server_only=True,
-                    color=LogType.SUBTLE,
+                    color=LogType.SYSTEM,
                 )
             except Exception as e:
                 printr.print(
@@ -367,14 +407,14 @@ async def start_secrets(secrets: dict[str, Any]):
     await core.config_service.load_config()
 
 
-@app.get("/ping", tags=["main"], response_model=str)
+@app.get("/ping", tags=["main"], response_model=CoreStatusResponse)
 async def ping():
-    return "Ok" if core.is_started else "Starting"
+    return core.get_status()
 
 
-@app.get("/client/is-pro", tags=["main"], response_model=bool)
-async def is_client_pro():
-    return core.is_client_pro
+@app.get("/client/plan", tags=["main"], response_model=str)
+async def get_client_plan():
+    return core.client_plan
 
 
 @app.get("/client/account-name", tags=["main"], response_model=str)
@@ -400,8 +440,14 @@ async def get_dummy_benchmark():
 
 
 async def async_main(host: str, port: int, sidecar: bool):
+    # Set MIGRATING state before migrations
+    await core.set_core_state(CoreState.MIGRATING)
     await core.config_service.migrate_configs(system_manager)
+
+    # Set LOADING_CONFIG state
+    await core.set_core_state(CoreState.LOADING_CONFIG)
     await core.config_service.load_config()
+
     saved_secrets: list[str] = []
     for error in core.tower_errors:
         if (
@@ -424,7 +470,8 @@ async def async_main(host: str, port: int, sidecar: bool):
         event_loop = asyncio.get_running_loop()
         core.audio_player.set_event_loop(event_loop)
         asyncio.create_task(core.process_events())
-        core.is_started = True
+        # Set READY state - this also sets is_started = True
+        await core.set_core_state(CoreState.READY)
     except Exception as e:
         printr.print(f"Error starting Wingman AI Core: {str(e)}", color=LogType.ERROR)
         printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
@@ -477,7 +524,7 @@ if __name__ == "__main__":
     def signal_handler(sig, frame):
         printr.print(
             "SIGINT/SIGTERM received! Initiating shutdown...",
-            color=LogType.SUBTLE,
+            color=LogType.SYSTEM,
             server_only=True,
         )
         # Schedule the shutdown asynchronously

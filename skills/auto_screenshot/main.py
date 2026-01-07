@@ -7,9 +7,7 @@ import pygetwindow as gw
 from PIL import Image
 from api.enums import LogType
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
-from services.benchmark import Benchmark
-from skills.skill_base import Skill
-from services.file import get_writable_dir
+from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
     from wingmen.open_ai_wingman import OpenAiWingman
@@ -23,35 +21,59 @@ class AutoScreenshot(Skill):
         wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
-        self.default_directory = ""
-        self.display = 1
 
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
 
-        self.default_directory = self.retrieve_custom_property_value(
-            "default_directory", errors
-        )
-        if (
-            not self.default_directory
-            or self.default_directory == ""
-            or not os.path.isdir(self.default_directory)
-        ):
-            self.default_directory = self.get_default_directory()
-            if self.settings.debug_mode:
-                await self.printr.print_async(
-                    "User either did not enter default directory or entered directory is invalid.  Defaulting to wingman config directory / screenshots",
-                    color=LogType.INFO,
-                )
-
-        self.display = self.retrieve_custom_property_value("display", errors)
+        self.retrieve_custom_property_value("default_directory", errors)
+        self.retrieve_custom_property_value("display", errors)
 
         return errors
 
     def get_default_directory(self) -> str:
-        return get_writable_dir("screenshots")
+        return self.get_generated_files_dir()
 
-    async def take_screenshot(self, reason: str) -> None:
+    def _get_default_directory(self) -> str:
+        """Get default_directory property value just-in-time."""
+        errors = []
+        default_directory = self.retrieve_custom_property_value(
+            "default_directory", errors
+        )
+        if (
+            not default_directory
+            or default_directory == ""
+            or not os.path.isdir(default_directory)
+        ):
+            return self.get_default_directory()
+        return default_directory
+
+    def _get_display(self) -> int:
+        """Get display property value just-in-time."""
+        errors = []
+        return self.retrieve_custom_property_value("display", errors)
+
+    @tool(
+        name="take_screenshot",
+        description="""Captures a screenshot of the focused window and saves it.
+
+        WHEN TO USE:
+        - User explicitly requests: 'Take a screenshot', 'Capture my screen'
+        - User expresses excitement/surprise: 'Oh wow!', 'This is crazy!', 'Amazing!'
+        - Memorable gaming moments or achievements
+
+        IMPORTANT: Do NOT use for 'look at screen' requests - those need VisionAI for analysis, not capture.""",
+    )
+    async def take_screenshot(self, reason: str) -> str:
+        """
+        Args:
+            reason: The reason for taking a screenshot.
+        """
+        if self.settings.debug_mode:
+            await self.printr.print_async(
+                f"AutoScreenshot: taking screenshot for reason: {reason}",
+                color=LogType.INFO,
+            )
+
         try:
             focused_window = gw.getActiveWindow()
 
@@ -86,7 +108,7 @@ class AutoScreenshot(Skill):
             if window_bbox:
                 screenshot = sct.grab(window_bbox)
             else:
-                main_display = sct.monitors[self.display]
+                main_display = sct.monitors[self._get_display()]
                 screenshot = sct.grab(main_display)
 
             image = Image.frombytes(
@@ -95,7 +117,7 @@ class AutoScreenshot(Skill):
 
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             screenshot_file = os.path.join(
-                self.default_directory, f"{self.wingman.name}_{timestamp}.png"
+                self._get_default_directory(), f"{self.wingman.name}_{timestamp}.png"
             )
             image.save(screenshot_file)
 
@@ -105,47 +127,4 @@ class AutoScreenshot(Skill):
                     color=LogType.INFO,
                 )
 
-    def get_tools(self) -> list[tuple[str, dict]]:
-        tools = [
-            (
-                "take_screenshot",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "take_screenshot",
-                        "description": "Takes a screenshot of the currently focused game window and saves it in the default directory.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "reason": {
-                                    "type": "string",
-                                    "description": "The reason for taking a screenshot.",
-                                },
-                            },
-                            "required": ["reason"],
-                        },
-                    },
-                },
-            ),
-        ]
-        return tools
-
-    async def execute_tool(
-        self, tool_name: str, parameters: dict[str, any], benchmark: Benchmark
-    ) -> tuple[str, str]:
-        function_response = ""
-        instant_response = ""
-
-        if tool_name == "take_screenshot":
-            benchmark.start_snapshot("Auto Screenshot: take_screenshot")
-            if self.settings.debug_mode:
-                message = f"AutoScreenshot: executing tool '{tool_name}'"
-                if parameters:
-                    message += f" with params: {parameters}"
-                await self.printr.print_async(message, color=LogType.INFO)
-            reason = parameters.get("reason", "unspecified reason")
-            await self.take_screenshot(reason)
-            function_response = "Screenshot taken successfully."
-            benchmark.finish_snapshot()
-
-        return function_response, instant_response
+        return f"Screenshot saved to: {screenshot_file}"

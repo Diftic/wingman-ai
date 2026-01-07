@@ -16,6 +16,7 @@ import mouse.mouse as mouse
 from api.interface import (
     CommandConfig,
     SettingsConfig,
+    SkillConfig,
     SoundConfig,
     WingmanConfig,
     WingmanInitializationError,
@@ -41,6 +42,11 @@ if TYPE_CHECKING:
     from services.tower import Tower
 
 printr = Printr()
+
+
+def _get_skill_folder_from_module(module: str) -> str:
+    """Extract folder name from module path like 'skills.star_head.main' -> 'star_head'"""
+    return module.replace(".main", "").replace(".", "/").split("/")[1]
 
 
 class Wingman:
@@ -190,11 +196,19 @@ class Wingman:
 
     async def unload(self):
         """This method is called when the Wingman is unloaded by Tower. You can override it if you need to clean up resources."""
+        # Unsubscribe from secret events to prevent duplicate handlers
+        self.secret_keeper.secret_events.unsubscribe(
+            "secrets_saved", self.handle_secret_saved
+        )
         await self.unload_skills()
 
     async def unload_skills(self):
-        """Call this to trigger unload for all skills."""
+        """Call this to trigger unload for skills that were actually prepared/used."""
         for skill in self.skills:
+            # Only unload skills that were actually prepared (activated)
+            # Skills that were never used don't need cleanup
+            if not skill.is_prepared:
+                continue
             try:
                 await skill.unload()
             except Exception as e:
@@ -207,65 +221,121 @@ class Wingman:
                 )
 
     async def init_skills(self) -> list[WingmanInitializationError]:
-        """This method is called when the Wingman is instantiated by Tower or when a skill's config changes.
-        It is run AFTER validate() so you can access validated params safely here.
-        It is used to load and init the skills of the Wingman."""
+        """Load all available skills with lazy validation.
+
+        Skills are loaded but NOT validated during init. Validation happens
+        on first activation via the SkillRegistry. User config overrides from
+        self.config.skills are merged with default configs.
+
+        Platform-incompatible skills are skipped entirely.
+        """
+        import sys
+
+        current_platform = sys.platform  # 'win32', 'darwin', 'linux'
+        platform_map = {"win32": "windows", "darwin": "darwin", "linux": "linux"}
+        normalized_platform = platform_map.get(current_platform, current_platform)
+
         if self.skills:
             await self.unload_skills()
 
         errors = []
         self.skills = []
-        if not self.config.skills:
-            return errors
 
-        for skill_config in self.config.skills:
+        # Build a lookup of user config overrides by skill folder name
+        # The key must be the folder name (e.g., 'star_head') not the class name (e.g., 'StarHead')
+        user_skill_configs: dict[str, "SkillConfig"] = {}
+        if self.config.skills:
+            for skill_config in self.config.skills:
+                folder_name = _get_skill_folder_from_module(skill_config.module)
+                user_skill_configs[folder_name] = skill_config
+
+        # Get all available skill configs
+        available_skills = ModuleManager.read_available_skill_configs()
+
+        # Get discoverable skills list (whitelist)
+        discoverable_skills = self.config.discoverable_skills
+
+        for skill_folder_name, skill_config_path in available_skills:
             try:
+                # Load default skill config first to get the display name
+                skill_config_dict = ModuleManager.read_config(skill_config_path)
+                if not skill_config_dict:
+                    continue
+
+                # Import SkillConfig here to avoid circular imports
+                from api.interface import SkillConfig
+
+                # Check if user has overrides for this skill
+                if skill_folder_name in user_skill_configs:
+                    # Merge user overrides into default config
+                    user_config = user_skill_configs[skill_folder_name]
+                    # User config takes precedence - merge custom_properties especially
+                    if user_config.custom_properties:
+                        skill_config_dict["custom_properties"] = [
+                            prop.model_dump() for prop in user_config.custom_properties
+                        ]
+                    if user_config.prompt:
+                        skill_config_dict["prompt"] = user_config.prompt
+
+                skill_config = SkillConfig(**skill_config_dict)
+
+                # Check if skill is discoverable for this wingman (whitelist - must be in list)
+                if skill_config.name not in discoverable_skills:
+                    continue
+
+                # Check platform compatibility BEFORE loading the module
+                if skill_config.platforms:
+                    if normalized_platform not in skill_config.platforms:
+                        printr.print(
+                            f"Skipping skill '{skill_config.name}' - not supported on {normalized_platform}",
+                            color=LogType.WARNING,
+                            server_only=True,
+                        )
+                        continue
+
+                # Load the skill module
                 skill = ModuleManager.load_skill(
                     config=skill_config,
                     settings=self.settings,
                     wingman=self,
                 )
                 if skill:
-                    # init skill methods
+                    # Set up skill methods
                     skill.threaded_execution = self.threaded_execution
 
-                    validation_errors = await skill.validate()
+                    # Add to skills list WITHOUT validation
+                    # Validation will happen lazily on first activation
+                    self.skills.append(skill)
+                    await self.prepare_skill(skill)
 
-                    # Give the user 2*5 seconds to enter the secret if one is required and missing
-                    if any(
-                        error.error_type == "missing_secret"
-                        for error in validation_errors
-                    ):
-                        for _attempt in range(2):
-                            await asyncio.sleep(5)
-                            validation_errors = await skill.validate()
-                            if not validation_errors:
-                                break
-
-                    errors.extend(validation_errors)
-
-                    if len(validation_errors) == 0:
-                        self.skills.append(skill)
-                        await self.prepare_skill(skill)
-                        await skill.prepare()
-                        printr.print(
-                            f"Skill '{skill_config.name}' loaded successfully.",
-                            color=LogType.POSITIVE,
-                            server_only=True,
-                        )
-                    else:
-                        await printr.print_async(
-                            f"Skill '{skill_config.name}' could not be loaded: {' '.join(error.message for error in validation_errors)}",
-                            color=LogType.ERROR,
-                        )
             except Exception as e:
+                skill_name = skill_folder_name
+                error_msg = f"Error loading skill '{skill_name}': {str(e)}"
                 await printr.print_async(
-                    f"Error loading skill '{skill_config.name}': {str(e)}",
+                    error_msg,
                     color=LogType.ERROR,
                 )
                 printr.print(
                     traceback.format_exc(), color=LogType.ERROR, server_only=True
                 )
+                errors.append(
+                    WingmanInitializationError(
+                        wingman_name=self.name,
+                        message=error_msg,
+                        error_type=WingmanInitializationErrorType.SKILL_INITIALIZATION_FAILED,
+                    )
+                )
+
+        # Log summary of discoverable skills for this wingman
+        if self.skills:
+            skill_names = [s.config.name for s in self.skills]
+            await printr.print_async(
+                f"Discoverable skills ({len(skill_names)}): {', '.join(skill_names)}",
+                color=LogType.WINGMAN,
+                source=LogSource.WINGMAN,
+                source_name=self.name,
+                server_only=not self.settings.debug_mode,
+            )
 
         return errors
 
@@ -274,6 +344,143 @@ class Wingman:
         It is run AFTER validate() so you can access validated params safely here.
 
         You can override it if you need to react on data of this skill."""
+
+    async def unprepare_skill(self, skill: Skill):
+        """Remove a skill's registration. Called when a skill is disabled.
+
+        Override in subclass to clean up skill-specific registrations."""
+        pass
+
+    async def enable_skill(self, skill_name: str) -> tuple[bool, str]:
+        """Enable a single skill without reinitializing all skills.
+
+        Args:
+            skill_name: The display name of the skill to enable
+
+        Returns:
+            (success, message) tuple
+        """
+        import sys
+
+        current_platform = sys.platform
+        platform_map = {"win32": "windows", "darwin": "darwin", "linux": "linux"}
+        normalized_platform = platform_map.get(current_platform, current_platform)
+
+        # Check if skill is already enabled
+        for existing_skill in self.skills:
+            if existing_skill.config.name == skill_name:
+                return True, f"Skill '{skill_name}' is already enabled."
+
+        # Find the skill config
+        available_skills = ModuleManager.read_available_skill_configs()
+
+        # Build user config lookup by skill folder name
+        user_skill_configs: dict[str, "SkillConfig"] = {}
+        if self.config.skills:
+            for skill_config in self.config.skills:
+                folder_name = _get_skill_folder_from_module(skill_config.module)
+                user_skill_configs[folder_name] = skill_config
+
+        for skill_folder_name, skill_config_path in available_skills:
+            try:
+                skill_config_dict = ModuleManager.read_config(skill_config_path)
+                if not skill_config_dict:
+                    continue
+
+                from api.interface import SkillConfig
+
+                # Apply user overrides
+                if skill_folder_name in user_skill_configs:
+                    user_config = user_skill_configs[skill_folder_name]
+                    if user_config.custom_properties:
+                        skill_config_dict["custom_properties"] = [
+                            prop.model_dump() for prop in user_config.custom_properties
+                        ]
+                    if user_config.prompt:
+                        skill_config_dict["prompt"] = user_config.prompt
+
+                skill_config = SkillConfig(**skill_config_dict)
+
+                if skill_config.name != skill_name:
+                    continue
+
+                # Check platform compatibility
+                if skill_config.platforms:
+                    if normalized_platform not in skill_config.platforms:
+                        return (
+                            False,
+                            f"Skill '{skill_name}' is not supported on {normalized_platform}.",
+                        )
+
+                # Load and register the skill
+                skill = ModuleManager.load_skill(
+                    config=skill_config,
+                    settings=self.settings,
+                    wingman=self,
+                )
+                if skill:
+                    skill.threaded_execution = self.threaded_execution
+                    self.skills.append(skill)
+                    await self.prepare_skill(skill)
+
+                    printr.print(
+                        f"Skill '{skill_name}' activated (loaded and made discoverable).",
+                        color=LogType.POSITIVE,
+                        server_only=True,
+                    )
+                    return True, f"Skill '{skill_name}' activated successfully."
+
+            except Exception as e:
+                error_msg = f"Error activating skill '{skill_name}': {str(e)}"
+                await printr.print_async(error_msg, color=LogType.ERROR)
+                printr.print(
+                    traceback.format_exc(), color=LogType.ERROR, server_only=True
+                )
+                return False, error_msg
+
+        return False, f"Skill '{skill_name}' not found."
+
+    async def disable_skill(self, skill_name: str) -> tuple[bool, str]:
+        """Disable a single skill without reinitializing all skills.
+
+        Args:
+            skill_name: The display name of the skill to disable
+
+        Returns:
+            (success, message) tuple
+        """
+        # Find the skill in our list
+        skill_to_remove = None
+        for skill in self.skills:
+            if skill.config.name == skill_name:
+                skill_to_remove = skill
+                break
+
+        if not skill_to_remove:
+            return True, f"Skill '{skill_name}' is already deactivated."
+
+        try:
+            # Unload the skill (cleanup resources, unsubscribe events)
+            await skill_to_remove.unload()
+
+            # Remove from skill list
+            self.skills.remove(skill_to_remove)
+
+            # Remove skill-specific registrations (tools, registry, etc.)
+            await self.unprepare_skill(skill_to_remove)
+
+            printr.print(
+                f"Skill '{skill_name}' deactivated (unloaded and removed from discoverable skills).",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return True, f"Skill '{skill_name}' deactivated successfully."
+
+        except Exception as e:
+            error_msg = f"Error deactivating skill '{skill_name}': {str(e)}"
+            await printr.print_async(error_msg, color=LogType.ERROR)
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+            return False, error_msg
 
     def reset_conversation_history(self):
         """This function is called when the user triggers the ResetConversationHistory command.
@@ -312,7 +519,7 @@ class Wingman:
             if transcript:
                 await printr.print_async(
                     f"{transcript}",
-                    color=LogType.PURPLE,
+                    color=LogType.USER,
                     source_name="User",
                     source=LogSource.USER,
                     benchmark_result=(
@@ -463,7 +670,7 @@ class Wingman:
                 transcript.lower(),
                 commands_by_instant_activation.keys(),
                 n=1,
-                cutoff=0.8,
+                cutoff=1,
             )
 
             # if no phrase found, return None
@@ -508,14 +715,14 @@ class Wingman:
                 await self.execute_action(command)
                 await printr.print_async(
                     f"Executed {'instant' if is_instant else 'AI'} command: {command.name}",
-                    color=LogType.INFO,
+                    color=LogType.COMMAND,
                 )
 
             # handle the global special commands:
             if command.name == "ResetConversationHistory":
                 self.reset_conversation_history()
                 await printr.print_async(
-                    f"Executed command: {command.name}", color=LogType.INFO
+                    f"Executed command: {command.name}", color=LogType.COMMAND
                 )
 
             return self._select_command_response(command) or "Ok"
@@ -643,19 +850,29 @@ class Wingman:
             return None
 
     async def update_config(
-        self, config: WingmanConfig, validate=False, update_skills=False
+        self, config: WingmanConfig, skip_config_validation: bool = True
     ) -> bool:
-        """Update the config of the Wingman. This method should always be called if the config of the Wingman has changed."""
+        """Update the config of the Wingman.
+
+        This method should always be called if the config of the Wingman has changed.
+
+        Args:
+            config: The new wingman configuration
+            skip_config_validation: If False, validate the config and rollback on error
+
+        Returns:
+            True if config was updated successfully, False otherwise
+        """
         try:
-            if validate:
+            if not skip_config_validation:
                 old_config = deepcopy(self.config)
 
             self.config = config
 
-            if update_skills:
-                await self.init_skills()
+            # Propagate skill config changes to loaded skills
+            await self._update_skill_configs(config)
 
-            if validate:
+            if not skip_config_validation:
                 errors = await self.validate()
 
                 for error in errors:
@@ -675,13 +892,92 @@ class Wingman:
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
             return False
 
+    async def _update_skill_configs(self, wingman_config: WingmanConfig) -> None:
+        """Propagate skill config changes to loaded skills.
+
+        When the wingman config changes (e.g., user updates custom_properties for a skill),
+        we need to update the SkillConfig on each loaded skill instance so they see the new values.
+        """
+        if not self.skills or not wingman_config.skills:
+            return
+
+        # Build lookup of new skill configs by folder name
+        new_skill_configs: dict[str, "SkillConfig"] = {}
+        for skill_config in wingman_config.skills:
+            try:
+                folder_name = _get_skill_folder_from_module(skill_config.module)
+            except Exception:
+                printr.print(
+                    f"Skipping skill config override with unexpected module format: '{skill_config.module}'",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                continue
+            new_skill_configs[folder_name] = skill_config
+
+        # Update each loaded skill if its config changed
+        for skill in self.skills:
+            # Get the folder name for this skill
+            try:
+                skill_folder = _get_skill_folder_from_module(skill.config.module)
+            except Exception:
+                printr.print(
+                    f"Skipping loaded skill with unexpected module format: '{skill.config.module}'",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                continue
+
+            if skill_folder in new_skill_configs:
+                user_override = new_skill_configs[skill_folder]
+
+                fields_set = getattr(user_override, "model_fields_set", None)
+                if fields_set is None:
+                    # Pydantic v1 fallback
+                    fields_set = getattr(user_override, "__fields_set__", set())
+
+                # Create updated config by copying current and applying overrides
+                # This preserves all default values while applying user overrides
+                updated_config = deepcopy(skill.config)
+
+                # Apply overrides even if they're explicitly empty.
+                # This allows users to clear custom properties/prompt in the UI.
+                if "custom_properties" in fields_set:
+                    updated_config.custom_properties = user_override.custom_properties
+                if "prompt" in fields_set:
+                    updated_config.prompt = user_override.prompt
+
+                # Let the skill handle the config update (will compare old vs new)
+                await skill.update_config(updated_config)
+
     async def save_config(self):
         """Save the config of the Wingman."""
         self.tower.save_wingman(self.name)
+
+    async def save_commands(self):
+        """Save only the commands section of this wingman's config.
+
+        This performs a partial YAML update - only the commands field is modified
+        in the config file, avoiding full config serialization. This is much safer
+        than save_config() for command-only changes as it won't accidentally
+        overwrite other fields.
+
+        Use this instead of save_config() when you only changed command definitions,
+        instant_activation phrases, or other command-related fields.
+
+        Example use cases:
+        - QuickCommands learning instant activation phrases
+        - Skills dynamically adding/modifying commands
+        - Skills updating command responses or actions
+        """
+        self.tower.save_wingman_commands(self.name)
 
     async def update_settings(self, settings: SettingsConfig):
         """Update the settings of the Wingman. This method should always be called when the user Settings have changed."""
         self.settings = settings
         await self.init_skills()
+        # Also reload MCPs if the wingman supports them
+        if hasattr(self, "init_mcps"):
+            await self.init_mcps()
 
         printr.print(f"Wingman {self.name}'s settings changed", server_only=True)

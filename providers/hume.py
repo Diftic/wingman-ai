@@ -1,7 +1,7 @@
 import base64
 from os import path
 import aiofiles
-from hume import AsyncHumeClient
+from hume.client import AsyncHumeClient
 from hume.tts import (
     PostedUtterance,
     PostedUtteranceVoiceWithId,

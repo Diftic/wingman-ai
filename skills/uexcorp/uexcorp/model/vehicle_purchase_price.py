@@ -1,8 +1,5 @@
 from datetime import datetime
-try:
-    from skills.uexcorp.uexcorp.model.data_model import DataModel
-except ModuleNotFoundError:
-    from uexcorp.uexcorp.model.data_model import DataModel
+from skills.uexcorp.uexcorp.model.data_model import DataModel
 
 class VehiclePurchasePrice(DataModel):
 
@@ -38,19 +35,15 @@ class VehiclePurchasePrice(DataModel):
             self.load_by_value("id", self.data["id"])
 
     def get_data_for_ai(self, show_vehicle_data: bool = True) -> dict:
-        try:
-            from skills.uexcorp.uexcorp.model.vehicle import Vehicle
-            from skills.uexcorp.uexcorp.model.terminal import Terminal
-        except ModuleNotFoundError:
-            from uexcorp.uexcorp.model.vehicle import Vehicle
-            from uexcorp.uexcorp.model.terminal import Terminal
+        from skills.uexcorp.uexcorp.model.vehicle import Vehicle
+        from skills.uexcorp.uexcorp.model.terminal import Terminal
 
 
         terminal = Terminal(self.get_id_terminal(), load=True) if self.get_id_terminal() else None
 
         information = {
             "terminal": terminal.get_data_for_ai_minimal() if terminal else None,
-            "price_buy": self.get_price_buy(),
+            "price_buy_from_terminal": self.get_price_buy(),
         }
 
         if show_vehicle_data:
@@ -65,7 +58,7 @@ class VehiclePurchasePrice(DataModel):
         return {
             "terminal": self.get_terminal_name(),
             "vehicle": self.get_vehicle_name(),
-            "price_buy": self.get_price_buy(),
+            "price_buy_from_terminal": self.get_price_buy(),
         }
 
     def get_id(self) -> int:

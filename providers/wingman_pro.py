@@ -1,13 +1,18 @@
+from typing import Optional
 import openai
 import requests
+from openai.types.audio import Transcription
 from api.enums import CommandTag, LogType
 from api.interface import (
     AzureSttConfig,
     AzureTtsConfig,
+    InworldConfig,
     SoundConfig,
+    VoiceInfo,
     WingmanProSettings,
 )
 from services.audio_player import AudioPlayer
+from services.openai_utils import get_minimal_reasoning_by_model
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
 
@@ -51,7 +56,7 @@ class WingmanPro:
             else:
                 response.raise_for_status()
             json = response.json()
-            transcription = openai.types.audio.Transcription.model_validate(json)
+            transcription = Transcription.model_validate(json)
             return transcription
 
     def transcribe_azure_speech(self, filename: str, config: AzureSttConfig):
@@ -91,11 +96,15 @@ class WingmanPro:
             else:
                 serialized_messages.append(message)
 
+        # Get minimal reasoning effort for the model to reduce latency
+        reasoning_params = get_minimal_reasoning_by_model(deployment)
+
         data = {
             "messages": serialized_messages,
             "deployment": deployment,
             "stream": stream,
             "tools": tools,
+            **reasoning_params,
         }
         response = requests.post(
             url=f"{self.settings.base_url}/ask",
@@ -248,6 +257,111 @@ class WingmanPro:
                 wingman_name=wingman_name,
             )
 
+    async def generate_inworld_speech(
+        self,
+        text: str,
+        config: InworldConfig,
+        sound_config: SoundConfig,
+        audio_player: AudioPlayer,
+        wingman_name: str,
+    ):
+        data = {
+            "text": text,
+            "voice_id": config.voice_id,
+            "stream": config.output_streaming,
+            "model_id": config.model_id,
+            "temperature": config.temperature,
+        }
+        if config.audio_config is not None:
+            data["audio_config"] = config.audio_config.model_dump()
+
+        if config.output_streaming:
+            # For streaming, we need LINEAR16 format for raw PCM playback
+            if data["audio_config"]:
+                data["audio_config"]["audio_encoding"] = "LINEAR16"
+                # Use streaming sample rate from config
+                data["audio_config"][
+                    "sample_rate_hertz"
+                ] = config.audio_config.streaming_sample_rate_hertz
+
+            def buffer_generator():
+                with requests.post(
+                    url=f"{self.settings.base_url}/generate-inworld-speech",
+                    params={"region": self.settings.region},
+                    json=data,
+                    headers=self._get_headers(),
+                    timeout=self.timeout,
+                    stream=True,
+                ) as response:
+                    if response.status_code == 403:
+                        self.send_unauthorized_error()
+                        return None
+                    else:
+                        response.raise_for_status()
+                    for chunk in response.iter_content(chunk_size=2048):
+                        if not chunk:
+                            break
+                        # Skip WAV header if present (44 bytes starting with "RIFF")
+                        if len(chunk) > 44 and chunk[:4] == b"RIFF":
+                            chunk = chunk[44:]
+                        if len(chunk) > 0:
+                            yield chunk
+
+            generator_instance = buffer_generator()
+            incomplete_buffer = b""
+
+            def buffer_callback(audio_buffer):
+                nonlocal incomplete_buffer
+                try:
+                    chunk = next(generator_instance)
+                    chunk = incomplete_buffer + chunk
+                    remainder = len(chunk) % 2
+                    if remainder:
+                        incomplete_buffer = chunk[-remainder:]
+                        chunk = chunk[:-remainder]
+                    else:
+                        incomplete_buffer = b""
+
+                    audio_buffer[: len(chunk)] = chunk
+                    return len(chunk)
+                except StopIteration:
+                    if incomplete_buffer:
+                        audio_buffer[: len(incomplete_buffer)] = incomplete_buffer
+                        chunk_length = len(incomplete_buffer)
+                        incomplete_buffer = b""
+                        return chunk_length
+                    return 0
+
+            await audio_player.stream_with_effects(
+                buffer_callback=buffer_callback,
+                config=sound_config,
+                wingman_name=wingman_name,
+                sample_rate=config.audio_config.streaming_sample_rate_hertz,
+                channels=1,  # LINEAR16 is typically mono
+                dtype="int16",  # LINEAR16 uses 16-bit integers
+                use_gain_boost=True,  # Streaming audio needs gain boost for radio effects
+            )
+        else:
+            response = requests.post(
+                url=f"{self.settings.base_url}/generate-inworld-speech",
+                params={"region": self.settings.region},
+                headers=self._get_headers(),
+                json=data,
+                timeout=self.timeout,
+            )
+            if response.status_code == 403:
+                self.send_unauthorized_error()
+                return
+            else:
+                response.raise_for_status()
+
+            audio_data = response.content
+            await audio_player.play_with_effects(
+                input_data=audio_data,
+                config=sound_config,
+                wingman_name=wingman_name,
+            )
+
     async def generate_image(
         self,
         text: str,
@@ -297,6 +411,39 @@ class WingmanPro:
         ]
 
         return voice_infos
+
+    def get_available_inworld_voices(
+        self, filter_language: Optional[str] = None
+    ) -> list[VoiceInfo]:
+        params = {"region": self.settings.region}
+        if filter_language:
+            params["filter"] = f"language={filter_language}"
+
+        response = requests.get(
+            url=f"{self.settings.base_url}/inworld-voices",
+            params=params,
+            timeout=self.timeout,
+            headers=self._get_headers(),
+        )
+        if response.status_code == 403:
+            self.send_unauthorized_error()
+            return []
+        else:
+            response.raise_for_status()
+
+        response_data = response.json()
+        voices: list[VoiceInfo] = []
+        for voice in response_data.get("voices", []):
+            voice_name = voice.get("displayName", "")
+            voice_id = voice.get("voiceId", "")
+            voices.append(
+                VoiceInfo(
+                    id=voice_id,
+                    name=voice_name or voice_id,
+                    languages=voice.get("languages", []),
+                )
+            )
+        return voices
 
     def _get_headers(self):
         token = self.secret_keeper.secrets.get("wingman_pro", "")

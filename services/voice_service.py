@@ -7,6 +7,7 @@ from api.interface import (
     EdgeTtsConfig,
     ElevenlabsConfig,
     HumeConfig,
+    InworldConfig,
     SoundConfig,
     VoiceInfo,
     XVASynthTtsConfig,
@@ -14,6 +15,7 @@ from api.interface import (
 from providers.edge import Edge
 from providers.elevenlabs import ElevenLabs
 from providers.hume import Hume
+from providers.inworld import Inworld
 from providers.open_ai import OpenAi, OpenAiAzure, OpenAiCompatibleTts
 from providers.wingman_pro import WingmanPro
 from providers.xvasynth import XVASynth
@@ -52,6 +54,20 @@ class VoiceService:
         )
         self.router.add_api_route(
             methods=["GET"],
+            path="/voices/inworld",
+            endpoint=self.get_inworld_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/voices/openai-compatible",
+            endpoint=self.get_openai_compatible_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
             path="/voices/azure",
             endpoint=self.get_azure_voices,
             response_model=list[VoiceInfo],
@@ -61,6 +77,13 @@ class VoiceService:
             methods=["GET"],
             path="/voices/azure/wingman-pro",
             endpoint=self.get_wingman_pro_azure_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/voices/inworld/wingman-pro",
+            endpoint=self.get_wingman_pro_inworld_voices,
             response_model=list[VoiceInfo],
             tags=tags,
         )
@@ -97,6 +120,12 @@ class VoiceService:
         )
         self.router.add_api_route(
             methods=["POST"],
+            path="/voices/preview/inworld",
+            endpoint=self.play_inworld,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
             path="/voices/preview/edgetts",
             endpoint=self.play_edge_tts,
             tags=tags,
@@ -117,6 +146,12 @@ class VoiceService:
             methods=["POST"],
             path="/voices/preview/wingman-pro/openai",
             endpoint=self.play_wingman_pro_openai,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/voices/preview/wingman-pro/inworld",
+            endpoint=self.play_wingman_pro_inworld,
             tags=tags,
         )
 
@@ -162,6 +197,24 @@ class VoiceService:
         result = await hume.get_available_voices()
         return result
 
+    # GET /voices/inworld
+    async def get_inworld_voices(self, api_key: str) -> list[VoiceInfo]:
+        inworld = Inworld(api_key=api_key, wingman_name="")
+        result = await inworld.get_available_voices()
+        return result
+
+    # GET /voices/openai-compatible
+    async def get_openai_compatible_voices(
+        self,
+        api_key: str,
+        base_url: str,
+        voices_endpoint: str | None = None,
+    ) -> list[VoiceInfo]:
+        openai_compatible = OpenAiCompatibleTts(api_key=api_key, base_url=base_url)
+        return await openai_compatible.get_available_voices(
+            voices_endpoint=voices_endpoint
+        )
+
     # GET /voices/azure
     def get_azure_voices(self, api_key: str, region: AzureRegion, locale: str = ""):
         azure = OpenAiAzure()
@@ -182,6 +235,18 @@ class VoiceService:
         result = [self.__convert_azure_voice(voice) for voice in voices]
         return result
 
+    # GET /voices/inworld/wingman-pro
+    def get_wingman_pro_inworld_voices(
+        self, filter_language: str = None
+    ) -> list[VoiceInfo]:
+        wingman_pro = WingmanPro(
+            wingman_name="", settings=self.config_manager.settings_config.wingman_pro
+        )
+        voices = wingman_pro.get_available_inworld_voices(
+            filter_language=filter_language
+        )
+        return voices
+
     # POST /play/openai
     async def play_openai_tts(
         self,
@@ -191,6 +256,7 @@ class VoiceService:
         model: str,
         speed: float,
         sound_config: SoundConfig,
+        stream: bool,
     ):
         openai = OpenAi(api_key=api_key)
         await openai.play_audio(
@@ -201,6 +267,7 @@ class VoiceService:
             sound_config=sound_config,
             audio_player=self.audio_player,
             wingman_name="system",
+            stream=stream,
         )
 
     # POST /play/openai-compatible
@@ -213,6 +280,7 @@ class VoiceService:
         model: str,
         speed: float,
         sound_config: SoundConfig,
+        stream: bool,
     ):
         openai = OpenAiCompatibleTts(api_key=api_key, base_url=base_url)
         await openai.play_audio(
@@ -223,6 +291,7 @@ class VoiceService:
             sound_config=sound_config,
             audio_player=self.audio_player,
             wingman_name="system",
+            stream=stream,
         )
 
     # POST /play/azure
@@ -283,6 +352,19 @@ class VoiceService:
             wingman_name="system",
         )
 
+    # POST /play/inworld
+    async def play_inworld(
+        self, text: str, api_key: str, config: InworldConfig, sound_config: SoundConfig
+    ):
+        inworld = Inworld(api_key=api_key, wingman_name="")
+        await inworld.play_audio(
+            text=text,
+            config=config,
+            sound_config=sound_config,
+            audio_player=self.audio_player,
+            wingman_name="system",
+        )
+
     # POST /play/xvasynth
     async def play_xvasynth_tts(
         self, text: str, config: XVASynthTtsConfig, sound_config: SoundConfig
@@ -311,7 +393,7 @@ class VoiceService:
             wingman_name="system",
         )
 
-    # POST /play/wingman-pro/azure
+    # POST /play/wingman-pro/openai
     async def play_wingman_pro_openai(
         self, text: str, voice: str, model: str, speed: float, sound_config: SoundConfig
     ):
@@ -324,6 +406,25 @@ class VoiceService:
             voice=voice,
             model=model,
             speed=speed,
+            sound_config=sound_config,
+            audio_player=self.audio_player,
+            wingman_name="system",
+        )
+
+    # POST /play/wingman-pro/inworld
+    async def play_wingman_pro_inworld(
+        self,
+        text: str,
+        config: InworldConfig,
+        sound_config: SoundConfig,
+    ):
+        wingman_pro = WingmanPro(
+            wingman_name="system",
+            settings=self.config_manager.settings_config.wingman_pro,
+        )
+        await wingman_pro.generate_inworld_speech(
+            text=text,
+            config=config,
             sound_config=sound_config,
             audio_player=self.audio_player,
             wingman_name="system",

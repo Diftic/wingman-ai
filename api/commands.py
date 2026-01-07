@@ -2,6 +2,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel
 from api.enums import (
     CommandTag,
+    CoreState,
     KeyboardRecordingType,
     LogSource,
     LogType,
@@ -52,7 +53,7 @@ class StopRecordingCommand(WebSocketCommandModel):
 
 class ClientLoggedInCommand(WebSocketCommandModel):
     command: Literal["client_logged_in"] = "client_logged_in"
-    is_pro: bool
+    plan: str
     account_name: str
 
 
@@ -96,3 +97,25 @@ class ActionsRecordedCommand(WebSocketCommandModel):
 class VoiceActivationMutedCommand(WebSocketCommandModel):
     command: Literal["voice_activation_muted"] = "voice_activation_muted"
     muted: bool
+
+
+class McpStateChangedCommand(WebSocketCommandModel):
+    """Sent when MCP server connection state changes (connected/disconnected)."""
+
+    command: Literal["mcp_state_changed"] = "mcp_state_changed"
+    wingman_name: str
+    """The wingman whose MCP state changed."""
+
+
+class CoreStateChangedCommand(WebSocketCommandModel):
+    """Sent when the Core lifecycle state changes.
+
+    The client should use this to update UI accordingly (show loading spinner,
+    etc.). Note that if the Core crashes, it will NOT be able
+    to send a state change - the client must detect WebSocket disconnection and
+    failed /ping requests to determine that Core has crashed.
+    """
+
+    command: Literal["core_state_changed"] = "core_state_changed"
+    state: CoreState
+    """The current state of Wingman AI Core."""

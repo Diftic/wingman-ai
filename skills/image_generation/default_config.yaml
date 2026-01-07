@@ -2,20 +2,23 @@ module: skills.image_generation.main
 name: ImageGeneration
 display_name: Image Generation
 author: ShipBit
+discoverable_by_default: false
 tags:
   - Image
-  - Utility
   - Internet
 description:
   en: Use Wingman AI to generate images based on your input. It uses DALL-E 3.
   de: Verwende Wingman AI, um Bilder basierend auf deinen Eingaben zu generieren. Es verwendet DALL-E 3.
-examples:
-  - en: Generate an image of a cat.
-    de: Generiere ein Bild einer Katze.
-prompt: |
-  You can also generate images.
+discovery_keywords:
+  - create image
+  - generate picture
+  - DALL-E
+  - draw
+  - make image
+  - AI art
+  - image creation
 custom_properties:
-  - hint: Whether generated images should be saved to disk.  Images will be saved in the skill folder in a folder called "generated_images."
+  - hint: Whether generated images should be saved to disk. Images will be saved to your WingmanAI APPDATA directory in a subdirectory called "generated_files"
     id: save_images
     name: Save generated images
     property_type: boolean

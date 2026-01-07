@@ -1,7 +1,4 @@
-try:
-    from skills.uexcorp.uexcorp.model.data_model import DataModel
-except ModuleNotFoundError:
-    from uexcorp.uexcorp.model.data_model import DataModel
+from skills.uexcorp.uexcorp.model.data_model import DataModel
 
 class CommodityRawPrice(DataModel):
 
@@ -47,12 +44,8 @@ class CommodityRawPrice(DataModel):
             self.load_by_value("id", self.data["id"])
 
     def get_data_for_ai(self) -> dict:
-        try:
-            from skills.uexcorp.uexcorp.model.commodity import Commodity
-            from skills.uexcorp.uexcorp.model.terminal import Terminal
-        except ModuleNotFoundError:
-            from uexcorp.uexcorp.model.commodity import Commodity
-            from uexcorp.uexcorp.model.terminal import Terminal
+        from skills.uexcorp.uexcorp.model.commodity import Commodity
+        from skills.uexcorp.uexcorp.model.terminal import Terminal
 
         commodity = Commodity(self.get_id_commodity(), load=True) if self.get_id_commodity() else None
         terminal = Terminal(self.get_id_terminal(), load=True) if self.get_id_terminal() else None
@@ -60,7 +53,7 @@ class CommodityRawPrice(DataModel):
         return {
             "commodity": commodity.get_data_for_ai_minimal() if commodity else None,
             "terminal": terminal.get_data_for_ai_minimal() if terminal else None,
-            "price_sell": self.get_price_sell(),
+            "price_sell_to_terminal": self.get_price_sell(),
         }
 
     def get_data_for_ai_minimal(self) -> dict:
@@ -106,4 +99,4 @@ class CommodityRawPrice(DataModel):
         return self.data["terminal_slug"]
 
     def __str__(self):
-        return f"Sell {self.get_commodity_name()} at {self.get_terminal_name()} for {self.get_price_sell()}"
+        return f"Sell {self.get_commodity_name()} to {self.get_terminal_name()} for {self.get_price_sell()}"

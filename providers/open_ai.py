@@ -1,17 +1,21 @@
 from abc import ABC, abstractmethod
+import json
 import re
 from typing import Literal, Mapping, Union
+import httpx
 from openai import NOT_GIVEN, NotGiven, Omit, OpenAI, APIStatusError, AzureOpenAI
 import azure.cognitiveservices.speech as speechsdk
-from api.enums import AzureRegion
+from api.enums import AzureRegion, LogType
 
 from api.interface import (
     AzureInstanceConfig,
     AzureSttConfig,
     AzureTtsConfig,
     SoundConfig,
+    VoiceInfo,
 )
 from services.audio_player import AudioPlayer
+from services.openai_utils import get_minimal_reasoning_by_model
 from services.printr import Printr
 
 printr = Printr()
@@ -62,6 +66,37 @@ class BaseOpenAi(ABC):
 
         return None
 
+    def get_minimal_reasoning_by_model(self, model_name: str) -> dict:
+        """
+        Returns the minimal reasoning effort setting based on the model name.
+        This helps reduce latency by setting the lowest supported reasoning effort.
+        See https://platform.openai.com/docs/api-reference/chat/create#chat_create-reasoning_effort
+
+        Args:
+            model_name: The name of the OpenAI model
+
+        Returns:
+            dict: Dictionary with reasoning_effort key if applicable, empty dict otherwise
+        """
+        # Models that don't support reasoning effort parameter
+        if model_name in ["o1-mini", "gpt-5.2-chat-latest"]:
+            return {}
+
+        # o-series models (o1, o3, etc.) support "low" as minimal
+        if model_name.startswith("o"):
+            return {"reasoning_effort": "low"}
+
+        # gpt-5.x models (5.1, 5.2, etc.) support "none" as minimal
+        if model_name.startswith("gpt-5."):
+            return {"reasoning_effort": "none"}
+
+        # gpt-5 base models support "minimal" as lowest effort
+        if model_name.startswith("gpt-5"):
+            return {"reasoning_effort": "minimal"}
+
+        # Other models don't support reasoning effort
+        return {}
+
     def _perform_ask(
         self,
         client: OpenAI | AzureOpenAI,
@@ -71,11 +106,17 @@ class BaseOpenAi(ABC):
         model: str = None,
     ):
         try:
+            # Get minimal reasoning effort for the model to reduce latency
+            reasoning_params = (
+                self.get_minimal_reasoning_by_model(model) if model else {}
+            )
+
             if not tools:
                 completion = client.chat.completions.create(
                     stream=stream,
                     messages=messages,
                     model=model,
+                    **reasoning_params,
                 )
             else:
                 completion = client.chat.completions.create(
@@ -84,6 +125,7 @@ class BaseOpenAi(ABC):
                     model=model,
                     tools=tools,
                     tool_choice="auto",
+                    **reasoning_params,
                 )
             return completion
         except APIStatusError as e:
@@ -151,20 +193,70 @@ class OpenAi(BaseOpenAi):
         sound_config: SoundConfig,
         audio_player: AudioPlayer,
         wingman_name: str,
+        stream: bool,
     ):
+        # instructions = config.instructions # Instructions are for gpt-4o-mini-tts model only
         try:
-            response = self.client.audio.speech.create(
-                model=model,
-                voice=voice,
-                speed=speed,
-                input=text,
-            )
-            if response is not None:
-                await audio_player.play_with_effects(
-                    input_data=response.content,
-                    config=sound_config,
-                    wingman_name=wingman_name,
+            if not stream:
+                # Non-streaming implementation
+                response = self.client.audio.speech.create(
+                    input=text,
+                    model=model,
+                    voice=voice,
+                    speed=speed,
+                    # instructions=instructions,
                 )
+                if response is not None:
+                    await audio_player.play_with_effects(
+                        input_data=response.content,
+                        config=sound_config,
+                        wingman_name=wingman_name,
+                    )
+            else:
+                # Streaming implementation
+                with self.client.audio.speech.with_streaming_response.create(
+                    input=text,
+                    model=model,
+                    voice=voice,
+                    speed=speed,
+                    response_format="pcm",
+                    # instructions=instructions,
+                ) as response:
+                    # Create an iterator for the audio chunks. We can set the chunk size here.
+                    audio_stream_iterator = response.iter_bytes(chunk_size=1024)
+
+                    # This callback is passed to the audio_player and called repeatedly to fill its buffer.
+                    def buffer_callback(audio_buffer):
+                        """
+                        Fetches the next chunk from the audio stream and loads it
+                        into the player's buffer.
+                        """
+                        try:
+                            # Get the next chunk of audio data from the iterator
+                            chunk = next(audio_stream_iterator)
+                            chunk_size = len(chunk)
+
+                            # Copy the received audio data into the buffer provided by the audio player
+                            audio_buffer[:chunk_size] = chunk
+
+                            # Return the number of bytes written
+                            return chunk_size
+                        except StopIteration:
+                            # When the iterator is exhausted, it raises StopIteration.
+                            # We catch it and return 0 to signal the end of the stream.
+                            return 0
+
+                    # OpenAI's PCM output is 24kHz, 16-bit, single-channel.
+                    await audio_player.stream_with_effects(
+                        buffer_callback=buffer_callback,
+                        config=sound_config,
+                        wingman_name=wingman_name,
+                        sample_rate=24000,
+                        dtype="int16",
+                        channels=1,
+                        use_gain_boost=True,  # All streaming PCM TTS providers need this
+                    )
+
         except APIStatusError as e:
             self._handle_api_error(e)
         except UnicodeEncodeError:
@@ -315,10 +407,78 @@ class OpenAiCompatibleTts:
         base_url: str | None = None,
     ):
         super().__init__()
+        self._api_key = api_key
+        self._base_url = base_url
         self.client = OpenAI(
             api_key=api_key,
             base_url=base_url,
         )
+
+    async def get_available_voices(
+        self, voices_endpoint: str | None
+    ) -> list[VoiceInfo]:
+        """Retrieve available voices from an OpenAI-compatible endpoint.
+
+        If `voices_endpoint` is not provided, or the request fails for any reason,
+        returns an empty list.
+        """
+
+        if not voices_endpoint:
+            return []
+
+        if not self._base_url:
+            return []
+
+        url = f"{self._base_url.rstrip('/')}/{voices_endpoint.lstrip('/')}"
+
+        try:
+            headers: dict[str, str] = {}
+            if self._api_key:
+                headers["Authorization"] = f"Bearer {self._api_key}"
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(url, headers=headers)
+                response.raise_for_status()
+
+            try:
+                payload = response.json()
+            except json.JSONDecodeError as e:
+                printr.print(
+                    f"OpenAI-compatible voices: invalid JSON from {url}: {e}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                return []
+
+            items = payload.get("data", []) if isinstance(payload, dict) else []
+            if not isinstance(items, list):
+                return []
+
+            voices: list[VoiceInfo] = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                voice_id = item.get("id")
+                if not voice_id:
+                    continue
+                voices.append(VoiceInfo(id=str(voice_id), name=str(voice_id)))
+            return voices
+        except httpx.HTTPStatusError as e:
+            # Non-2xx response
+            printr.print(
+                f"OpenAI-compatible voices: HTTP {e.response.status_code} from {url}: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return []
+        except httpx.RequestError as e:
+            # Intentionally silent for UI polling; callers expect [] on failures.
+            printr.print(
+                f"OpenAI-compatible voices: request failed for {url}: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return []
 
     async def play_audio(
         self,
@@ -328,27 +488,81 @@ class OpenAiCompatibleTts:
         sound_config: SoundConfig,
         audio_player: AudioPlayer,
         wingman_name: str,
+        stream: bool,
         speed: float | NotGiven = NOT_GIVEN,
         response_format: (
             NotGiven | Literal["mp3", "opus", "aac", "flac", "wav", "pcm"]
         ) = NOT_GIVEN,
         extra_headers: Mapping[str, Union[str, Omit]] | None = None,
     ):
+        # instructions = config.instructions # No current open source model supports this but adding for full compatibility
+
+        # Should sample rate and response format be configurable in UI to ensure widest compatibilty?
+
         try:
-            response = self.client.audio.speech.create(
-                input=text,
-                model=model,
-                voice=voice,
-                speed=speed,
-                response_format=response_format,
-                extra_headers=extra_headers,
-            )
-            if response is not None:
-                await audio_player.play_with_effects(
-                    input_data=response.content,
-                    config=sound_config,
-                    wingman_name=wingman_name,
+            if not stream:
+                # Non-streaming implementation
+                response = self.client.audio.speech.create(
+                    input=text,
+                    model=model,
+                    voice=voice,
+                    speed=speed,
+                    response_format=response_format,
+                    # instructions=instructions,
+                    extra_headers=extra_headers,
                 )
+                if response is not None:
+                    await audio_player.play_with_effects(
+                        input_data=response.content,
+                        config=sound_config,
+                        wingman_name=wingman_name,
+                    )
+            else:
+                # Streaming implementation
+                with self.client.audio.speech.with_streaming_response.create(
+                    input=text,
+                    model=model,
+                    voice=voice,
+                    speed=speed,
+                    response_format="pcm",
+                    # instructions=instructions,
+                    extra_headers=extra_headers,
+                ) as response:
+                    # Create an iterator for the audio chunks. We can set the chunk size here.
+                    audio_stream_iterator = response.iter_bytes(chunk_size=1024)
+
+                    # This callback is passed to the audio_player and called repeatedly
+                    # to fill its buffer.
+                    def buffer_callback(audio_buffer):
+                        """
+                        Fetches the next chunk from the audio stream and loads it
+                        into the player's buffer.
+                        """
+                        try:
+                            # Get the next chunk of audio data from the iterator
+                            chunk = next(audio_stream_iterator)
+                            chunk_size = len(chunk)
+
+                            # Copy the received audio data into the buffer provided by the audio player
+                            audio_buffer[:chunk_size] = chunk
+
+                            # Return the number of bytes written
+                            return chunk_size
+                        except StopIteration:
+                            # When the iterator is exhausted, it raises StopIteration.
+                            # We catch it and return 0 to signal the end of the stream.
+                            return 0
+
+                    await audio_player.stream_with_effects(
+                        buffer_callback=buffer_callback,
+                        config=sound_config,
+                        wingman_name=wingman_name,
+                        sample_rate=24000,
+                        dtype="int16",
+                        channels=1,
+                        use_gain_boost=True,  # All streaming PCM TTS providers need this
+                    )
+
         except APIStatusError as e:
             printr.toast_error(
                 f"OpenAI-compatible TTS error: {e.status_code} ({e.type})"
@@ -364,5 +578,5 @@ class OpenAiCompatibleTts:
                 printr.toast_error(e.message)
             else:
                 printr.toast_error(
-                    "An unknown OpenAI-compatible TTS error has occured."
+                    "An unknown OpenAI-compatible TTS error has occurred."
                 )

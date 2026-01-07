@@ -4,6 +4,7 @@ import asyncio
 import random
 import traceback
 import uuid
+from datetime import datetime
 from typing import (
     Mapping,
     Optional,
@@ -39,11 +40,18 @@ from providers.elevenlabs import ElevenLabs
 from providers.google import GoogleGenAI
 from providers.open_ai import OpenAi, OpenAiAzure, OpenAiCompatibleTts
 from providers.hume import Hume
+from providers.inworld import Inworld
 from providers.open_ai import OpenAi, OpenAiAzure
+from providers.x_ai import XAi
 from providers.wingman_pro import WingmanPro
+from api.commands import McpStateChangedCommand
 from services.benchmark import Benchmark
 from services.markdown import cleanup_text
 from services.printr import Printr
+from services.skill_registry import SkillRegistry
+from services.mcp_client import McpClient
+from services.mcp_registry import McpRegistry
+from services.capability_registry import CapabilityRegistry
 from skills.skill_base import Skill
 from wingmen.wingman import Wingman
 
@@ -79,9 +87,11 @@ class OpenAiWingman(Wingman):
         self.elevenlabs: ElevenLabs | None = None
         self.openai_compatible_tts: OpenAiCompatibleTts | None = None
         self.hume: Hume | None = None
+        self.inworld: Inworld | None = None
         self.wingman_pro: WingmanPro | None = None
         self.google: GoogleGenAI | None = None
         self.perplexity: OpenAi | None = None
+        self.xai: XAi | None = None
 
         # tool queue
         self.pending_tool_calls = []
@@ -98,6 +108,34 @@ class OpenAiWingman(Wingman):
 
         self.tool_skills: dict[str, Skill] = {}
         self.skill_tools: list[dict] = []
+
+        # Progressive tool disclosure registry (MCP-inspired token optimization)
+        # Only meta-tools are sent to LLM initially; skills activated on-demand
+        self.skill_registry = SkillRegistry()
+
+        # MCP (Model Context Protocol) support
+        # Allows connecting to external MCP servers that provide additional tools
+        self.mcp_client = McpClient(wingman_name=self.name)
+        self.mcp_registry = McpRegistry(
+            self.mcp_client,
+            wingman_name=self.name,
+            on_state_changed=self._broadcast_mcp_state_changed,
+        )
+
+        # Unified capability registry - combines skill and MCP discovery
+        # From the LLM's perspective, both are just "capabilities"
+        self.capability_registry = CapabilityRegistry(
+            self.skill_registry, self.mcp_registry
+        )
+
+    def _broadcast_mcp_state_changed(self):
+        """Broadcast MCP state change to UI via WebSocket."""
+        if printr._connection_manager:
+            printr.ensure_async(
+                printr._connection_manager.broadcast(
+                    McpStateChangedCommand(wingman_name=self.name)
+                )
+            )
 
     async def validate(self):
         errors = await super().validate()
@@ -145,8 +183,14 @@ class OpenAiWingman(Wingman):
             if self.uses_provider("perplexity"):
                 await self.validate_and_set_perplexity(errors)
 
+            if self.uses_provider("xai"):
+                await self.validate_and_set_xai(errors)
+
             if self.uses_provider("hume"):
                 await self.validate_and_set_hume(errors)
+
+            if self.uses_provider("inworld"):
+                await self.validate_and_set_inworld(errors)
 
         except Exception as e:
             errors.append(
@@ -187,6 +231,7 @@ class OpenAiWingman(Wingman):
                 [
                     self.config.features.conversation_provider
                     == ConversationProvider.GROQ,
+                    self.config.features.stt_provider == SttProvider.GROQ,
                 ]
             )
         elif provider_type == "cerebras":
@@ -235,6 +280,8 @@ class OpenAiWingman(Wingman):
             return self.config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE
         elif provider_type == "hume":
             return self.config.features.tts_provider == TtsProvider.HUME
+        elif provider_type == "inworld":
+            return self.config.features.tts_provider == TtsProvider.INWORLD
         elif provider_type == "xvasynth":
             return self.config.features.tts_provider == TtsProvider.XVASYNTH
         elif provider_type == "whispercpp":
@@ -255,6 +302,13 @@ class OpenAiWingman(Wingman):
                 [
                     self.config.features.conversation_provider
                     == ConversationProvider.PERPLEXITY,
+                ]
+            )
+        elif provider_type == "xai":
+            return any(
+                [
+                    self.config.features.conversation_provider
+                    == ConversationProvider.XAI,
                 ]
             )
         return False
@@ -279,6 +333,116 @@ class OpenAiWingman(Wingman):
         await super().unload_skills()
         self.tool_skills = {}
         self.skill_tools = []
+        self.skill_registry.clear()
+
+    async def unload_mcps(self):
+        """Disconnect from all MCP servers."""
+        await self.mcp_registry.clear()
+
+    async def enable_mcp(self, mcp_name: str) -> tuple[bool, str]:
+        """Enable and connect to a single MCP server without reinitializing all MCPs.
+
+        Args:
+            mcp_name: The name of the MCP server to enable
+
+        Returns:
+            (success, message) tuple
+        """
+        # Check if MCP SDK is available
+        if not self.mcp_client.is_available:
+            return False, "MCP SDK not installed."
+
+        # Check if already connected
+        if mcp_name in self.mcp_registry.get_connected_server_names():
+            return True, f"MCP server '{mcp_name}' is already connected."
+
+        # Find the MCP config from central mcp.yaml
+        central_mcp_config = self.tower.config_manager.mcp_config
+        mcp_configs = central_mcp_config.servers if central_mcp_config else []
+
+        mcp_config = None
+        for cfg in mcp_configs:
+            if cfg.name == mcp_name:
+                mcp_config = cfg
+                break
+
+        if not mcp_config:
+            return False, f"MCP server '{mcp_name}' not found in mcp.yaml."
+
+        try:
+            # Build headers with secrets (same logic as init_mcps)
+            headers = {}
+            if mcp_config.headers:
+                headers.update(mcp_config.headers)
+
+            # Check for API key in secrets
+            secret_key = f"mcp_{mcp_config.name}"
+            api_key = await self.secret_keeper.retrieve(
+                requester=self.name,
+                key=secret_key,
+                prompt_if_missing=False,
+            )
+            if api_key:
+                if not any(
+                    k.lower() in ["authorization", "api-key", "x-api-key"]
+                    for k in headers.keys()
+                ):
+                    headers["Authorization"] = f"Bearer {api_key}"
+
+            # Connect with timeout
+            default_timeout = 60.0 if mcp_config.type.value == "stdio" else 30.0
+            timeout = (
+                float(mcp_config.timeout) if mcp_config.timeout else default_timeout
+            )
+
+            connection = await asyncio.wait_for(
+                self.mcp_registry.register_server(
+                    config=mcp_config,
+                    headers=headers if headers else None,
+                ),
+                timeout=timeout,
+            )
+
+            if connection.is_connected:
+                tool_count = len(connection.tools)
+                return True, f"MCP server '{mcp_name}' enabled with {tool_count} tools."
+            else:
+                error = connection.error or "Connection failed."
+                return False, f"MCP server '{mcp_name}' failed to connect: {error}"
+
+        except asyncio.TimeoutError:
+            error_msg = f"Connection timed out ({int(timeout)}s)."
+            self.mcp_registry.set_server_error(mcp_name, error_msg)
+            return False, f"MCP server '{mcp_name}': {error_msg}"
+
+        except Exception as e:
+            error_msg = f"Error enabling MCP '{mcp_name}': {str(e)}"
+            await printr.print_async(error_msg, color=LogType.ERROR)
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+            return False, error_msg
+
+    async def disable_mcp(self, mcp_name: str) -> tuple[bool, str]:
+        """Disable and disconnect from a single MCP server without affecting other MCPs.
+
+        Args:
+            mcp_name: The name of the MCP server to disable
+
+        Returns:
+            (success, message) tuple
+        """
+        # Check if the MCP is connected
+        if mcp_name not in self.mcp_registry.get_connected_server_names():
+            return True, f"MCP server '{mcp_name}' is already disconnected."
+
+        try:
+            await self.mcp_registry.unregister_server(mcp_name)
+            return True, f"MCP server '{mcp_name}' disabled."
+
+        except Exception as e:
+            error_msg = f"Error disabling MCP '{mcp_name}': {str(e)}"
+            await printr.print_async(error_msg, color=LogType.ERROR)
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+            return False, error_msg
 
     async def prepare_skill(self, skill: Skill):
         # prepare the skill and skill tools
@@ -286,6 +450,19 @@ class OpenAiWingman(Wingman):
             for tool_name, tool in skill.get_tools():
                 self.tool_skills[tool_name] = skill
                 self.skill_tools.append(tool)
+
+            # Register with the progressive disclosure registry
+            self.skill_registry.register_skill(skill)
+
+            # Auto-activated skills need to be validated/prepared immediately
+            # so their hooks (like on_play_to_user) will work
+            if skill.config.auto_activate:
+                success, message = await skill.ensure_activated()
+                if not success:
+                    await printr.print_async(
+                        f"Auto-activated skill '{skill.config.display_name}' failed to activate: {message}",
+                        color=LogType.ERROR,
+                    )
         except Exception as e:
             await printr.print_async(
                 f"Error while preparing skill '{skill.name}': {str(e)}",
@@ -295,6 +472,190 @@ class OpenAiWingman(Wingman):
 
         # init skill methods
         skill.llm_call = self.actual_llm_call
+
+    async def unprepare_skill(self, skill: Skill):
+        """Remove a skill's tools and registrations when it's disabled."""
+        try:
+            # Remove tool mappings
+            for tool_name, _ in skill.get_tools():
+                self.tool_skills.pop(tool_name, None)
+                # Remove from skill_tools list
+                self.skill_tools = [
+                    t
+                    for t in self.skill_tools
+                    if t.get("function", {}).get("name") != tool_name
+                ]
+
+            # Unregister from the progressive disclosure registry
+            self.skill_registry.unregister_skill(skill.name)
+        except Exception as e:
+            await printr.print_async(
+                f"Error while unpreparing skill '{skill.name}': {str(e)}",
+                color=LogType.ERROR,
+            )
+            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
+
+    async def init_mcps(self) -> list[WingmanInitializationError]:
+        """
+        Initialize MCP (Model Context Protocol) server connections.
+
+        Loads MCP servers from central mcp.yaml config, only connecting those in wingman's discoverable_mcps.
+        MCP servers provide external tools similar to skills.
+
+        Returns:
+            list[WingmanInitializationError]: Errors encountered (non-fatal, wingman still loads)
+        """
+        errors = []
+
+        # Check if MCP SDK is available
+        if not self.mcp_client.is_available:
+            printr.print(
+                f"[{self.name}] MCP SDK not installed, skipping MCP initialization.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return errors
+
+        # Disconnect existing MCP servers
+        await self.unload_mcps()
+
+        # Get MCP configs from central mcp.yaml
+        central_mcp_config = self.tower.config_manager.mcp_config
+        mcp_configs = central_mcp_config.servers if central_mcp_config else []
+        if not mcp_configs:
+            return errors
+
+        # Get discoverable MCPs list (whitelist) from wingman config
+        discoverable_mcps = self.config.discoverable_mcps
+
+        # Filter to only discoverable MCPs
+        mcps_to_connect = [mcp for mcp in mcp_configs if mcp.name in discoverable_mcps]
+
+        if not mcps_to_connect:
+            return errors
+
+        # Prepare connection tasks for parallel execution
+        async def connect_mcp(mcp_config):
+            """Connect to a single MCP server. Returns (success, connection_info, errors)."""
+            local_errors = []
+            try:
+                # Build headers with secrets
+                headers = {}
+                if mcp_config.headers:
+                    headers.update(mcp_config.headers)
+
+                # Check for API key in secrets (using mcp_ prefix)
+                secret_key = f"mcp_{mcp_config.name}"
+                api_key = await self.secret_keeper.retrieve(
+                    requester=self.name,
+                    key=secret_key,
+                    prompt_if_missing=False,
+                )
+                if api_key:
+                    printr.print(
+                        f"MCP secret '{secret_key}' found ({len(api_key)} chars)",
+                        color=LogType.INFO,
+                        source_name=self.name,
+                        server_only=True,
+                    )
+                    if not any(
+                        k.lower() in ["authorization", "api-key", "x-api-key"]
+                        for k in headers.keys()
+                    ):
+                        headers["Authorization"] = f"Bearer {api_key}"
+
+                # Connect with timeout
+                default_timeout = 60.0 if mcp_config.type.value == "stdio" else 30.0
+                timeout = (
+                    float(mcp_config.timeout) if mcp_config.timeout else default_timeout
+                )
+
+                try:
+                    connection = await asyncio.wait_for(
+                        self.mcp_registry.register_server(
+                            config=mcp_config,
+                            headers=headers if headers else None,
+                        ),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    error_msg = f"MCP '{mcp_config.display_name}' connection timed out ({int(timeout)}s)."
+                    printr.print(
+                        error_msg,
+                        color=LogType.WARNING,
+                        source_name=self.name,
+                        server_only=True,
+                    )
+                    local_errors.append(
+                        WingmanInitializationError(
+                            wingman_name=self.name,
+                            message=error_msg,
+                            error_type=WingmanInitializationErrorType.MCP_CONNECTION_FAILED,
+                        )
+                    )
+                    return (False, None, local_errors)
+
+                if connection.is_connected:
+                    return (
+                        True,
+                        f"{mcp_config.display_name} ({len(connection.tools)} tools)",
+                        local_errors,
+                    )
+                else:
+                    error_msg = f"MCP '{mcp_config.display_name}' failed to connect: {connection.error}"
+                    local_errors.append(
+                        WingmanInitializationError(
+                            wingman_name=self.name,
+                            message=error_msg,
+                            error_type=WingmanInitializationErrorType.MCP_CONNECTION_FAILED,
+                        )
+                    )
+                    return (False, None, local_errors)
+
+            except Exception as e:
+                error_msg = f"MCP '{mcp_config.name}' initialization error: {str(e)}"
+                printr.print(
+                    error_msg,
+                    color=LogType.ERROR,
+                    source_name=self.name,
+                    server_only=True,
+                )
+                printr.print(
+                    traceback.format_exc(), color=LogType.ERROR, server_only=True
+                )
+                local_errors.append(
+                    WingmanInitializationError(
+                        wingman_name=self.name,
+                        message=error_msg,
+                        error_type=WingmanInitializationErrorType.MCP_CONNECTION_FAILED,
+                    )
+                )
+                return (False, None, local_errors)
+
+        # Connect to all MCPs in parallel
+        connection_tasks = [connect_mcp(mcp) for mcp in mcps_to_connect]
+        results = await asyncio.gather(*connection_tasks)
+
+        # Collect results
+        connected_count = 0
+        connected_names = []
+        for success, connection_info, mcp_errors in results:
+            if success:
+                connected_count += 1
+                connected_names.append(connection_info)
+            errors.extend(mcp_errors)
+
+        # Log consolidated MCP status for this wingman
+        if connected_count > 0:
+            await printr.print_async(
+                f"Discoverable MCP servers connected ({connected_count}): {', '.join(connected_names)}",
+                color=LogType.WINGMAN,
+                source=LogSource.WINGMAN,
+                source_name=self.name,
+                server_only=not self.settings.debug_mode,
+            )
+
+        return errors
 
     async def validate_and_set_openai(self, errors: list[WingmanInitializationError]):
         api_key = await self.retrieve_secret("openai", errors)
@@ -383,10 +744,12 @@ class OpenAiWingman(Wingman):
     async def validate_and_set_local_llm(
         self, errors: list[WingmanInitializationError]
     ):
-        self.local_llm = OpenAi(
-            api_key="not-set",
-            base_url=self.config.local_llm.endpoint,
-        )
+        api_key = await self.retrieve_secret("local_llm", errors)
+        if api_key:
+            self.local_llm = OpenAi(
+                api_key=api_key,
+                base_url=self.config.local_llm.endpoint,
+            )
 
     async def validate_and_set_elevenlabs(
         self, errors: list[WingmanInitializationError]
@@ -426,6 +789,15 @@ class OpenAiWingman(Wingman):
             )
             self.hume.validate_config(config=self.config.hume, errors=errors)
 
+    async def validate_and_set_inworld(self, errors: list[WingmanInitializationError]):
+        api_key = await self.retrieve_secret("inworld", errors)
+        if api_key:
+            self.inworld = Inworld(
+                api_key=api_key,
+                wingman_name=self.name,
+            )
+            self.inworld.validate_config(config=self.config.inworld, errors=errors)
+
     async def validate_and_set_azure(self, errors: list[WingmanInitializationError]):
         for key_type in self.AZURE_SERVICES:
             if self.uses_provider("azure"):
@@ -448,6 +820,14 @@ class OpenAiWingman(Wingman):
             self.perplexity = OpenAi(
                 api_key=api_key,
                 base_url=self.config.perplexity.endpoint,
+            )
+
+    async def validate_and_set_xai(self, errors: list[WingmanInitializationError]):
+        api_key = await self.retrieve_secret("xai", errors)
+        if api_key:
+            self.xai = XAi(
+                api_key=api_key,
+                base_url=self.config.xai.endpoint,
             )
 
     # overrides the base class method
@@ -597,6 +977,10 @@ class OpenAiWingman(Wingman):
                     )
             elif self.config.features.stt_provider == SttProvider.OPENAI:
                 transcript = self.openai.transcribe(filename=audio_input_wav)
+            elif self.config.features.stt_provider == SttProvider.GROQ:
+                transcript = self.groq.transcribe(
+                    filename=audio_input_wav, model="whisper-large-v3-turbo"
+                )
         except Exception as e:
             await printr.print_async(
                 f"Error during transcription using '{self.config.features.stt_provider}': {str(e)}",
@@ -645,14 +1029,23 @@ class OpenAiWingman(Wingman):
             return instant_response, instant_response, None, True
         benchmark.finish_snapshot()
 
+        # Track cumulative times for proper aggregation
+        llm_processing_time_ms = 0.0
+        tool_execution_time_ms = 0.0
+        tool_timings: list[tuple[str, float]] = (
+            []
+        )  # (label, time_ms) for individual tools
+
         # make a GPT call with the conversation history
         # if an instant command got executed, prevent tool calls to avoid duplicate executions
-        benchmark.start_snapshot("LLM Processing")
-
+        llm_start = time.perf_counter()
         completion = await self._llm_call(instant_command_executed is False)
+        llm_processing_time_ms += (time.perf_counter() - llm_start) * 1000
 
         if completion is None:
-            benchmark.finish_snapshot()
+            self._add_benchmark_snapshot(
+                benchmark, "LLM Processing", llm_processing_time_ms
+            )
             return None, None, None, True
 
         response_message, tool_calls = await self._process_completion(completion)
@@ -686,18 +1079,39 @@ class OpenAiWingman(Wingman):
             else:
                 is_summarize_needed = True
 
-            benchmark.finish_snapshot()
+            # Time tool execution and collect individual timings
+            tool_start = time.perf_counter()
+            instant_response, skill, iteration_timings = await self._handle_tool_calls(
+                tool_calls
+            )
+            tool_execution_time_ms += (time.perf_counter() - tool_start) * 1000
+            tool_timings.extend(iteration_timings)
 
-            benchmark.start_snapshot("AI Commands & Skills")
-            instant_response, skill = await self._handle_tool_calls(tool_calls)
             if instant_response:
-                benchmark.finish_snapshot()
+                # Add snapshots before returning
+                self._add_benchmark_snapshot(
+                    benchmark, "LLM Processing", llm_processing_time_ms
+                )
+                if tool_execution_time_ms > 0:
+                    self._add_tool_execution_snapshot(
+                        benchmark, tool_execution_time_ms, tool_timings
+                    )
                 return None, instant_response, None, interrupt
 
             if is_summarize_needed:
+                # Time the follow-up LLM call
+                llm_start = time.perf_counter()
                 completion = await self._llm_call(True)
+                llm_processing_time_ms += (time.perf_counter() - llm_start) * 1000
+
                 if completion is None:
-                    benchmark.finish_snapshot()
+                    self._add_benchmark_snapshot(
+                        benchmark, "LLM Processing", llm_processing_time_ms
+                    )
+                    if tool_execution_time_ms > 0:
+                        self._add_tool_execution_snapshot(
+                            benchmark, tool_execution_time_ms, tool_timings
+                        )
                     return None, None, None, True
 
                 response_message, tool_calls = await self._process_completion(
@@ -709,11 +1123,81 @@ class OpenAiWingman(Wingman):
                 if tool_calls:
                     interrupt = False
             elif is_waiting_response_needed:
-                benchmark.finish_snapshot()
+                self._add_benchmark_snapshot(
+                    benchmark, "LLM Processing", llm_processing_time_ms
+                )
+                if tool_execution_time_ms > 0:
+                    self._add_tool_execution_snapshot(
+                        benchmark, tool_execution_time_ms, tool_timings
+                    )
                 return None, None, None, interrupt
 
-        benchmark.finish_snapshot()
+        # Add final snapshots
+        self._add_benchmark_snapshot(
+            benchmark, "LLM Processing", llm_processing_time_ms
+        )
+        if tool_execution_time_ms > 0:
+            self._add_tool_execution_snapshot(
+                benchmark, tool_execution_time_ms, tool_timings
+            )
         return response_message.content, response_message.content, None, interrupt
+
+    def _add_benchmark_snapshot(
+        self, benchmark: Benchmark, label: str, execution_time_ms: float
+    ):
+        """Add a snapshot with the given label and execution time."""
+        if execution_time_ms >= 1000:
+            formatted_time = f"{execution_time_ms/1000:.1f}s"
+        else:
+            formatted_time = f"{int(execution_time_ms)}ms"
+
+        from api.interface import BenchmarkResult
+
+        benchmark.snapshots.append(
+            BenchmarkResult(
+                label=label,
+                execution_time_ms=execution_time_ms,
+                formatted_execution_time=formatted_time,
+            )
+        )
+
+    def _add_tool_execution_snapshot(
+        self,
+        benchmark: Benchmark,
+        total_time_ms: float,
+        tool_timings: list[tuple[str, float]],
+    ):
+        """Add a tool execution snapshot with nested individual tool timings."""
+        from api.interface import BenchmarkResult
+
+        if total_time_ms >= 1000:
+            formatted_time = f"{total_time_ms/1000:.1f}s"
+        else:
+            formatted_time = f"{int(total_time_ms)}ms"
+
+        # Create nested snapshots for individual tools
+        nested_snapshots = []
+        for label, time_ms in tool_timings:
+            if time_ms >= 1000:
+                fmt = f"{time_ms/1000:.1f}s"
+            else:
+                fmt = f"{int(time_ms)}ms"
+            nested_snapshots.append(
+                BenchmarkResult(
+                    label=label,
+                    execution_time_ms=time_ms,
+                    formatted_execution_time=fmt,
+                )
+            )
+
+        benchmark.snapshots.append(
+            BenchmarkResult(
+                label="Tool Execution",
+                execution_time_ms=total_time_ms,
+                formatted_execution_time=formatted_time,
+                snapshots=nested_snapshots if nested_snapshots else None,
+            )
+        )
 
     def _get_random_filler(self):
         # get last two used instant responses
@@ -777,9 +1261,12 @@ class OpenAiWingman(Wingman):
             message (dict | ChatCompletionMessage): The message to add.
             tool_calls (list): The tool calls associated with the message.
         """
-        # call skill hooks
+        # call skill hooks (only for prepared/activated skills)
         for skill in self.skills:
-            await skill.on_add_assistant_message(message.content, message.tool_calls)
+            if skill.is_prepared:
+                await skill.on_add_assistant_message(
+                    message.content, message.tool_calls
+                )
 
         # do not tamper with this message as it will lead to 400 errors!
         self.messages.append(message)
@@ -798,7 +1285,12 @@ class OpenAiWingman(Wingman):
                 self._add_tool_response(tool_call, "Loading..", False)
 
                 function_name = tool_call.function.name
-                if function_name in self.tool_skills:
+
+                # Meta-tools (search_skills, activate_skill, etc.) always need a follow-up
+                # LLM call so it can use the newly activated tools
+                if self.skill_registry.is_meta_tool(function_name):
+                    is_summarize_needed = True
+                elif function_name in self.tool_skills:
                     skill = self.tool_skills[function_name]
                     if await skill.is_waiting_response_needed(function_name):
                         is_waiting_response_needed = True
@@ -917,9 +1409,10 @@ class OpenAiWingman(Wingman):
         Args:
             content (str): The message content to add.
         """
-        # call skill hooks
+        # call skill hooks (only for prepared/activated skills)
         for skill in self.skills:
-            await skill.on_add_user_message(content)
+            if skill.is_prepared:
+                await skill.on_add_user_message(content)
 
         msg = {"role": "user", "content": content}
         await self._cleanup_conversation_history()
@@ -931,9 +1424,10 @@ class OpenAiWingman(Wingman):
         Args:
             content (str): The message content to add.
         """
-        # call skill hooks
+        # call skill hooks (only for prepared/activated skills)
         for skill in self.skills:
-            await skill.on_add_assistant_message(content, [])
+            if skill.is_prepared:
+                await skill.on_add_assistant_message(content, [])
 
         msg = {"role": "assistant", "content": content}
         self.messages.append(msg)
@@ -944,36 +1438,61 @@ class OpenAiWingman(Wingman):
         Args:
             commands (list[CommandConfig]): The commands to add.
         """
-        # only for openai style llms
-        if (
-            self.config.features.conversation_provider == ConversationProvider.OPENAI
-        ) or (
-            self.config.features.conversation_provider
-            == ConversationProvider.WINGMAN_PRO
-            and "gpt" in self.config.wingman_pro.conversation_deployment.lower()
-        ):
-            # generate tool calls in openai style
-            message = ChatCompletionMessage(
-                content="",
-                role="assistant",
-                tool_calls=[],
-            )
-            for command in commands:
-                tool_call = ChatCompletionMessageToolCall(
-                    id=f"call_{str(uuid.uuid4()).replace('-', '')}",
-                    function=ParsedFunction(
-                        name="execute_command",
-                        arguments=json.dumps({"command_name": command.name}),
-                    ),
-                    type="function",
-                )
-                message.tool_calls.append(tool_call)
 
-            # add tool calls to the conversation history
-            await self._add_gpt_response(message, message.tool_calls)
-            if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    await self._update_tool_response(tool_call.id, "OK")
+        if not commands:
+            return
+
+        message = ChatCompletionMessage(
+            content="",
+            role="assistant",
+            tool_calls=[],
+        )
+        for command in commands:
+            tool_id = None
+            if (
+                self.config.features.conversation_provider
+                == ConversationProvider.OPENAI
+            ) or (
+                self.config.features.conversation_provider
+                == ConversationProvider.WINGMAN_PRO
+                and "gpt" in self.config.wingman_pro.conversation_deployment.lower()
+            ):
+                tool_id = f"call_{str(uuid.uuid4()).replace('-', '')}"
+            elif (
+                self.config.features.conversation_provider
+                == ConversationProvider.GOOGLE
+            ):
+                if self.config.google.conversation_model.startswith("gemini-3"):
+                    # gemini 3 needs a thought signature like this, but we cant fake it:
+                    # {
+                    #     'model_extra': {
+                    #         'extra_content': {
+                    #             'google': {
+                    #                 'thought_signature': 'EjQKMgFyyNp8mNe4bQmQhOua7gGMH0C9RubFWewy6BzYZJs5f4RqDb8CaiR4gjLxoM1iQqP4'
+                    #             }
+                    #         }
+                    #     }
+                    # }
+                    return
+                tool_id = f"function-call-{''.join(random.choices('0123456789', k=20))}"
+
+            # early exit for unsupported providers/models
+            if not tool_id:
+                return
+
+            tool_call = ChatCompletionMessageToolCall(
+                id=tool_id,
+                function=ParsedFunction(
+                    name="execute_command",
+                    arguments=json.dumps({"command_name": command.name}),
+                ),
+                type="function",
+            )
+            message.tool_calls.append(tool_call)
+
+        await self._add_gpt_response(message, message.tool_calls)
+        for tool_call in message.tool_calls:
+            await self._update_tool_response(tool_call.id, "OK")
 
     async def _cleanup_conversation_history(self):
         """Cleans up the conversation history by removing messages that are too old."""
@@ -1024,8 +1543,15 @@ class OpenAiWingman(Wingman):
         return total_deleted_messages
 
     def reset_conversation_history(self):
-        """Resets the conversation history by removing all messages."""
+        """Resets the conversation history and skill activation state.
+
+        When the conversation is reset, the LLM loses all memory of which skills
+        were activated and why. So we must also reset the skill registry and MCP
+        registry to ensure the progressive disclosure state matches the LLM's memory.
+        """
         self.messages = []
+        self.skill_registry.reset_activations()
+        self.mcp_registry.reset_activations()
 
     async def _try_instant_activation(self, transcript: str) -> (str, bool):
         """Tries to execute an instant activation command if present in the transcript.
@@ -1058,17 +1584,120 @@ class OpenAiWingman(Wingman):
         return None, False
 
     async def get_context(self):
-        """build the context and inserts it into the messages"""
+        """Build the context and inserts it into the messages.
+
+        With progressive disclosure, only includes prompts from ACTIVATED skills.
+        Skill prompts are auto-generated from @tool descriptions if no custom prompt is set.
+        """
         skill_prompts = ""
+        active_skill_names = self.skill_registry.active_skill_names
+
         for skill in self.skills:
+            # Only include prompts from activated skills (in progressive mode)
+            if skill.name not in active_skill_names:
+                continue
+
+            # Get custom prompt if set
             prompt = await skill.get_prompt()
+
+            # Auto-generate prompt from tool descriptions if no custom prompt
+            if not prompt:
+                tools_desc = skill.get_tools_description()
+                if tools_desc:
+                    prompt = f"Available tools:\n{tools_desc}"
+
             if prompt:
                 skill_prompts += "\n\n" + skill.name + "\n\n" + prompt
 
+        # Get TTS prompt based on active TTS provider and user preference
+        tts_prompt = ""
+        if self.config.features.tts_provider == TtsProvider.ELEVENLABS:
+            if (
+                self.config.elevenlabs.use_tts_prompt
+                and self.config.elevenlabs.tts_prompt
+            ):
+                tts_prompt = self.config.elevenlabs.tts_prompt
+        elif self.config.features.tts_provider == TtsProvider.INWORLD or (
+            self.config.features.tts_provider == TtsProvider.WINGMAN_PRO
+            and self.config.wingman_pro.tts_provider == WingmanProTtsProvider.INWORLD
+        ):
+            if self.config.inworld.use_tts_prompt and self.config.inworld.tts_prompt:
+                tts_prompt = self.config.inworld.tts_prompt
+        elif self.config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE:
+            if (
+                self.config.openai_compatible_tts.use_tts_prompt
+                and self.config.openai_compatible_tts.tts_prompt
+            ):
+                tts_prompt = self.config.openai_compatible_tts.tts_prompt
+
+        # Add TTS header only if there's a prompt
+        if tts_prompt:
+            tts_prompt = "# TEXT-TO-SPEECH\n" + tts_prompt
+
+        # Build user context with environment metadata
+        user_context = self._build_user_context()
+
         context = self.config.prompts.system_prompt.format(
-            backstory=self.config.prompts.backstory, skills=skill_prompts
+            backstory=self.config.prompts.backstory,
+            skills=skill_prompts,
+            ttsprompt=tts_prompt,
+            user_context=user_context,
         )
+
         return context
+
+    def _build_user_context(self) -> str:
+        """Build user context metadata for the system prompt.
+
+        Includes timezone, config context, username, and wingman name.
+        """
+        context_parts = []
+        backstory = self.config.prompts.backstory or ""
+        backstory_lower = backstory.lower()
+
+        # Date and timezone information
+        try:
+            now = datetime.now().astimezone()
+            local_tz = now.tzinfo
+            tz_name = str(local_tz)
+            # Get UTC offset in a readable format
+            utc_offset = now.strftime("%z")
+            # Format as +HH:MM or -HH:MM
+            if len(utc_offset) >= 5:
+                utc_offset = f"{utc_offset[:3]}:{utc_offset[3:]}"
+            # Include current date for relative date references ("last Sunday", "tomorrow", etc.)
+            current_date = now.strftime(
+                "%A, %B %d, %Y"
+            )  # e.g., "Tuesday, December 09, 2025"
+            context_parts.append(f"- Current date: {current_date}")
+            context_parts.append(f"- Timezone: {tz_name} (UTC{utc_offset})")
+        except Exception:
+            context_parts.append("- Timezone: Unknown")
+
+        # Config/context name (e.g., "Star Citizen", "Elite Dangerous")
+        # This helps the LLM understand which game/context tools are relevant for
+        if self.tower and self.tower.config_dir and self.tower.config_dir.name:
+            context_parts.append(f"- Active context: {self.tower.config_dir.name}")
+
+        # Username (only if not explicitly named in backstory)
+        if self.settings.user_name:
+            # Check if username is mentioned in backstory as a standalone word
+            import re
+
+            name_pattern = r"\b" + re.escape(self.settings.user_name.lower()) + r"\b"
+            if not re.search(name_pattern, backstory_lower):
+                context_parts.append(
+                    f"- User's name (default): {self.settings.user_name}"
+                )
+
+        # Wingman name - always include as it's useful context
+        # The system prompt already tells LLM to prioritize backstory names
+        if self.name:
+            context_parts.append(f"- Your name (default): {self.name}")
+
+        if context_parts:
+            return "\n".join(context_parts)
+        return "No additional context available."
 
     async def add_context(self, messages):
         messages.insert(0, {"role": "system", "content": (await self.get_context())})
@@ -1124,7 +1753,7 @@ class OpenAiWingman(Wingman):
                 completion = self.mistral.ask(
                     messages=messages,
                     tools=tools,
-                    model=self.config.mistral.conversation_model.value,
+                    model=self.config.mistral.conversation_model,
                 )
             elif (
                 self.config.features.conversation_provider == ConversationProvider.GROQ
@@ -1195,6 +1824,12 @@ class OpenAiWingman(Wingman):
                     tools=tools,
                     model=self.config.perplexity.conversation_model.value,
                 )
+            elif self.config.features.conversation_provider == ConversationProvider.XAI:
+                completion = self.xai.ask(
+                    messages=messages,
+                    tools=tools,
+                    model=self.config.xai.conversation_model,
+                )
         except Exception as e:
             await printr.print_async(
                 f"Error during LLM call: {str(e)}", color=LogType.ERROR
@@ -1226,6 +1861,15 @@ class OpenAiWingman(Wingman):
 
         messages = self.messages.copy()
         await self.add_context(messages)
+
+        # DEBUG: Print compiled context (dev-only, remove before release)
+        # if messages and messages[0].get("role") == "system":
+        #     print("\n" + "=" * 80)
+        #     print("COMPILED CONTEXT:")
+        #     print("=" * 80)
+        #     print(messages[0].get("content", ""))
+        #     print("=" * 80 + "\n")
+
         completion = await self.actual_llm_call(messages, tools)
 
         # if request isnt most recent, ignore the response
@@ -1268,10 +1912,11 @@ class OpenAiWingman(Wingman):
             tool_calls: The list of tool calls to process.
 
         Returns:
-            str: The immediate response from processed tool calls or None if there are no immediate responses.
+            tuple: (instant_response, skill, tool_timings) where tool_timings is a list of (label, time_ms) tuples.
         """
         instant_response = None
         function_response = ""
+        tool_timings: list[tuple[str, float]] = []
 
         skill = None
 
@@ -1285,13 +1930,22 @@ class OpenAiWingman(Wingman):
                     # OpenAI returns a string
                     else json.loads(tool_call.function.arguments)
                 )
+
+                # Time the individual tool execution
+                tool_start = time.perf_counter()
                 (
                     function_response,
                     instant_response,
                     skill,
+                    tool_label,
                 ) = await self.execute_command_by_function_call(
                     function_name, function_args
                 )
+                tool_time_ms = (time.perf_counter() - tool_start) * 1000
+
+                # Add timing if we got a label (actual tool execution, not meta-tool)
+                if tool_label:
+                    tool_timings.append((tool_label, tool_time_ms))
 
                 if tool_call.id:
                     # updating the dummy tool response with the actual response
@@ -1307,11 +1961,11 @@ class OpenAiWingman(Wingman):
                 printr.print(
                     traceback.format_exc(), color=LogType.ERROR, server_only=True
                 )
-        return instant_response, skill
+        return instant_response, skill, tool_timings
 
     async def execute_command_by_function_call(
         self, function_name: str, function_args: dict[str, any]
-    ) -> tuple[str, str | None, Skill | None] | None:
+    ) -> tuple[str, str | None, Skill | None, str | None]:
         """
         Uses an OpenAI function call to execute a command. If it's an instant activation_command, one if its responses will be played.
 
@@ -1320,18 +1974,150 @@ class OpenAiWingman(Wingman):
             function_args (dict[str, any]): The arguments to pass to the function being executed.
 
         Returns:
-            A tuple containing two elements:
+            A tuple containing:
             - function_response (str): The text response or result obtained after executing the function.
             - instant_response (str): An immediate response or action to be taken, if any (e.g., play audio).
+            - used_skill (Skill): The skill that was used, if any.
+            - tool_label (str): Label for benchmark timing (e.g., "MCP: resolve-library-id"), or None for meta-tools.
         """
         function_response = ""
         instant_response = ""
         used_skill = None
+        tool_label = None
+
+        # Handle unified capability meta-tools (activate_capability, list_active_capabilities)
+        if self.capability_registry.is_meta_tool(function_name):
+            function_response, tools_changed = (
+                await self.capability_registry.execute_meta_tool(
+                    function_name, function_args
+                )
+            )
+
+            # If a skill was activated, perform lazy validation
+            if tools_changed and function_name == "activate_capability":
+                capability_name = function_args.get("capability_name", "")
+                skill = self.skill_registry.get_skill_for_activation(capability_name)
+                if skill and skill.needs_activation():
+                    success, validation_msg = await skill.ensure_activated()
+                    if not success:
+                        # Validation failed - deactivate the skill
+                        self.skill_registry.deactivate_skill(capability_name)
+                        function_response = validation_msg
+                        tools_changed = False
+                        await printr.print_async(
+                            f"Skill activation failed: {capability_name}",
+                            color=LogType.ERROR,
+                        )
+                    else:
+                        # Get display name for user-friendly message
+                        display_name = self.skill_registry.get_skill_display_name(
+                            capability_name
+                        )
+                        await printr.print_async(
+                            f"Skill activated: {display_name}",
+                            color=LogType.SKILL,
+                        )
+
+            return function_response, None, None, None  # Meta-tool, no timing label
+
+        # Handle legacy meta-tools for progressive skill discovery/activation
+        # These are kept for backward compatibility but shouldn't be called
+        if self.skill_registry.is_meta_tool(function_name):
+            function_response, tools_changed = (
+                await self.skill_registry.execute_meta_tool(
+                    function_name, function_args
+                )
+            )
+
+            # If skill was activated, perform lazy validation
+            if tools_changed and function_name == "activate_skill":
+                skill_name = function_args.get("skill_name", "")
+                skill = self.skill_registry.get_skill_for_activation(skill_name)
+                if skill and skill.needs_activation():
+                    success, validation_msg = await skill.ensure_activated()
+                    if not success:
+                        # Validation failed - deactivate the skill
+                        self.skill_registry.deactivate_skill(skill_name)
+                        function_response = validation_msg
+                        tools_changed = False
+                        await printr.print_async(
+                            f"Skill activation failed: {skill_name}",
+                            color=LogType.ERROR,
+                        )
+                    else:
+                        # Get display name for user-friendly message
+                        display_name = self.skill_registry.get_skill_display_name(
+                            skill_name
+                        )
+                        await printr.print_async(
+                            f"Skill activated: {display_name}",
+                            color=LogType.SKILL,
+                        )
+
+            return function_response, None, None, None  # Meta-tool, no timing label
+
+        # Handle MCP meta-tools for server discovery/activation
+        if self.mcp_registry.is_meta_tool(function_name):
+            function_response, tools_changed = (
+                await self.mcp_registry.execute_meta_tool(function_name, function_args)
+            )
+            return function_response, None, None, None  # Meta-tool, no timing label
+
+        # Handle MCP server tools (prefixed with mcp_)
+        if self.mcp_registry.is_mcp_tool(function_name):
+            connection = self.mcp_registry.get_connection_for_tool(function_name)
+            if connection:
+                display_name = connection.config.display_name
+                original_name = self.mcp_registry.get_original_tool_name(function_name)
+                tool_label = f"🌐 {display_name}: {original_name}"
+
+                benchmark = Benchmark(
+                    f"MCP '{connection.config.name}' - {original_name}"
+                )
+
+                # Always show simple 'called' message in UI so users know the wingman is working
+                await printr.print_async(
+                    f"{display_name}: called `{original_name}` with {function_args}",
+                    color=LogType.MCP,
+                )
+
+                # Detailed 'calling' log only in terminal/log file
+                await printr.print_async(
+                    f"{display_name}: calling `{original_name}` with {function_args}...",
+                    color=LogType.MCP,
+                    server_only=True,
+                )
+
+                try:
+                    function_response = await self.mcp_registry.call_tool(
+                        function_name, function_args
+                    )
+                except Exception as e:
+                    await printr.print_async(
+                        f"{display_name}: `{original_name}` failed - {str(e)}",
+                        color=LogType.ERROR,
+                    )
+                    printr.print(
+                        traceback.format_exc(), color=LogType.ERROR, server_only=True
+                    )
+                    function_response = "ERROR DURING MCP TOOL EXECUTION"
+                finally:
+                    # Detailed 'completed' with timing only in terminal/log file (or UI if debug)
+                    await printr.print_async(
+                        f"{display_name}: `{original_name}` completed",
+                        color=LogType.MCP,
+                        benchmark_result=benchmark.finish(),
+                        server_only=not self.settings.debug_mode,
+                    )
+
+                return function_response, None, None, tool_label
+
         if function_name == "execute_command":
             # get the command based on the argument passed by the LLM
             command = self.get_command(function_args["command_name"])
             # execute the command
             function_response = await self._execute_command(command)
+            tool_label = f"Command: {function_args.get('command_name', function_name)}"
             # if the command has responses, we have to play one of them
             if command and command.responses:
                 instant_response = self._select_command_response(command)
@@ -1340,12 +2126,24 @@ class OpenAiWingman(Wingman):
         # Go through the skills and check if the function name matches any of the tools
         if function_name in self.tool_skills:
             skill = self.tool_skills[function_name]
+            display_name = self.skill_registry.get_skill_display_name(skill.name)
+            tool_label = f"⚡ {display_name}: {function_name}"
 
-            benchmark = Benchmark(f"Processing Skill '{skill.name}'")
+            benchmark = Benchmark(f"Skill '{skill.name}' - {function_name}")
+
+            # Always show simple 'called' message in UI so users know the wingman is working
             await printr.print_async(
-                f"Processing Skill '{skill.name}'",
-                color=LogType.INFO,
+                f"{display_name}: called `{function_name}` with {function_args}",
+                color=LogType.SKILL,
                 skill_name=skill.name,
+            )
+
+            # Detailed 'calling' log only in terminal/log file
+            await printr.print_async(
+                f"{display_name}: calling `{function_name}` with {function_args}...",
+                color=LogType.SKILL,
+                skill_name=skill.name,
+                server_only=True,
             )
 
             try:
@@ -1359,7 +2157,7 @@ class OpenAiWingman(Wingman):
                     await self.play_to_user(instant_response)
             except Exception as e:
                 await printr.print_async(
-                    f"Error while processing Skill '{skill.name}': {str(e)}",
+                    f"{display_name}: `{function_name}` failed - {str(e)}",
                     color=LogType.ERROR,
                 )
                 printr.print(
@@ -1371,13 +2169,14 @@ class OpenAiWingman(Wingman):
                 instant_response = None
             finally:
                 await printr.print_async(
-                    f"Finished processing Skill '{skill.name}'",
-                    color=LogType.INFO,
+                    f"{display_name}: `{function_name}` completed",
+                    color=LogType.SKILL,
                     benchmark_result=benchmark.finish(),
                     skill_name=skill.name,
+                    server_only=not self.settings.debug_mode,
                 )
 
-        return function_response, instant_response, used_skill
+        return function_response, instant_response, used_skill, tool_label
 
     async def play_to_user(
         self,
@@ -1406,16 +2205,17 @@ class OpenAiWingman(Wingman):
             while self.audio_player.is_playing:
                 await asyncio.sleep(0.1)
 
-        # call skill hooks
+        # call skill hooks (only for prepared/activated skills)
         changed_text = text
         for skill in self.skills:
-            changed_text = await skill.on_play_to_user(text, sound_config)
-            if changed_text != text:
-                printr.print(
-                    f"Skill '{skill.config.display_name}' modified the text to: '{changed_text}'",
-                    LogType.INFO,
-                )
-                text = changed_text
+            if skill.is_prepared:
+                changed_text = await skill.on_play_to_user(text, sound_config)
+                if changed_text != text:
+                    printr.print(
+                        f"Skill '{skill.config.display_name}' modified the text to: '{changed_text}'",
+                        LogType.INFO,
+                    )
+                    text = changed_text
 
         if sound_config.volume == 0.0:
             printr.print(
@@ -1471,6 +2271,14 @@ class OpenAiWingman(Wingman):
                             audio_player=self.audio_player,
                             wingman_name=self.name,
                         )
+            elif self.config.features.tts_provider == TtsProvider.INWORLD:
+                await self.inworld.play_audio(
+                    text=text,
+                    config=self.config.inworld,
+                    sound_config=sound_config,
+                    audio_player=self.audio_player,
+                    wingman_name=self.name,
+                )
             elif self.config.features.tts_provider == TtsProvider.AZURE:
                 await self.openai_azure.play_audio(
                     text=text,
@@ -1497,6 +2305,7 @@ class OpenAiWingman(Wingman):
                     sound_config=sound_config,
                     audio_player=self.audio_player,
                     wingman_name=self.name,
+                    stream=self.config.openai.output_streaming,
                 )
             elif self.config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE:
                 await self.openai_compatible_tts.play_audio(
@@ -1505,12 +2314,13 @@ class OpenAiWingman(Wingman):
                     model=self.config.openai_compatible_tts.model,
                     speed=(
                         self.config.openai_compatible_tts.speed
-                        if self.config.openai_compatible_tts.speed != 1.0
+                        if self.config.openai_compatible_tts.speed  #!= 1.0
                         else NOT_GIVEN
                     ),
                     sound_config=sound_config,
                     audio_player=self.audio_player,
                     wingman_name=self.name,
+                    stream=self.config.openai_compatible_tts.output_streaming,
                 )
             elif self.config.features.tts_provider == TtsProvider.WINGMAN_PRO:
                 if self.config.wingman_pro.tts_provider == WingmanProTtsProvider.OPENAI:
@@ -1529,6 +2339,17 @@ class OpenAiWingman(Wingman):
                     await self.wingman_pro.generate_azure_speech(
                         text=text,
                         config=self.config.azure.tts,
+                        sound_config=sound_config,
+                        audio_player=self.audio_player,
+                        wingman_name=self.name,
+                    )
+                elif (
+                    self.config.wingman_pro.tts_provider
+                    == WingmanProTtsProvider.INWORLD
+                ):
+                    await self.wingman_pro.generate_inworld_speech(
+                        text=text,
+                        config=self.config.inworld,
                         sound_config=sound_config,
                         audio_player=self.audio_player,
                         wingman_name=self.name,
@@ -1552,39 +2373,78 @@ class OpenAiWingman(Wingman):
 
     def build_tools(self) -> list[dict]:
         """
-        Builds a tool for each command that is not instant_activation.
+        Builds tools for the LLM call.
+
+        In progressive mode: Returns meta-tools (search_skills, activate_skill) plus
+        tools from activated skills only.
+
+        In legacy mode: Returns all skill tools.
 
         Returns:
             list[dict]: A list of tool descriptors in OpenAI format.
         """
+
+        def _command_has_effective_actions(command: CommandConfig) -> bool:
+            if command.is_system_command:
+                return True
+
+            if not command.actions:
+                return False
+
+            for action in command.actions:
+                if not action:
+                    continue
+                if (
+                    action.keyboard is not None
+                    or action.mouse is not None
+                    or action.joystick is not None
+                    or action.audio is not None
+                    or action.write is not None
+                    or action.wait is not None
+                ):
+                    return True
+
+            return False
+
         commands = [
             command.name
             for command in self.config.commands
-            if not command.force_instant_activation
+            if (not command.force_instant_activation)
+            and _command_has_effective_actions(command)
         ]
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "execute_command",
-                    "description": "Executes a command",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "command_name": {
-                                "type": "string",
-                                "description": "The name of the command to execute",
-                                "enum": commands,
+        tools: list[dict] = []
+        if commands:
+            tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "execute_command",
+                        "description": "Executes a command",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "command_name": {
+                                    "type": "string",
+                                    "description": "The name of the command to execute",
+                                    "enum": commands,
+                                },
                             },
+                            "required": ["command_name"],
                         },
-                        "required": ["command_name"],
                     },
-                },
-            },
-        ]
+                }
+            )
 
-        # extend with skill tools
-        for tool in self.skill_tools:
+        # Unified capability discovery: single activate_capability meta-tool
+        # Combines skills and MCP servers - LLM doesn't need to know the difference
+        for _, tool in self.capability_registry.get_meta_tools():
+            tools.append(tool)
+
+        # Add tools from activated capabilities (both skills and MCPs)
+        for _, tool in self.skill_registry.get_active_tools():
+            tools.append(tool)
+
+        for _, tool in self.mcp_registry.get_active_tools():
             tools.append(tool)
 
         return tools

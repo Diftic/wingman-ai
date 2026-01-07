@@ -5,8 +5,9 @@ from api.enums import (
     AzureApiVersion,
     AzureRegion,
     ConversationProvider,
+    CoreState,
     ImageGenerationProvider,
-    MistralModel,
+    McpTransportType,
     CustomPropertyType,
     TtsVoiceGender,
     SoundEffect,
@@ -57,6 +58,8 @@ class SystemCore(TypedDict):
     version: str
     latest_version: str
     is_latest: bool
+    cuda_available: bool
+    gpu_name: Optional[str]
 
 
 class SystemInfo(BaseModel):
@@ -71,11 +74,19 @@ class WingmanInitializationError(BaseModel):
     secret_name: Optional[str] = None
 
 
+class CoreStatusResponse(BaseModel):
+    """Response model for /ping endpoint providing detailed Core status."""
+
+    state: CoreState
+    """The current lifecycle state of Wingman AI Core."""
+
+
 class VoiceInfo(BaseModel):
     id: Optional[str] = None
     name: Optional[str] = None
     gender: Optional[TtsVoiceGender] = None
     locale: Optional[str] = None
+    languages: Optional[list[str]] = None
     provider: Optional[str] = None
 
 
@@ -268,6 +279,8 @@ class ElevenlabsConfig(BaseModel):
     voice: ElevenlabsVoiceConfig
     voice_settings: ElevenlabsVoiceSettingsConfig
     output_streaming: bool
+    use_tts_prompt: bool
+    tts_prompt: str
 
 
 class HumeVoiceConfig(BaseModel):
@@ -279,6 +292,33 @@ class HumeVoiceConfig(BaseModel):
 class HumeConfig(BaseModel):
     description: Optional[str] = None
     voice: HumeVoiceConfig
+
+
+class InworldAudioConfig(BaseModel):
+    audio_encoding: str
+    """The audio encoding to use. Supported values: LINEAR16, MP3, OGG_OPUS, ALAW, MULAW"""
+    bitrate: float
+    """The bitrate to use for the audio encoding in bps. Default is 128k"""
+    sample_rate_hertz: float
+    """The synthesis sample rate (in hertz) for this audio. Accepts values within the range [8000, 48000]. Default is 48k"""
+    streaming_sample_rate_hertz: int
+    """The sample rate (in hertz) to use for streaming audio (LINEAR16 format). Accepts values within the range [8000, 48000]. Default is 24000 for good balance of quality and performance."""
+    speaking_rate: float
+    """Speaking rate/speed, in the range [0.5, 1.5]. 1.0 is the normal native speed supported by the specific voice. The default is 1.0."""
+
+
+class InworldConfig(BaseModel):
+    tts_endpoint: str
+    model_id: str
+    """inworld-tts-1, inworld-tts-1-max"""
+    voice_id: str
+    """The ID of the voice to use for synthesizing speech."""
+    audio_config: InworldAudioConfig
+    temperature: float
+    """Determines the degree of randomness when sampling audio tokens to generate the response. Accepts values between 0 and 2. Defaults to 0.8"""
+    output_streaming: bool
+    use_tts_prompt: bool
+    tts_prompt: str
 
 
 class EdgeTtsConfig(BaseModel):
@@ -297,6 +337,10 @@ class OpenAiCompatibleTtsConfig(BaseModel):
     base_url: Optional[str] = None
     model: Optional[str] = None
     speed: float
+    output_streaming: bool
+    use_tts_prompt: bool
+    tts_prompt: str
+    voices_endpoint: Optional[str] = None
 
 
 class XVASynthVoiceConfig(BaseModel):
@@ -344,6 +388,8 @@ class OpenAiConfig(BaseModel):
     organization: Optional[str] = None
     """If you have an organization key, you can set it here."""
 
+    output_streaming: bool
+
 
 class PromptConfig(BaseModel):
     system_prompt: str
@@ -354,12 +400,17 @@ class PromptConfig(BaseModel):
 
 
 class MistralConfig(BaseModel):
-    conversation_model: MistralModel
+    conversation_model: str
     endpoint: str
 
 
 class PerplexityConfig(BaseModel):
     conversation_model: PerplexityModel
+    endpoint: str
+
+
+class XaiConfig(BaseModel):
+    conversation_model: str
     endpoint: str
 
 
@@ -677,12 +728,189 @@ class SkillConfig(CustomClassConfig):
     """You can add custom properties here to use in your custom skill class."""
     hint: Optional[LocalizedMetadata] = None
     examples: Optional[list[LocalizedMetadata]] = None
+    platforms: Optional[list[str]] = None
+    """List of supported platforms: 'windows', 'darwin' (macOS), 'linux'. If None, skill works on all platforms."""
+    auto_activate: Optional[bool] = False
+    """If True, this skill's tools are always available without LLM activation.
+    Use for event-driven skills or skills that should always be active when enabled.
+    Auto-activated skills are hidden from activate_skill and don't need LLM activation."""
+    discoverable_by_default: Optional[bool] = True
+    """Whether this skill is discoverable by default when creating new wingmen.
+    Set to False for specialized skills that most users won't need immediately.
+    Users can still make skills discoverable per wingman."""
+    discovery_keywords: Optional[list[str]] = None
+    """Optional keywords to help LLMs discover this skill during activation.
+
+    Guidelines:
+    1. Use ONLY if description + tags aren't enough for discovery
+    2. Focus on terms users might say (not developer jargon)
+    3. Include alternate names, specific examples, common queries
+    4. Keep it concise - 5-10 keywords is usually enough
+    5. Always in English only
+
+    Examples:
+    - ['trading', 'routes', 'cargo', 'commodities', 'ships']
+    - ['screenshots', 'OCR', 'image analysis', 'text recognition']
+    - ['flight simulator', 'altitude', 'speed', 'autopilot', 'navigation']
+    """
+
+
+class SkillToolInfo(BaseModel):
+    """Basic info about a tool in a skill."""
+
+    name: str
+    """The tool's function name."""
+
+    description: str
+    """Brief description of what the tool does."""
 
 
 class SkillBase(BaseModel):
     name: str
     config: SkillConfig
     logo: Optional[Annotated[str, Base64Str]] = None
+    tools: Optional[list[SkillToolInfo]] = None
+    """List of tools provided by this skill."""
+
+
+class WingmanSkillState(BaseModel):
+    """Skill info with enabled/disabled state for a specific wingman."""
+
+    skill: SkillBase
+    """The skill configuration and metadata."""
+
+    is_enabled: bool
+    """Whether the skill is enabled for this wingman (in discoverable_skills list)."""
+
+
+# ─────────────────────────────── MCP Configuration ─────────────────────────────── #
+
+
+class McpServerConfig(BaseModel):
+    """Configuration for an MCP (Model Context Protocol) server connection."""
+
+    name: str
+    """Unique identifier for this MCP server (e.g., 'context7', 'docker'). Used as key for secrets."""
+
+    display_name: str
+    """Human-readable name shown in the UI."""
+
+    description: Optional[str] = None
+    """Brief description of what this MCP server provides."""
+
+    type: McpTransportType
+    """Transport type: 'http' for hosted servers, 'stdio' for local processes, 'sse' for Server-Sent Events."""
+
+    # HTTP/SSE transport settings
+    url: Optional[str] = None
+    """URL for HTTP or SSE transports (e.g., 'https://mcp.context7.com/mcp')."""
+
+    headers: Optional[dict[str, str]] = None
+    """Optional headers for HTTP requests. API keys should use SecretKeeper with 'mcp_<name>' prefix."""
+
+    # STDIO transport settings
+    command: Optional[str] = None
+    """Command to run for stdio transport (e.g., 'docker', 'python', 'npx')."""
+
+    args: Optional[list[str]] = None
+    """Arguments for the command (e.g., ['mcp', 'gateway', 'run'])."""
+
+    env: Optional[dict[str, str]] = None
+    """Environment variables to set for the process."""
+
+    timeout: Optional[int] = None
+    """Connection timeout in seconds. Defaults to 30s for HTTP/SSE, 60s for stdio."""
+
+    # Common settings
+    discoverable_by_default: bool = True
+    """Whether this MCP server is discoverable by default for new wingmen.
+    Set to False for specialized MCP servers that most users won't need immediately.
+    Users can still make MCP servers discoverable per wingman."""
+
+    # Optional metadata
+    version: Optional[str] = None
+    """Version of the MCP server, if known."""
+
+    discovery_keywords: Optional[list[str]] = None
+    """Optional keywords to help LLMs discover this MCP server during activation.
+
+    Guidelines:
+    1. Use ONLY if description isn't enough for discovery
+    2. Focus on terms users might say (not technical jargon)
+    3. Include alternate names, specific use cases, common queries
+    4. Keep it concise - 5-10 keywords is usually enough
+    5. Always in English only
+
+    Examples:
+    - ['web search', 'internet', 'Google', 'research', 'find information']
+    - ['documentation', 'API docs', 'library reference', 'code examples']
+    - ['Docker containers', 'images', 'compose', 'Kubernetes', 'registry']
+    """
+
+
+class McpToolInfo(BaseModel):
+    """Information about a tool provided by an MCP server."""
+
+    name: str
+    """The tool's function name as provided by the MCP server."""
+
+    prefixed_name: str
+    """The prefixed tool name used internally (e.g., 'mcp_context7_resolve_library')."""
+
+    description: str
+    """Description of what the tool does."""
+
+    server_name: str
+    """Name of the MCP server that provides this tool."""
+
+    input_schema: Optional[dict] = None
+    """JSON Schema for the tool's input parameters."""
+
+
+class McpServerState(BaseModel):
+    """MCP server info with connection state for a specific wingman."""
+
+    config: McpServerConfig
+    """The MCP server configuration."""
+
+    is_enabled: bool
+    """Whether the MCP server is enabled for this wingman (in discoverable_mcps list)."""
+
+    is_connected: bool
+    """Whether the server is currently connected."""
+
+    tools: Optional[list[McpToolInfo]] = None
+    """List of tools provided by this server when connected."""
+
+    error: Optional[str] = None
+    """Error message if connection failed."""
+
+
+class McpConnectResult(BaseModel):
+    """Result of attempting to connect to an MCP server."""
+
+    success: bool
+    """Whether the connection was successful."""
+
+    server_name: str
+    """The MCP server name that was connected."""
+
+    tools: Optional[list[McpToolInfo]] = None
+    """List of tools provided by this server if connection succeeded."""
+
+    error: Optional[str] = None
+    """Error message if connection failed."""
+
+
+class McpConfig(BaseModel):
+    """Central MCP configuration loaded from mcp.yaml.
+
+    This defines all available MCP servers that any Wingman can use.
+    Individual Wingmen control which servers are discoverable using their discoverable_mcps list.
+    """
+
+    servers: list[McpServerConfig] = []
+    """List of all available MCP server configurations."""
 
 
 class NestedConfig(BaseModel):
@@ -700,47 +928,29 @@ class NestedConfig(BaseModel):
     openai_compatible_tts: OpenAiCompatibleTtsConfig
     elevenlabs: ElevenlabsConfig
     hume: HumeConfig
+    inworld: InworldConfig
     azure: AzureConfig
     xvasynth: XVASynthTtsConfig
     whispercpp: WhispercppSttConfig
     fasterwhisper: FasterWhisperSttConfig
     wingman_pro: WingmanProConfig
     perplexity: PerplexityConfig
+    xai: XaiConfig
     commands: Optional[list[CommandConfig]] = None
     skills: Optional[list[SkillConfig]] = None
+    """User's skill configuration overrides. Skills not listed here use defaults."""
 
+    discoverable_skills: list[str] = []
+    """List of skill names that are discoverable to the LLM for this wingman.
+    This is a whitelist - only skills in this list are available at runtime.
+    Empty list means no skills are discoverable.
+    Example: ["ConversationStarter", "AutoScreenshot"] to make only these skills available."""
 
-class BasicWingmanConfig(BaseModel):
-    """All configuration options that can be save in the "Basic" config in the client"""
-
-    name: str
-    disabled: Optional[bool] = False
-    record_key: Optional[str] = None
-    record_key_codes: Optional[list[int]] = None
-    record_mouse_button: Optional[str] = None
-    record_joystick_button: Optional[CommandJoystickConfig] = None
-    sound: SoundConfig
-    voice: str
-    prompts: PromptConfig
-
-    features: FeaturesConfig
-    openai: OpenAiConfig
-    mistral: MistralConfig
-    groq: GroqConfig
-    cerebras: CerebrasConfig
-    google: GoogleConfig
-    openrouter: OpenRouterConfig
-    local_llm: LocalLlmConfig
-    edge_tts: EdgeTtsConfig
-    elevenlabs: ElevenlabsConfig
-    hume: HumeConfig
-    azure: AzureConfig
-    xvasynth: XVASynthTtsConfig
-    whispercpp: WhispercppSttConfig
-    fasterwhisper: FasterWhisperSttConfig
-    wingman_pro: WingmanProConfig
-    perplexity: PerplexityConfig
-    openai_compatible_tts: OpenAiCompatibleTtsConfig
+    discoverable_mcps: list[str] = []
+    """List of MCP server names that are discoverable to the LLM for this wingman.
+    This is a whitelist - only MCP servers in this list are available at runtime.
+    Empty list means no MCP servers are discoverable.
+    Example: ["wingman_date_time", "wingman_starhead"] to make only these MCPs available."""
 
 
 class WingmanConfig(NestedConfig):
@@ -755,11 +965,12 @@ class WingmanConfig(NestedConfig):
 
     disabled: Optional[bool] = False
     """Set this to true if you want to disable this wingman. You can also just remove it from the config."""
+
     custom_class: Optional[CustomClassConfig] = None
     """If you want to use a custom Wingman (Python) class, you can specify it here."""
     name: str
     """The "friendly" name of this Wingman. Can be changed by the user."""
-    description: str
+    description: Optional[str] = None
     """A short description of this Wingman."""
     record_key: Optional[str] = None
     """The "push-to-talk" key for this wingman. Keep it pressed while talking! Don't use the same key for multiple wingmen!"""
@@ -797,6 +1008,22 @@ class NewWingmanTemplate(BaseModel):
     avatar: Annotated[str, Base64Str]
 
 
+class DuplicateWingmanRequest(BaseModel):
+    """Request payload for duplicating a Wingman into a target config/context."""
+
+    source_config_dir: ConfigDirInfo
+    source_wingman_file: WingmanConfigFileInfo
+    target_config_dir: ConfigDirInfo
+    new_name: str
+
+
+class DuplicateWingmanResult(BaseModel):
+    """Result of a Wingman duplication request."""
+
+    config_dir: ConfigDirInfo
+    wingman_file: WingmanConfigFileInfo
+
+
 class SettingsConfig(BaseModel):
     audio: Optional[AudioSettings] = None
     voice_activation: VoiceActivationSettings
@@ -806,6 +1033,8 @@ class SettingsConfig(BaseModel):
     streamer_mode: bool
     cancel_tts_key: Optional[str] = None
     cancel_tts_key_codes: Optional[list[int]] = None
+    cancel_tts_joystick_button: Optional[CommandJoystickConfig] = None
+    user_name: Optional[str] = None
 
 
 class BenchmarkResult(BaseModel):

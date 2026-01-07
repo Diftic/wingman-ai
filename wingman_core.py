@@ -13,12 +13,14 @@ from showinfm import show_in_file_manager
 import azure.cognitiveservices.speech as speechsdk
 import keyboard.keyboard as keyboard
 import mouse.mouse as mouse
-from api.commands import VoiceActivationMutedCommand
+from api.commands import CoreStateChangedCommand, VoiceActivationMutedCommand
 from api.enums import (
     AzureRegion,
     CommandTag,
+    CoreState,
     LogType,
     VoiceActivationSttProvider,
+    WingmanInitializationErrorType,
 )
 from api.interface import (
     AudioDevice,
@@ -27,6 +29,7 @@ from api.interface import (
     CommandJoystickConfig,
     Config,
     ConfigWithDirInfo,
+    CoreStatusResponse,
     ElevenlabsModel,
     OpenRouterEndpointResult,
     VoiceActivationSettings,
@@ -41,7 +44,7 @@ from providers.wingman_pro import WingmanPro
 from providers.xvasynth import XVASynth
 from wingmen.open_ai_wingman import OpenAiWingman
 from wingmen.wingman import Wingman
-from services.file import get_writable_dir
+from services.file import get_writable_dir, get_audio_library_dir
 from services.voice_service import VoiceService
 from services.settings_service import SettingsService
 from services.config_service import ConfigService
@@ -51,18 +54,24 @@ from services.audio_recorder import RECORDING_PATH, AudioRecorder
 from services.config_manager import ConfigManager
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
+from services.system_manager import SystemManager
 from services.tower import Tower
 from services.websocket_user import WebSocketUser
 
 
 class WingmanCore(WebSocketUser):
     def __init__(
-        self, config_manager: ConfigManager, app_root_path: str, app_is_bundled: bool
+        self,
+        config_manager: ConfigManager,
+        app_root_path: str,
+        app_is_bundled: bool,
+        system_manager: SystemManager,
     ):
         self.printr = Printr()
         self.app_root_path = app_root_path
+        self.system_manager = system_manager
         self.is_client_logged_in: bool = False
-        self.is_client_pro: bool = False
+        self.client_plan: str = "Free"
         self.client_account_name: str = ""
 
         self.router = APIRouter()
@@ -224,6 +233,20 @@ class WingmanCore(WebSocketUser):
         )
         self.router.add_api_route(
             methods=["GET"],
+            path="/models/xai",
+            response_model=list,
+            endpoint=self.get_xai_models,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/models/mistral",
+            response_model=list,
+            endpoint=self.get_mistral_models,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
             path="/models/openai",
             response_model=list,
             endpoint=self.get_openai_models,
@@ -312,6 +335,8 @@ class WingmanCore(WebSocketUser):
         self.active_recording = {"key": "", "wingman": None}
 
         self.is_started = False
+        self.core_state: CoreState = CoreState.STARTING
+        self._last_logged_state: Optional[CoreState] = None
         self.startup_errors: list[WingmanInitializationError] = []
         self.tower_errors: list[WingmanInitializationError] = []
 
@@ -372,35 +397,83 @@ class WingmanCore(WebSocketUser):
         if self.settings_service.settings.voice_activation.enabled:
             await self.set_voice_activation(is_enabled=True)
 
+    async def set_core_state(self, state: CoreState) -> None:
+        """Update the core state and broadcast to all connected clients.
+
+        Args:
+            state: The new CoreState
+        """
+        self.core_state = state
+
+        # Update is_started for backwards compatibility
+        self.is_started = state == CoreState.READY
+
+        # Broadcast state change to connected clients
+        if self._connection_manager:
+            command = CoreStateChangedCommand(state=state)
+            await self._connection_manager.broadcast(command)
+
+        # Only log actual state changes, not progress updates within the same state
+        if state != self._last_logged_state:
+            self._last_logged_state = state
+            self.printr.print(
+                f"Core state changed: {state.value}",
+                color=LogType.STARTUP,
+                server_only=True,
+            )
+
+    def get_status(self) -> CoreStatusResponse:
+        """Get the current core status for the /ping endpoint."""
+        return CoreStatusResponse(
+            state=self.core_state,
+        )
+
     def is_mouse_configured(self, config: Config) -> bool:
         return any(
             config.wingmen[wingman].record_mouse_button for wingman in config.wingmen
         )
 
     def is_joystick_configured(self, config: Config) -> bool:
-        return any(
+        is_any_wingman_joystick_configured = any(
             config.wingmen[wingman].record_joystick_button for wingman in config.wingmen
         )
 
+        cancel_tts_joystick_button = getattr(
+            self.settings_service.settings,
+            "cancel_tts_joystick_button",
+            None,
+        )
+
+        is_cancel_tts_joystick_configured = (
+            cancel_tts_joystick_button is not None
+            and cancel_tts_joystick_button.guid is not None
+        )
+
+        return is_any_wingman_joystick_configured or is_cancel_tts_joystick_configured
+
     async def start_joysticks(self, config: Config):
         pygame.init()
-
         # Get all joystick configs
-        joystick_configs = [
+        joystick_configs: list[CommandJoystickConfig] = [
             config.wingmen[wingman].record_joystick_button
             for wingman in config.wingmen
             if config.wingmen[wingman].record_joystick_button
         ]
+
+        cancel_tts_joystick_button = getattr(
+            self.settings_service.settings, "cancel_tts_joystick_button", None
+        )
+        if cancel_tts_joystick_button is not None and cancel_tts_joystick_button.guid:
+            joystick_configs.append(cancel_tts_joystick_button)
 
         joysticks = [
             pygame.joystick.Joystick(x) for x in range(pygame.joystick.get_count())
         ]
         for joystick in joysticks:
             if any(
-                [
-                    joystick.get_guid() == joystick_config.guid
-                    for joystick_config in joystick_configs
-                ]
+                joystick.get_guid() == joystick_config.guid
+                for joystick_config in joystick_configs
+                if joystick_config is not None and joystick_config.guid is not None
             ):
                 joystick.init()
 
@@ -456,6 +529,9 @@ class WingmanCore(WebSocketUser):
             )
             return
 
+        # Broadcast state change - wingmen are being initialized
+        await self.set_core_state(CoreState.INITIALIZING_WINGMEN)
+
         await self.unload_tower()
 
         config = config_dir_info.config
@@ -479,10 +555,16 @@ class WingmanCore(WebSocketUser):
         self.tower_errors = await self.tower.instantiate_wingmen(
             self.config_manager.settings_config
         )
+        # Only show toast errors for non-MCP errors (MCP errors are already logged in mcp_client.py)
         for error in self.tower_errors:
-            self.printr.toast_error(error.message)
+            if error.error_type != WingmanInitializationErrorType.MCP_CONNECTION_FAILED:
+                self.printr.toast_error(error.message)
 
         self.config_service.set_tower(self.tower)
+
+        # Broadcast state change - ready again after tower init
+        await self.set_core_state(CoreState.READY)
+
         self.printr.print(
             "Tower initializated.",
             color=LogType.POSITIVE,
@@ -533,6 +615,19 @@ class WingmanCore(WebSocketUser):
             or self.settings_service.settings.cancel_tts_key
         )
         if is_cancel_tts_hotkey_pressed:
+            self.ensure_async(self.stop_playback())
+
+        cancel_tts_joystick_button = getattr(
+            self.settings_service.settings, "cancel_tts_joystick_button", None
+        )
+        if (
+            joystick_config
+            and cancel_tts_joystick_button is not None
+            and cancel_tts_joystick_button.guid is not None
+            and cancel_tts_joystick_button.button is not None
+            and joystick_config.guid == cancel_tts_joystick_button.guid
+            and joystick_config.button == cancel_tts_joystick_button.button
+        ):
             self.ensure_async(self.stop_playback())
 
         if self.tower and self.active_recording["key"] == "":
@@ -691,12 +786,22 @@ class WingmanCore(WebSocketUser):
                     self.printr.print(
                         f"Cleaned original transcription: {transcription.text}",
                         server_only=True,
-                        color=LogType.SUBTLE,
+                        color=LogType.SYSTEM,
                     )
         elif provider == VoiceActivationSttProvider.OPENAI:
             # TODO: can't await secret_keeper.retrieve here, so just assume the secret is there...
             openai = OpenAi(api_key=self.secret_keeper.secrets["openai"])
             transcription = openai.transcribe(filename=recording_file)
+            text = transcription.text
+        elif provider == VoiceActivationSttProvider.GROQ:
+            # TODO: can't await secret_keeper.retrieve here, so just assume the secret is there...
+            groq = OpenAi(
+                api_key=self.secret_keeper.secrets["groq"],
+                base_url="https://api.groq.com/openai/v1/",
+            )
+            transcription = groq.transcribe(
+                filename=recording_file, model="whisper-large-v3-turbo"
+            )
             text = transcription.text
         elif provider == VoiceActivationSttProvider.FASTER_WHISPER:
             combined_hotwords: list[str] = []
@@ -1020,8 +1125,9 @@ class WingmanCore(WebSocketUser):
         devices = [
             "auto",
             "cpu",
-            "cuda",
         ]
+        if self.system_manager.is_cuda_available():
+            devices.append("cuda")
         return devices
 
     # POST /xvasynth/start
@@ -1082,7 +1188,7 @@ class WingmanCore(WebSocketUser):
 
     # POST /open-filemanager/audio-library
     def open_audio_library_directory(self):
-        show_in_file_manager(get_writable_dir("audio_library"))
+        show_in_file_manager(get_audio_library_dir())
 
     # GET /models/openrouter
     async def get_openrouter_models(self):
@@ -1128,6 +1234,36 @@ class WingmanCore(WebSocketUser):
             timeout=10,
             headers={
                 "Authorization": f"Bearer {cerebras_api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        content = response.json()
+        return content.get("data", [])
+
+    async def get_xai_models(self):
+        xia_api_key = await self.secret_keeper.retrieve(key="xai", requester="XAI")
+        response = requests.get(
+            url="https://api.x.ai/v1/models",
+            timeout=10,
+            headers={
+                "Authorization": f"Bearer {xia_api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        response.raise_for_status()
+        content = response.json()
+        return content.get("data", [])
+
+    async def get_mistral_models(self):
+        mistral_api_key = await self.secret_keeper.retrieve(
+            key="mistral", requester="Mistral"
+        )
+        response = requests.get(
+            url="https://api.mistral.ai/v1/models",
+            timeout=10,
+            headers={
+                "Authorization": f"Bearer {mistral_api_key}",
                 "Content-Type": "application/json",
             },
         )
@@ -1257,7 +1393,8 @@ class WingmanCore(WebSocketUser):
             if not name.endswith(".mp3"):
                 name += ".mp3"
 
-            directory = get_writable_dir(os.path.join("audio_library", path))
+            directory = os.path.join(get_audio_library_dir(), path)
+            os.makedirs(directory, exist_ok=True)
 
             if os.path.exists(os.path.join(directory, name)):
 
@@ -1301,6 +1438,8 @@ class WingmanCore(WebSocketUser):
             self.printr.toast_error(f"Elevenlabs: \n{str(e)}")
 
     async def shutdown(self):
+        await self.set_core_state(CoreState.SHUTTING_DOWN)
+
         if self.settings_service.settings.xvasynth.enable:
             await self.stop_xvasynth()
         await self.unload_tower()
@@ -1308,5 +1447,5 @@ class WingmanCore(WebSocketUser):
         self.printr.print(
             "Core shutdown.",
             server_only=True,
-            color=LogType.SUBTLE,
+            color=LogType.SYSTEM,
         )

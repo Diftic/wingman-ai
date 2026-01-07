@@ -1,8 +1,5 @@
 from datetime import datetime
-try:
-    from skills.uexcorp.uexcorp.model.data_model import DataModel
-except ModuleNotFoundError:
-    from uexcorp.uexcorp.model.data_model import DataModel
+from skills.uexcorp.uexcorp.model.data_model import DataModel
 
 class FuelPrice(DataModel):
 
@@ -48,12 +45,8 @@ class FuelPrice(DataModel):
             self.load_by_value("id", self.data["id"])
 
     def get_data_for_ai(self) -> dict:
-        try:
-            from skills.uexcorp.uexcorp.model.commodity import Commodity
-            from skills.uexcorp.uexcorp.model.terminal import Terminal
-        except ModuleNotFoundError:
-            from uexcorp.uexcorp.model.commodity import Commodity
-            from uexcorp.uexcorp.model.terminal import Terminal
+        from skills.uexcorp.uexcorp.model.commodity import Commodity
+        from skills.uexcorp.uexcorp.model.terminal import Terminal
 
         commodity = Commodity(self.get_id_commodity(), load=True) if self.get_id_commodity() else None
         terminal = Terminal(self.get_id_terminal(), load=True) if self.get_id_terminal() else None
@@ -61,15 +54,15 @@ class FuelPrice(DataModel):
         return {
             "commodity": commodity.get_data_for_ai_minimal() if commodity else None,
             "terminal": terminal.get_data_for_ai_minimal() if terminal else None,
-            "price_buy": self.get_price_buy(),
-            "price_buy_avg": self.get_price_buy_avg(),
+            "price_buy_from_terminal": self.get_price_buy(),
+            "price_buy_from_terminal_avg": self.get_price_buy_avg(),
         }
 
     def get_data_for_ai_minimal(self) -> dict:
         return {
             "commodity": self.get_commodity_name(),
             "terminal": self.get_terminal_name(),
-            "price_buy": self.get_price_buy(),
+            "price_buy_from_terminal": self.get_price_buy(),
         }
 
     def get_id(self) -> int:

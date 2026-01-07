@@ -10,7 +10,7 @@ from api.interface import (
 )
 from api.enums import LogType
 from services.benchmark import Benchmark
-from skills.skill_base import Skill
+from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
     from wingmen.open_ai_wingman import OpenAiWingman
@@ -28,213 +28,140 @@ class Msfs2020Control(Skill):
         self.aq = None  # Same
         self.ae = None  # Same
         self.data_monitoring_loop_running = False
-        self.autostart_data_monitoring_loop_mode = False
-        self.data_monitoring_backstory = ""
-        self.min_data_monitoring_seconds = 60
-        self.max_data_monitoring_seconds = 360
 
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
-        self.autostart_data_monitoring_loop_mode = self.retrieve_custom_property_value(
+        # Validate properties exist (don't cache values)
+        self.retrieve_custom_property_value(
             "autostart_data_monitoring_loop_mode", errors
         )
-        self.data_monitoring_backstory = self.retrieve_custom_property_value(
+        self.retrieve_custom_property_value("data_monitoring_backstory", errors)
+        self.retrieve_custom_property_value("min_data_monitoring_seconds", errors)
+        self.retrieve_custom_property_value("max_data_monitoring_seconds", errors)
+        return errors
+
+    def _get_data_monitoring_backstory(self) -> str:
+        """Retrieve fresh data monitoring backstory at runtime."""
+        errors: list[WingmanInitializationError] = []
+        backstory = self.retrieve_custom_property_value(
             "data_monitoring_backstory", errors
         )
         # If not available or not set, use default wingman's backstory
-        if (
-            not self.data_monitoring_backstory
-            or self.data_monitoring_backstory == ""
-            or self.data_monitoring_backstory == " "
-        ):
-            self.data_monitoring_backstory = self.wingman.config.prompts.backstory
+        if not backstory or backstory.strip() == "":
+            return self.wingman.config.prompts.backstory
+        return backstory
 
-        self.min_data_monitoring_seconds = self.retrieve_custom_property_value(
+    def _get_min_data_monitoring_seconds(self) -> int:
+        """Retrieve fresh min data monitoring seconds at runtime."""
+        errors: list[WingmanInitializationError] = []
+        seconds = self.retrieve_custom_property_value(
             "min_data_monitoring_seconds", errors
         )
+        return seconds if seconds else 60
 
-        self.max_data_monitoring_seconds = self.retrieve_custom_property_value(
+    def _get_max_data_monitoring_seconds(self) -> int:
+        """Retrieve fresh max data monitoring seconds at runtime."""
+        errors: list[WingmanInitializationError] = []
+        seconds = self.retrieve_custom_property_value(
             "max_data_monitoring_seconds", errors
         )
+        return seconds if seconds else 360
 
-        return errors
+    def _get_autostart_data_monitoring_loop_mode(self) -> bool:
+        """Retrieve fresh autostart mode at runtime."""
+        errors: list[WingmanInitializationError] = []
+        return (
+            self.retrieve_custom_property_value(
+                "autostart_data_monitoring_loop_mode", errors
+            )
+            or False
+        )
 
-    def get_tools(self) -> list[tuple[str, dict]]:
-        return [
-            (
-                "get_data_from_sim",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_data_from_sim",
-                        "description": "Retrieve data points from Microsoft Flight Simulator 2020 using the Python SimConnect module.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "data_point": {
-                                    "type": "string",
-                                    "description": "The data point to retrieve, such as 'PLANE_ALTITUDE', 'PLANE_HEADING_DEGREES_TRUE'.",
-                                },
-                            },
-                            "required": ["data_point"],
-                        },
-                    },
-                },
-            ),
-            (
-                "set_data_or_perform_action_in_sim",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "set_data_or_perform_action_in_sim",
-                        "description": "Set data points or perform actions in Microsoft Flight Simulator 2020 using the Python SimConnect module.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "action": {
-                                    "type": "string",
-                                    "description": "The action to perform or data point to set, such as 'TOGGLE_MASTER_BATTERY', 'THROTTLE_SET'.",
-                                },
-                                "argument": {
-                                    "type": "number",
-                                    "description": "The argument to pass for the action, if any. For actions like 'TOGGLE_MASTER_BATTERY', no argument is needed. For 'THROTTLE_SET', pass the throttle value.",
-                                },
-                            },
-                            "required": ["action"],
-                        },
-                    },
-                },
-            ),
-            (
-                "start_or_activate_data_monitoring_loop",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "start_or_activate_data_monitoring_loop",
-                        "description": "Begin data monitoring loop, which will check certain data points at designated intervals.  May be referred to as tour guide mode.",
-                    },
-                },
-            ),
-            (
-                "end_or_stop_data_monitoring_loop",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "end_or_stop_data_monitoring_loop",
-                        "description": "End or stop data monitoring loop, to stop automatically checking data points at designated intervals.  May be referred to as tour guide mode.",
-                    },
-                },
-            ),
-            (
-                "get_information_about_current_location",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_information_about_current_location",
-                        "description": "Used to provide more detailed information if the user asks a general question like 'where are we?', 'what city are we flying over?', or 'what country is down there?'",
-                    },
-                },
-            ),
-        ]
+    @tool(
+        description="Retrieve data from MSFS2020 via SimConnect. Examples: PLANE_ALTITUDE, AIRSPEED_INDICATED, FUEL_TOTAL_QUANTITY, GEAR_HANDLE_POSITION. Use :index suffix for multi-engine (e.g., GENERAL_ENG_RPM:1)."
+    )
+    async def get_data_from_sim(self, data_point: str) -> str:
+        """
+        Retrieve data points from Microsoft Flight Simulator 2020 using the Python SimConnect module.
 
-    # Using sample methods found here; allow AI to determine the appropriate variables and arguments, if any:
-    # https://pypi.org/project/SimConnect/
-    async def execute_tool(
-        self, tool_name: str, parameters: dict[str, any], benchmark: Benchmark
-    ) -> tuple[str, str]:
-        function_response = "Error in execution. Can you please try your command again?"
-        instant_response = ""
+        Args:
+            data_point: The data point to retrieve, such as 'PLANE_ALTITUDE', 'PLANE_HEADING_DEGREES_TRUE'.
+        """
+        value = self.aq.get(data_point)
+        return f"{data_point} value is: {value}"
 
-        if tool_name in [
-            "get_data_from_sim",
-            "set_data_or_perform_action_in_sim",
-            "start_or_activate_data_monitoring_loop",
-            "end_or_stop_data_monitoring_loop",
-            "get_information_about_current_location",
-        ]:
-            benchmark.start_snapshot(f"MSFS2020 Control: {tool_name}")
-            if self.settings.debug_mode:
-                message = f"MSFS2020: executing tool '{tool_name}'"
-                if parameters:
-                    message += f" with params: {parameters}"
-                await self.printr.print_async(message, color=LogType.INFO)
+    @tool(
+        description="Control MSFS2020 aircraft via SimConnect. Examples: THROTTLE_FULL, FLAPS_UP, GEAR_TOGGLE, AP_MASTER, TOGGLE_BEACON_LIGHTS. Use TOGGLE_ prefix for switches, _INCR/_DECR for adjustments. Pass argument for SET commands (0-16383)."
+    )
+    async def set_data_or_perform_action_in_sim(
+        self, action: str, argument: float = None
+    ) -> str:
+        """
+        Set data points or perform actions in Microsoft Flight Simulator 2020 using the Python SimConnect module.
 
-            if tool_name == "get_data_from_sim":
-                data_point = parameters.get("data_point")
-                value = self.aq.get(data_point)
-                function_response = f"{data_point} value is: {value}"
+        Args:
+            action: The action to perform or data point to set, such as 'TOGGLE_MASTER_BATTERY', 'THROTTLE_SET'.
+            argument: The argument to pass for the action, if any.
+        """
+        try:
+            if argument is not None:
+                self.aq.set(action, argument)
+            else:
+                event_to_trigger = self.ae.find(action)
+                event_to_trigger()
+        except Exception:
+            await self.printr.print_async(
+                f"Tried to perform action {action} with argument {argument} using aq.set, now going to try ae.event_to_trigger.",
+                color=LogType.INFO,
+            )
 
-            elif tool_name == "set_data_or_perform_action_in_sim":
-                action = parameters.get("action")
-                argument = parameters.get("argument", None)
-                try:
-                    if argument is not None:
-                        self.aq.set(action, argument)
-                    else:
-                        event_to_trigger = self.ae.find(action)
-                        event_to_trigger()
-                except Exception:
-                    await self.printr.print_async(
-                        f"Tried to perform action {action} with argument {argument} using aq.set, now going to try ae.event_to_trigger.",
-                        color=LogType.INFO,
-                    )
+        try:
+            if argument is not None:
+                event_to_trigger = self.ae.find(action)
+                event_to_trigger(argument)
+        except Exception:
+            await self.printr.print_async(
+                f"Neither aq.set nor ae.event_to_trigger worked with {action} and {argument}.  Command failed.",
+                color=LogType.INFO,
+            )
+            return "Error: Command failed."
 
-                try:
-                    if argument is not None:
-                        event_to_trigger = self.ae.find(action)
-                        event_to_trigger(argument)
-                except Exception:
-                    await self.printr.print_async(
-                        f"Neither aq.set nor ae.event_to_trigger worked with {action} and {argument}.  Command failed.",
-                        color=LogType.INFO,
-                    )
-                    benchmark.finish_snapshot()
-                    return function_response, instant_response
+        return f"Action '{action}' executed with argument '{argument}'"
 
-                function_response = (
-                    f"Action '{action}' executed with argument '{argument}'"
-                )
+    @tool(
+        description="Begin flight data monitoring loop (tour guide mode). Periodically checks flight data and provides commentary. Use for immersive AI co-pilot experience."
+    )
+    async def start_or_activate_data_monitoring_loop(self) -> str:
+        """Begin data monitoring loop, which will check certain data points at designated intervals."""
+        if self.data_monitoring_loop_running:
+            return "Data monitoring loop is already running."
 
-            elif tool_name == "start_or_activate_data_monitoring_loop":
-                if self.data_monitoring_loop_running:
-                    function_response = "Data monitoring loop is already running."
-                    benchmark.finish_snapshot()
-                    return function_response, instant_response
+        if not self.already_initialized_simconnect:
+            return "Cannot start data monitoring / tour guide mode because simconnect is not connected yet.  Check to make sure the game is running."
 
-                if not self.already_initialized_simconnect:
-                    function_response = "Cannot start data monitoring / tour guide mode because simconnect is not connected yet.  Check to make sure the game is running."
-                    benchmark.finish_snapshot()
-                    return function_response, instant_response
+        if not self.data_monitoring_loop_running:
+            await self.initialize_data_monitoring_loop()
 
-                if not self.data_monitoring_loop_running:
-                    await self.initialize_data_monitoring_loop()
+        return "Started data monitoring loop/tour guide mode."
 
-                function_response = "Started data monitoring loop/tour guide mode."
+    @tool(description="End or stop data monitoring loop (tour guide mode).")
+    async def end_or_stop_data_monitoring_loop(self) -> str:
+        """End or stop data monitoring loop."""
+        await self.stop_data_monitoring_loop()
+        return "Closed data monitoring / tour guide mode."
 
-            elif tool_name == "end_or_stop_data_monitoring_loop":
-                await self.stop_data_monitoring_loop()
-                function_response = "Closed data monitoring / tour guide mode."
-
-            elif tool_name == "get_information_about_current_location":
-                place_info = await self.convert_lat_long_data_into_place_data()
-                if place_info:
-                    on_ground = self.aq.get("SIM_ON_GROUND")
-                    on_ground_statement = "The plane is currently in the air."
-                    if not on_ground:
-                        on_ground_statement = "The plane is currently on the ground."
-                    function_response = f"{on_ground_statement}  Detailed information regarding the location we are currently at or flying over: {place_info}"
-                else:
-                    function_response = "Unable to get more detailed information regarding the place based on the current latitude and longitude."
-
-            if self.settings.debug_mode:
-                await self.printr.print_async(
-                    f"MSFS2020: function_response: '{function_response}'",
-                    color=LogType.INFO,
-                )
-
-            benchmark.finish_snapshot()
-
-        return function_response, instant_response
+    @tool(description="Get detailed information about the current location.")
+    async def get_information_about_current_location(self) -> str:
+        """Used to provide more detailed information if the user asks a general question like 'where are we?'."""
+        place_info = await self.convert_lat_long_data_into_place_data()
+        if place_info:
+            on_ground = self.aq.get("SIM_ON_GROUND")
+            on_ground_statement = "The plane is currently in the air."
+            if not on_ground:
+                on_ground_statement = "The plane is currently on the ground."
+            return f"{on_ground_statement}  Detailed information regarding the location we are currently at or flying over: {place_info}"
+        else:
+            return "Unable to get more detailed information regarding the place based on the current latitude and longitude."
 
     # Search for MSFS2020 sim running and then connect
     async def start_simconnect(self):
@@ -254,7 +181,7 @@ class Msfs2020Control(Skill):
                         "Initialized SimConnect with MSFS2020.",
                         color=LogType.INFO,
                     )
-                if self.autostart_data_monitoring_loop_mode:
+                if self._get_autostart_data_monitoring_loop_mode():
                     await self.initialize_data_monitoring_loop()
             except Exception:
                 # Wait 30 seconds between connect attempts
@@ -277,10 +204,12 @@ class Msfs2020Control(Skill):
             self.data_monitoring_loop_running = True
 
             while self.data_monitoring_loop_running:
+                min_seconds = self._get_min_data_monitoring_seconds()
+                max_seconds = self._get_max_data_monitoring_seconds()
                 random_time = random.choice(
                     range(
-                        self.min_data_monitoring_seconds,
-                        self.max_data_monitoring_seconds,
+                        min_seconds,
+                        max_seconds,
                         15,
                     )
                 )  # Gets random number from min to max in increments of 15
@@ -376,12 +305,13 @@ class Msfs2020Control(Skill):
         on_ground_statement = "The plane is currently in the air."
         if on_ground:
             on_ground_statement = "The plane is currently on the ground."
+        backstory = self._get_data_monitoring_backstory()
         user_content = f"{on_ground_statement}  Information about the location: {data}"
         messages = [
             {
                 "role": "system",
                 "content": f"""
-                    {self.data_monitoring_backstory}
+                    {backstory}
                 """,
             },
             {
@@ -391,7 +321,7 @@ class Msfs2020Control(Skill):
         ]
         if self.settings.debug_mode:
             await self.printr.print_async(
-                f"Attempting LLM call with parameters: {self.data_monitoring_backstory}, {user_content}.",
+                f"Attempting LLM call with parameters: {backstory}, {user_content}.",
                 color=LogType.INFO,
             )
         completion = await self.llm_call(messages)
@@ -423,11 +353,13 @@ class Msfs2020Control(Skill):
 
     async def prepare(self) -> None:
         """Load the skill by trying to connect to the sim"""
+        await super().prepare()
         self.loaded = True
         self.threaded_execution(self.start_simconnect)
 
     async def unload(self) -> None:
         """Unload the skill."""
+        await super().unload()
         await self.stop_data_monitoring_loop()
         self.loaded = False
         if self.sm:

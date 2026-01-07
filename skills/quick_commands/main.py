@@ -1,10 +1,9 @@
-from os import path
+import os
 import json
 import datetime
 from typing import TYPE_CHECKING
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
 from api.enums import LogType
-from services.file import get_writable_dir
 from skills.skill_base import Skill
 
 if TYPE_CHECKING:
@@ -22,28 +21,33 @@ class QuickCommands(Skill):
         super().__init__(config=config, settings=settings, wingman=wingman)
 
         # get file paths
-        self.data_path = get_writable_dir(path.join("skills", "quick_commands", "data"))
-        self.file_ipl = path.join(self.data_path, "instant_phrase_learning.json")
+        self.data_path = os.path.join(self.get_generated_files_dir(), "data")
+        self.file_ipl = os.path.join(self.data_path, "instant_phrase_learning.json")
 
         # learning data
         self.learning_blacklist = []
         self.learning_data = {}
         self.learning_learned = {}
 
-        # rules
-        self.rule_count = 3
-
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
 
-        self.rule_count = self.retrieve_custom_property_value(
+        self.retrieve_custom_property_value(
             "quick_commands_learning_rule_count", errors
         )
-        if not self.rule_count or self.rule_count < 0:
-            self.rule_count = 3
 
         self.threaded_execution(self._init_skill)
         return errors
+
+    def _get_rule_count(self) -> int:
+        """Get rule_count property value just-in-time."""
+        errors = []
+        rule_count = self.retrieve_custom_property_value(
+            "quick_commands_learning_rule_count", errors
+        )
+        if not rule_count or rule_count < 0:
+            return 3
+        return rule_count
 
     async def _init_skill(self) -> None:
         """Initialize the skill."""
@@ -55,7 +59,7 @@ class QuickCommands(Skill):
             added = True
 
         if added:
-            await self.wingman.save_config()
+            await self.wingman.save_commands()
 
     async def _add_instant_activation_phrase(
         self, phrase: str, commands: list[str], save_wingman: bool = True
@@ -73,7 +77,7 @@ class QuickCommands(Skill):
                 changed = True
 
         if changed and save_wingman:
-            await self.wingman.save_config()
+            await self.wingman.save_commands()
 
     async def on_add_assistant_message(self, message: str, tool_calls: list) -> None:
         """Hook to start learning process."""
@@ -139,7 +143,7 @@ class QuickCommands(Skill):
             for command in commands:
                 if not self.wingman.get_command(command):
                     pops.append(phrase)
-                elif self.learning_data[phrase]["count"] >= self.rule_count:
+                elif self.learning_data[phrase]["count"] >= self._get_rule_count():
                     finished.append(phrase)
 
         if pops:
@@ -187,7 +191,7 @@ class QuickCommands(Skill):
         else:
             self.learning_data[phrase] = {"commands": command_names, "count": 1}
 
-        if self.learning_data[phrase]["count"] >= self.rule_count:
+        if self.learning_data[phrase]["count"] >= self._get_rule_count():
             await self._finish_learning(phrase)
 
         # save the learning data
@@ -256,7 +260,7 @@ class QuickCommands(Skill):
         """Load the learning data file."""
 
         # create the file if it does not exist
-        if not path.exists(self.file_ipl):
+        if not os.path.exists(self.file_ipl):
             return
 
         # load the learning data
@@ -299,5 +303,8 @@ class QuickCommands(Skill):
             "learning_learned": self.learning_learned,
         }
 
+        dirpath = os.path.dirname(self.file_ipl)
+        if dirpath and not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
         with open(self.file_ipl, "w", encoding="utf-8") as file:
             json.dump(learning_data, file, indent=4)

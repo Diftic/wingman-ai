@@ -1,25 +1,14 @@
 import inspect
 from typing import TYPE_CHECKING
-try:
-    from skills.uexcorp.uexcorp.tool.vehicle_information import VehicleInformation
-    from skills.uexcorp.uexcorp.tool.commodity_route import CommodityRoute
-    from skills.uexcorp.uexcorp.tool.commodity_information import CommodityInformation
-    from skills.uexcorp.uexcorp.tool.location_information import LocationInformation
-    from skills.uexcorp.uexcorp.tool.item_information import ItemInformation
-    from skills.uexcorp.uexcorp.tool.profit_calculation import ProfitCalculation
-except ModuleNotFoundError:
-    from uexcorp.uexcorp.tool.vehicle_information import VehicleInformation
-    from uexcorp.uexcorp.tool.commodity_route import CommodityRoute
-    from uexcorp.uexcorp.tool.commodity_information import CommodityInformation
-    from uexcorp.uexcorp.tool.location_information import LocationInformation
-    from uexcorp.uexcorp.tool.item_information import ItemInformation
-    from uexcorp.uexcorp.tool.profit_calculation import ProfitCalculation
+from skills.uexcorp.uexcorp.tool.vehicle_information import VehicleInformation
+from skills.uexcorp.uexcorp.tool.commodity_route import CommodityRoute
+from skills.uexcorp.uexcorp.tool.commodity_information import CommodityInformation
+from skills.uexcorp.uexcorp.tool.location_information import LocationInformation
+from skills.uexcorp.uexcorp.tool.item_information import ItemInformation
+from skills.uexcorp.uexcorp.tool.profit_calculation import ProfitCalculation
 
 if TYPE_CHECKING:
-    try:
-        from uexcorp.uexcorp.helper import Helper
-    except ModuleNotFoundError:
-        from skills.uexcorp.uexcorp.helper import Helper
+    from skills.uexcorp.uexcorp.helper import Helper
 
 
 class ToolHandler:
@@ -54,15 +43,23 @@ class ToolHandler:
                     f"LLM called for '{tool_name}' with parameters: {parameters}"
                 )
 
-                if not self.__helper.is_ready():
+                if self.__helper.get_handler_import().get_imported_percent() not in [100, 0]:
                     await self.__helper.get_handler_debug().write_async(
-                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Please wait a moment.", True
+                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Giving it 5 more seconds ..", True
                     )
-                    function_response = (
-                        f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Please wait a moment and try again."
-                    )
-                    self.__helper.set_request_while_not_loaded(True)
-                    return function_response, instant_response
+                    self.__helper.wait(5)
+                    if self.__helper.get_handler_import().get_imported_percent() not in [100, 0]:
+                        await self.__helper.get_handler_debug().write_async(
+                            f"UEX skill is still loading after 5s: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Deciding to retry later.",
+                            True
+                        )
+                        function_response = (
+                            f"UEX skill is currently loading: Import is at {self.__helper.get_handler_import().get_imported_percent()}%. Inform user, this will take a moment. User should initiate request again in a moment."
+                        )
+                        self.__helper.set_request_while_not_loaded(True)
+                        return function_response, instant_response
+                    else:
+                        self.__helper.set_request_while_not_loaded(False)
 
                 self.__helper.start_timer(tool_name)
                 tool = self.__functions[tool_name]()

@@ -2,7 +2,7 @@
 
 Official website: [https://www.wingman-ai.com](https://www.wingman-ai.com)
 
-[![Wingman AI 1.5 Showreel](https://img.youtube.com/vi/qR8FjmQJRGE/0.jpg)](https://youtu.be/qR8FjmQJRGE 'Wingman AI Showreel')
+[![Wingman AI Showreel](https://img.youtube.com/vi/qR8FjmQJRGE/0.jpg)](https://youtu.be/qR8FjmQJRGE 'Wingman AI Showreel')
 
 Wingman AI allows you to use your voice to talk to various AI providers and LLMs, process your conversations, and ultimately trigger actions such as pressing buttons or reading answers. Our _Wingmen_ are like characters and your interface to this world, and you can easily control their behavior and characteristics, even if you're not a developer. AI is complex and it scares people. It's also **not just ChatGPT**. We want to make it as easy as possible for you to get started. That's what _Wingman AI_ is all about. It's a **framework** that allows you to build your own Wingmen and use them in your games and programs.
 
@@ -30,36 +30,68 @@ Wingman AI Core acts as a "backend" API (using FastAPI and Pydantic) with the fo
   - OpenAI
   - Google (Gemini)
   - Azure
-  - Groq (llama3 with function calling)
-  - Mistral Cloud
-  - Open Router
-  - Cerebras
   - Groq
+  - Mistral Cloud
+  - OpenRouter
+  - Cerebras
   - Perplexity
-  - Wingman Pro (unlimited access to several providers and models)
+  - X.AI (Grok)
+  - Local LLM (any OpenAI-compatible API)
+  - Wingman Subscription (optional)
+    - Pro: unlimited access to gpt-4o-mini, Azure TTS and OpenAI TTS
+    - Ultra: additional unlimited access to gpt-5-mini and Inworld TTS
 - **Speech-to-text providers** (STT) for transcription:
-  - FasterWhisper (local, default)
+  - FasterWhisper (local, default - bundled with CUDA for GPU acceleration)
   - whispercpp (local, needs to be installed separately)
   - Azure Whisper
   - Azure Speech
   - OpenAI Whisper
   - Wingman Pro (Azure Speech or Azure Whisper)
 - **Text-to-speech** (TTS) providers:
-  - XVASynth (local)
   - OpenAI-compatible (e.g. xtts2, CoquiTTS local)
+  - XVASynth (local)
   - OpenAI TTS
   - Azure TTS
   - Edge TTS (free)
   - Elevenlabs
   - Hume
+  - Inworld
 - **Sound effects** that work with every supported TTS provider
+- **Audio markups (aka "emotions")** that work with every supported TTS provider
 - **Multilingual** by default
 - **Command recording & execution** (keyboard & mouse)
   - **AI-powered**: OpenAI decides when to execute commands based on user input. Users don't need to say exact phrases.
   - **Instant activation**: Users can (almost) instantly trigger commands by saying exact phrases.
   - Optional: Predetermined responses
 - **Custom Wingman** support: Developers can easily plug-in their own Python scripts with custom implementations
-- **Skills** that can do almost anything. Think Alexa... but better.
+- **Built-in Skills** - Internal Python modules that extend Wingman capabilities:
+  - **File Manager**: Read, write, list, and search files
+  - **Vision AI**: Screenshot analysis and visual understanding
+  - **Spotify**: Music playback control and search
+  - **Typing Assistant**: Types text into any application
+  - **Audio Device Changer**: Switch input/output devices
+  - **API Request**: Make HTTP requests to external services
+  - **Image Generation**: AI-powered image creation
+  - **Timer**: Set timers and alarms
+  - **Quick Commands**: Fast command execution shortcuts
+  - **Radio Chatter**: Atmospheric radio effects
+  - **Thinking Sound**: Audio feedback during processing
+  - **Auto Screenshot**: Automated screen capture
+  - **Control Windows**: Window management operations
+  - **MSFS2020 Control**: Microsoft Flight Simulator 2020 integration
+  - **ATS Telemetry**: American Truck Simulator data integration
+  - **UEX Corp**: Star Citizen trading data (UEX Corp API)
+- **MCP (Model Context Protocol) Client** - Connect external MCP servers for extended functionality:
+  - Wingman AI is a full MCP client supporting remote and local MCP servers
+  - Supports HTTP, STDIO, and SSE transports
+  - **Ultra Subscribers** get access to premium MCP servers:
+    - **Web Search & Content Extraction**: Brave and Tavily search (no API key needed - proxied for Wingman Ultra subs)
+    - **Date & Time Utilities**: Time zone conversions and date calculations
+    - **Perplexity AI Search**: AI-powered search (BYOK - bring your own API key)
+    - **No Man's Sky Game Data**: Game information and wiki data
+    - **Starhead**: Star Citizen Game Data like ships, locations, and game mechanics
+  - Developers can connect their own custom MCP servers (local or remote)
+  - **Key difference**: Skills are built-in Python modules, MCP servers are external tools that can be developed in any language
 - **directory/file-based configuration** for different use cases (e.g. games) and Wingmen. No database needed.
 - Wingman AI Core exposes a lot of its functionality via **REST services** (with an OpenAPI/Swagger spec) and can send and receive messages from clients, games etc. using **WebSockets**.
 - Sound Library to play mp3 or wav files in commands or Skills (similar to HCS Voice Packs for Voice Attack)
@@ -124,13 +156,21 @@ Our Wingmen use OpenAI's APIs and they charge by usage. That means: You don't pa
 
 You don't have to use Elevenlabs as TTS provider, but their voices are great and you can generate instant sound effects with their API - fully integrated into Wingman AI. You can clone any voice with 3 minutes of clean audio, e.g. your friend, an actor or a recording of an NPC in your game.
 
-Elevenlabs offers a $5 tier with 30k characters and a $22 tier with 100k characters. Characters roll over each month with a max of 3 months worth of credits. If you're interested in the service, please consider using our [referral link here](https://elevenlabs.io/pricing?from=partnerlewis2510). It costs you nothing extra and supports Wingman AI. We get 22% of all payments in your first year. Thank you!
+If you're interested in the service, please consider using our [referral link here](https://elevenlabs.io/pricing?from=partnerlewis2510). It costs you nothing extra and supports Wingman AI. We get 22% of all payments in your first year. Thank you!
 
 Signing up is very similar to OpenAI: Create your account, set up your payment method, and create an API key. Enter that API key in Wingman AI when asked.
 
+#### Inworld
+
+Inworld is a powerful and affordable alternative to ElevenLabs that's **included in Wingman Ultra** subscriptions. It offers high-quality text-to-speech with advanced features like **audio markups for emotions** (anger, joy, sadness, etc.), allowing your Wingmen to speak with dynamic emotional expression.
+
+Inworld also supports **voice cloning** when you bring your own API key (BYOK). With significantly lower pricing than ElevenLabs, Inworld is an excellent choice for users who want professional-quality TTS without breaking the bank.
+
+To use Inworld with your own API key, sign up at [Inworld AI](https://www.inworld.ai/), create a workspace, and generate an API key. Enter your API key in Wingman AI when prompted.
+
 #### Hume
 
-Similar to Elevenlabs but more affordable.
+Similar to Elevenlabs and Inworld but a bit less polished and quite affordable.
 
 #### Edge TTS (Free)
 
@@ -142,14 +182,14 @@ You can use any LLM offering an OpenAI-compatible API and connect it to Wingman 
 
 ### Can I use a local TTS provider?
 
-XVASynth is a simple option and installable via Steam. Since version 1.8.0, Wingman AI Core also supports the new OpenAI TTS API and local TTS providers like CoquiTTS, xtts2 and others. If you want to dive into local TTS and voice cloning, we highly recommend you check out [teddybear082's Wingman AI version of CoquiTTS](https://github.com/teddybear082/WingmanAI-Coqui-TTS-Openai-Server).
+Yes! XVASynth is a simple option and installable via Steam. Since version 1.8.0, Wingman AI Core also supports the new OpenAI TTS API and local TTS providers like CoquiTTS, xtts2 and others. If you want to dive into local TTS and voice cloning, we highly recommend you check out [teddybear082's Wingman AI version of CoquiTTS](https://github.com/teddybear082/WingmanAI-Coqui-TTS-Openai-Server).
 
 ## Installing Wingman AI
 
 ### Windows
 
 - Download the installer of the latest version from [wingman-ai.com](https://www.wingman-ai.com).
-- If you have an NVIDIA RTX GPU, install the latest [CUDA driver](https://developer.nvidia.com/cuda-downloads) from NVIDIA to speed up the transcription process significantly.
+- **FasterWhisper with CUDA is now bundled!** If you have a CUDA-compatible NVIDIA GPU, GPU-accelerated speech-to-text will work automatically without additional installation steps.
 - Install it to a directory of your choice and start the client `Wingman AI.exe`.
   - The client will will auto-start `Wingman AI Core.exe` in the background
 
@@ -223,6 +263,7 @@ There are a couple of other files and directories in the config directory that y
 - `defaults.yaml` - contains the default settings for all Wingmen. This is merged with the settings of the individual Wingmen at runtime. Specific wingman settings always override the defaults. Once a wingman is saved using the client, it contains all the settings it needs to run and will no longer fallback to the defaults.
 - `settings.yaml` - contains user settings like the selected audio input and output devices
 - `secrets.yaml` - contains the API keys for different providers.
+- `mcp.template.yaml` - template for configuring MCP server connections
 
 Access secrets in code by using `secret_keeper.py`. You can access everything else with `config_manager.py`.
 
@@ -245,6 +286,18 @@ Please follow our guides to setup your dev environment:
 
 - [Windows development](docs/develop-windows.md)
 - [MacOS development](docs/develop-macos.md)
+
+### Creating Custom Skills
+
+Want to extend Wingman AI with your own skills? We have comprehensive documentation:
+
+- **[Skills Developer Guide](skills/README.md)** - Complete guide for creating custom skills, including:
+  - How skills work and are discovered
+  - Tool-based vs hook-based skills
+  - Skill vs MCP decision guide
+  - Available custom property types
+  - Bundling dependencies
+  - Best practices and examples
 
 If you want to read some code first and understand how it all works, we recommend you start here (in this order):
 

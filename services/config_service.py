@@ -1,16 +1,24 @@
+import asyncio
 from typing import Optional
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from api.enums import LogType
 from api.interface import (
-    BasicWingmanConfig,
     ConfigDirInfo,
     ConfigWithDirInfo,
     ConfigsInfo,
+    DuplicateWingmanRequest,
+    DuplicateWingmanResult,
+    McpConfig,
+    McpConnectResult,
+    McpServerConfig,
+    McpServerState,
     NestedConfig,
     NewWingmanTemplate,
+    SkillConfig,
     SkillBase,
     WingmanConfig,
     WingmanConfigFileInfo,
+    WingmanSkillState,
 )
 from services.config_manager import ConfigManager
 from services.config_migration_service import ConfigMigrationService
@@ -104,6 +112,13 @@ class ConfigService:
         )
         self.router.add_api_route(
             methods=["POST"],
+            path="/config/wingman/duplicate",
+            endpoint=self.duplicate_wingman,
+            response_model=DuplicateWingmanResult,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
             path="/config/create",
             endpoint=self.create_config,
             tags=tags,
@@ -128,8 +143,8 @@ class ConfigService:
         )
         self.router.add_api_route(
             methods=["POST"],
-            path="/config/save-wingman-basic",
-            endpoint=self.save_basic_wingman_config,
+            path="/config/save-commands",
+            endpoint=self.save_commands,
             tags=tags,
         )
         self.router.add_api_route(
@@ -137,6 +152,52 @@ class ConfigService:
             path="/available-skills",
             endpoint=self.get_available_skills,
             response_model=list[SkillBase],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/wingman-skills",
+            endpoint=self.get_wingman_skills,
+            response_model=list[WingmanSkillState],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/wingman-skills/toggle",
+            endpoint=self.toggle_wingman_skill,
+            tags=tags,
+        )
+        # MCP server endpoints
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/wingman-mcps",
+            endpoint=self.get_wingman_mcps,
+            response_model=list[McpServerState],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/wingman-mcps/toggle",
+            endpoint=self.toggle_wingman_mcp,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/wingman-mcps/connect",
+            endpoint=self.connect_wingman_mcp,
+            response_model=McpConnectResult,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/mcp-servers",
+            endpoint=self.save_mcp_server,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/mcp-servers",
+            endpoint=self.delete_mcp_server,
             tags=tags,
         )
         self.router.add_api_route(
@@ -165,6 +226,504 @@ class ConfigService:
             raise e
 
         return skills
+
+    # GET /wingman-skills
+    async def get_wingman_skills(
+        self,
+        config_name: str,
+        wingman_name: str,
+    ) -> list[WingmanSkillState]:
+        """Get all skills with their enabled/disabled state for a specific wingman."""
+        import sys
+
+        try:
+            # Get all available skills
+            all_skills = ModuleManager.read_available_skills()
+
+            # Get the wingman's config to check discoverable_skills
+            config_dir = self.config_manager.get_config_dir(config_name)
+            wingman_files = self.config_manager.get_wingmen_configs(config_dir)
+
+            # Find the wingman file
+            wingman_file = next(
+                (f for f in wingman_files if f.name == wingman_name), None
+            )
+            if not wingman_file:
+                self.printr.toast_error(f"Wingman '{wingman_name}' not found.")
+                return []
+
+            # Load the wingman config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            discoverable_skills = wingman_config.discoverable_skills
+
+            # Get current platform for filtering
+            current_platform = sys.platform
+            platform_map = {"win32": "windows", "darwin": "darwin", "linux": "linux"}
+            normalized_platform = platform_map.get(current_platform, current_platform)
+
+            # Build response with enabled state
+            result = []
+            skipped_platform = []
+            for skill in all_skills:
+                # Check platform compatibility
+                platforms = skill.config.platforms
+                if platforms and normalized_platform not in platforms:
+                    skipped_platform.append(skill.name)
+                    continue  # Skip platform-incompatible skills
+
+                is_enabled = skill.name in discoverable_skills
+                result.append(WingmanSkillState(skill=skill, is_enabled=is_enabled))
+
+            if skipped_platform:
+                self.printr.print(
+                    f"Skills not available on {normalized_platform}: {', '.join(skipped_platform)}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+
+            return result
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # POST /wingman-skills/toggle
+    async def toggle_wingman_skill(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        skill_name: str,
+        enabled: bool,
+    ):
+        """Enable or disable a skill for a specific wingman.
+
+        Uses incremental skill toggle to avoid reinitializing all skills,
+        which improves performance and prevents resource accumulation.
+        """
+        try:
+            # Load the wingman config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            # Initialize discoverable_skills if needed (should always be present as non-optional)
+            if (
+                not hasattr(wingman_config, "discoverable_skills")
+                or wingman_config.discoverable_skills is None
+            ):
+                wingman_config.discoverable_skills = []
+
+            if enabled:
+                # Add to discoverable list (enable the skill)
+                if skill_name not in wingman_config.discoverable_skills:
+                    wingman_config.discoverable_skills.append(skill_name)
+            else:
+                # Remove from discoverable list (disable the skill)
+                if skill_name in wingman_config.discoverable_skills:
+                    wingman_config.discoverable_skills.remove(skill_name)
+
+            # Save the config WITHOUT reinitializing all skills
+            await self.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+                wingman_config=wingman_config,
+                silent=True,  # We'll show our own message
+            )
+
+            # Incrementally toggle just this skill on the active wingman
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_file.name)
+                if self.tower
+                else None
+            )
+            if wingman:
+                if enabled:
+                    success, message = await wingman.enable_skill(skill_name)
+                else:
+                    success, message = await wingman.disable_skill(skill_name)
+
+                if not success:
+                    self.printr.toast_error(message)
+                    return
+
+            action = "enabled" if enabled else "disabled"
+            self.printr.print(
+                f"Skill '{skill_name}' {action} for {wingman_file.name}.",
+                server_only=True,
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # GET /wingman-mcps
+    async def get_wingman_mcps(
+        self,
+        config_name: str,
+        wingman_name: str,
+    ) -> list[McpServerState]:
+        """Get all MCP servers with their enabled/connected state for a specific wingman."""
+        try:
+            # Get the wingman's config
+            config_dir = self.config_manager.get_config_dir(config_name)
+            wingman_files = self.config_manager.get_wingmen_configs(config_dir)
+
+            # Find the wingman file
+            wingman_file = next(
+                (f for f in wingman_files if f.name == wingman_name), None
+            )
+            if not wingman_file:
+                self.printr.toast_error(f"Wingman '{wingman_name}' not found.")
+                return []
+
+            # Load the wingman config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            # Get MCP servers from central mcp.yaml
+            mcp_config = self.config_manager.mcp_config
+            mcp_servers = mcp_config.servers if mcp_config else []
+            discoverable_mcps = wingman_config.discoverable_mcps
+
+            # Get connection state and tools from the active wingman if available
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_name) if self.tower else None
+            )
+            registry = None
+            if wingman and hasattr(wingman, "mcp_registry") and wingman.mcp_registry:
+                registry = wingman.mcp_registry
+
+                # Brief wait for MCP connections to complete if wingman just initialized
+                # MCPs connect asynchronously, so we give them a moment to finish
+                if registry.server_count == 0:
+                    await asyncio.sleep(0.5)
+
+            # Build response with enabled/connected state, tools, and errors
+            result = []
+            for mcp_server in mcp_servers:
+                # Determine if enabled: if in discoverable_mcps whitelist, it's enabled
+                # Otherwise it's disabled (the server's default discoverable_by_default state only affects
+                # initial wingman creation, not runtime state)
+                is_enabled = mcp_server.name in discoverable_mcps
+
+                is_connected = False
+                tools = None
+                error = None
+
+                if registry:
+                    is_connected = (
+                        mcp_server.name in registry.get_connected_server_names()
+                    )
+                    if is_connected:
+                        tools = registry.get_server_tools(mcp_server.name)
+                    else:
+                        error = registry.get_server_error(mcp_server.name)
+
+                result.append(
+                    McpServerState(
+                        config=mcp_server,
+                        is_enabled=is_enabled,
+                        is_connected=is_connected,
+                        tools=tools,
+                        error=error,
+                    )
+                )
+
+            return result
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # POST /wingman-mcps/toggle
+    async def toggle_wingman_mcp(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        mcp_name: str,
+        enabled: bool,
+    ):
+        """Enable or disable an MCP server for a specific wingman.
+
+        Uses incremental MCP toggle to avoid reinitializing all MCP connections,
+        which improves performance and prevents unnecessary disconnections.
+        """
+        try:
+            # Load the wingman config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            # Initialize discoverable_mcps if needed (should always be present as non-optional)
+            if (
+                not hasattr(wingman_config, "discoverable_mcps")
+                or wingman_config.discoverable_mcps is None
+            ):
+                wingman_config.discoverable_mcps = []
+
+            if enabled:
+                # Add to discoverable list (enable the MCP)
+                if mcp_name not in wingman_config.discoverable_mcps:
+                    wingman_config.discoverable_mcps.append(mcp_name)
+            else:
+                # Remove from discoverable list (disable the MCP)
+                if mcp_name in wingman_config.discoverable_mcps:
+                    wingman_config.discoverable_mcps.remove(mcp_name)
+
+            # Save the config WITHOUT reinitializing all MCPs
+            await self.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+                wingman_config=wingman_config,
+                silent=True,  # We'll show our own message
+            )
+
+            # Incrementally toggle just this MCP on the active wingman
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_file.name)
+                if self.tower
+                else None
+            )
+            if wingman:
+                if enabled:
+                    if hasattr(wingman, "enable_mcp"):
+                        success, message = await wingman.enable_mcp(mcp_name)
+                    else:
+                        # Fallback for wingmen without incremental MCP support
+                        if hasattr(wingman, "init_mcps"):
+                            await wingman.init_mcps()
+                        success, message = True, f"MCP server '{mcp_name}' enabled."
+                else:
+                    if hasattr(wingman, "disable_mcp"):
+                        success, message = await wingman.disable_mcp(mcp_name)
+                    else:
+                        # Fallback for wingmen without incremental MCP support
+                        if hasattr(wingman, "init_mcps"):
+                            await wingman.init_mcps()
+                        success, message = True, f"MCP server '{mcp_name}' disabled."
+
+                if not success:
+                    self.printr.toast_error(message)
+                    return
+
+            action = "enabled" if enabled else "disabled"
+            self.printr.print(
+                f"MCP server '{mcp_name}' {action}.",
+                server_only=True,
+                source_name=wingman_file.name,
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # POST /mcp-servers
+    async def save_mcp_server(self, mcp_server: McpServerConfig):
+        """Save an MCP server to the central mcp.yaml and refresh all active wingmen."""
+        try:
+            mcp_config = self.config_manager.mcp_config
+            if not mcp_config:
+                mcp_config = McpConfig(servers=[])
+                self.config_manager.mcp_config = mcp_config
+
+            # Check if server already exists (update) or is new (add)
+            existing_index = next(
+                (
+                    i
+                    for i, s in enumerate(mcp_config.servers)
+                    if s.name == mcp_server.name
+                ),
+                None,
+            )
+
+            if existing_index is not None:
+                # Update existing server
+                mcp_config.servers[existing_index] = mcp_server
+                self.printr.print(
+                    f"Updated MCP server '{mcp_server.name}' in mcp.yaml",
+                    server_only=True,
+                )
+            else:
+                # Add new server
+                mcp_config.servers.append(mcp_server)
+                self.printr.print(
+                    f"Added MCP server '{mcp_server.name}' to mcp.yaml",
+                    server_only=True,
+                )
+
+            # Save to file
+            self.config_manager.save_mcp_config()
+
+            # Refresh MCPs on all active wingmen so they can use the new/updated server
+            if self.tower:
+                for wingman in self.tower.wingmen:
+                    if hasattr(wingman, "init_mcps"):
+                        await wingman.init_mcps()
+
+            self.printr.toast(
+                f"MCP server '{mcp_server.display_name or mcp_server.name}' saved."
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # DELETE /mcp-servers
+    async def delete_mcp_server(self, mcp_name: str):
+        """Delete an MCP server from the central mcp.yaml and refresh all active wingmen."""
+        try:
+            mcp_config = self.config_manager.mcp_config
+            if not mcp_config or not mcp_config.servers:
+                self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+                return
+
+            # Find and remove the server
+            original_count = len(mcp_config.servers)
+            mcp_config.servers = [s for s in mcp_config.servers if s.name != mcp_name]
+
+            if len(mcp_config.servers) == original_count:
+                self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+                return
+
+            # Save to file
+            self.config_manager.save_mcp_config()
+
+            # Refresh MCPs on all active wingmen to disconnect from removed server
+            if self.tower:
+                for wingman in self.tower.wingmen:
+                    if hasattr(wingman, "init_mcps"):
+                        await wingman.init_mcps()
+
+            self.printr.toast(f"MCP server '{mcp_name}' deleted.")
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise e
+
+    # POST /wingman-mcps/connect
+    async def connect_wingman_mcp(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        mcp_name: str,
+    ) -> McpConnectResult:
+        """Connect (or reconnect) to a specific MCP server and return immediate feedback."""
+        try:
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_file.name)
+                if self.tower
+                else None
+            )
+            if not wingman:
+                return McpConnectResult(
+                    success=False,
+                    server_name=mcp_name,
+                    error=f"Wingman '{wingman_file.name}' not found or not active.",
+                )
+
+            if not hasattr(wingman, "mcp_registry") or not wingman.mcp_registry:
+                return McpConnectResult(
+                    success=False,
+                    server_name=mcp_name,
+                    error="MCP registry not available on this wingman.",
+                )
+
+            # Find the MCP config from central mcp.yaml
+            mcp_config = self.config_manager.mcp_config
+            server_config = None
+            if mcp_config and mcp_config.servers:
+                for cfg in mcp_config.servers:
+                    if cfg.name == mcp_name:
+                        server_config = cfg
+                        break
+
+            if not server_config:
+                return McpConnectResult(
+                    success=False,
+                    server_name=mcp_name,
+                    error=f"MCP server '{mcp_name}' not found in mcp.yaml.",
+                )
+
+            # Build headers with secrets (same logic as init_mcps)
+            headers = {}
+            if server_config.headers:
+                headers.update(server_config.headers)
+
+            # Check for API key in secrets
+            if hasattr(wingman, "secret_keeper"):
+                secret_key = f"mcp_{server_config.name}"
+                api_key = await wingman.secret_keeper.retrieve(
+                    requester=wingman.name,
+                    key=secret_key,
+                    prompt_if_missing=False,
+                )
+                if api_key:
+                    if not any(
+                        k.lower() in ["authorization", "api-key", "x-api-key"]
+                        for k in headers.keys()
+                    ):
+                        headers["Authorization"] = f"Bearer {api_key}"
+
+            # Try to connect
+            import asyncio
+
+            default_timeout = 60.0 if server_config.type.value == "stdio" else 30.0
+            timeout = (
+                float(server_config.timeout)
+                if server_config.timeout
+                else default_timeout
+            )
+
+            try:
+                connection = await asyncio.wait_for(
+                    wingman.mcp_registry.register_server(
+                        config=server_config,
+                        headers=headers if headers else None,
+                    ),
+                    timeout=timeout,
+                )
+
+                if connection:
+                    tools = wingman.mcp_registry.get_server_tools(mcp_name)
+                    tool_count = len(tools) if tools else 0
+                    self.printr.print(
+                        f"🌐 MCP '{server_config.display_name}' connected with {tool_count} tools.",
+                        source_name=wingman_file.name,
+                        server_only=True,
+                    )
+                    return McpConnectResult(
+                        success=True,
+                        server_name=mcp_name,
+                        tools=tools,
+                    )
+                else:
+                    error = wingman.mcp_registry.get_server_error(mcp_name)
+                    return McpConnectResult(
+                        success=False,
+                        server_name=mcp_name,
+                        error=error or "Connection returned no result.",
+                    )
+
+            except asyncio.TimeoutError:
+                error_msg = f"Connection timed out ({int(timeout)}s)."
+                wingman.mcp_registry.set_server_error(mcp_name, error_msg)
+                return McpConnectResult(
+                    success=False,
+                    server_name=mcp_name,
+                    error=error_msg,
+                )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            return McpConnectResult(
+                success=False,
+                server_name=mcp_name,
+                error=str(e),
+            )
 
     # GET /configs
     def get_config_dirs(self):
@@ -207,7 +766,7 @@ class ConfigService:
 
         await self.printr.print_async(
             f"Loaded config: {loaded_config_dir.name}.",
-            color=LogType.HIGHLIGHT,
+            color=LogType.STARTUP,
             source_name=self.source_name,
             command_tag="config_loaded",
         )
@@ -275,6 +834,41 @@ class ConfigService:
         )
         await self.load_config(config_dir)
 
+    # POST /config/wingman/duplicate
+    async def duplicate_wingman(self, request: DuplicateWingmanRequest):
+        """Duplicate a Wingman into a chosen target config/context.
+
+        Server-side responsibilities:
+        - Validate name with the same constraints as the client
+        - Ensure the new name does not exist in the target context
+        - Copy all settings from the source Wingman
+        - Ensure YAML filename stem matches wingman_config.name
+        - Reload the selected target config so the copy is available immediately
+        """
+
+        try:
+            new_wingman_file = self.config_manager.duplicate_wingman_config(
+                source_config_dir=request.source_config_dir,
+                source_wingman_file=request.source_wingman_file,
+                target_config_dir=request.target_config_dir,
+                new_name=request.new_name,
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except FileExistsError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+        except Exception as e:
+            # Keep unexpected errors visible
+            raise HTTPException(status_code=500, detail=str(e)) from e
+
+        await self.load_config(request.target_config_dir)
+        return DuplicateWingmanResult(
+            config_dir=request.target_config_dir,
+            wingman_file=new_wingman_file,
+        )
+
     # POST config/save-wingman
     async def save_wingman_config(
         self,
@@ -282,19 +876,83 @@ class ConfigService:
         wingman_file: WingmanConfigFileInfo,
         wingman_config: WingmanConfig,
         silent: bool = False,
-        validate: bool = False,
-        update_skills: bool = False,
+        skip_config_validation: bool = True,
     ):
+        """Save wingman configuration and optionally update the active wingman.
+
+        This is the single authoritative save path for Wingman configuration.
+
+        IMPORTANT:
+        - Skill + MCP activation state is controlled via dedicated toggle endpoints
+          and stored in `discoverable_skills` / `discoverable_mcps`.
+        - Some client flows (e.g. saving Skill custom properties) may send a partial
+          WingmanConfig payload. Since `discoverable_*` default to an empty list,
+          persisting the raw payload can unintentionally deactivate skills/MCPs.
+                - To protect against partial payloads, activation state is preserved from the
+                    on-disk config ONLY when the incoming payload omits `discoverable_skills`
+                    and/or `discoverable_mcps`.
+
+        Args:
+            config_dir: The config directory info
+            wingman_file: The wingman file info
+            wingman_config: The wingman configuration to save
+            silent: If True, don't show toast notification
+            skip_config_validation: If False, validate the config before applying
+        """
+
+        # Check if tower is available
+        if not self.tower:
+            self.printr.toast_error(
+                "Cannot save wingman config: Tower not initialized. Please wait for the config to fully load."
+            )
+            return
+
+        # Load current on-disk config for merge/preservation
+        existing_config: WingmanConfig | None = None
+        try:
+            existing_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+            )
+        except Exception:
+            # Fallback to trusting the incoming config if disk read fails
+            existing_config = None
+
+        merged_config = wingman_config
+        if existing_config:
+            # Merge partial payloads: prefer incoming values, but keep existing values
+            # for fields that are omitted from the request.
+            merged_data = existing_config.model_dump()
+            merged_data.update(wingman_config.model_dump(exclude_unset=True))
+            merged_config = WingmanConfig(**merged_data)
+
+            # Special-case merge for Skill overrides: clients may send only a subset
+            # (e.g. when editing custom properties of a single skill). Replacing the
+            # entire list would drop unrelated overrides.
+            if "skills" in wingman_config.model_fields_set:
+                merged_config.skills = self._merge_skill_configs(
+                    existing=existing_config.skills,
+                    incoming=wingman_config.skills,
+                )
+
+            # Protect against partial client payloads inadvertently deactivating
+            # skills/MCPs. Preserve from disk only when the incoming payload omitted
+            # these fields entirely.
+            if "discoverable_skills" not in wingman_config.model_fields_set:
+                merged_config.discoverable_skills = existing_config.discoverable_skills
+            if "discoverable_mcps" not in wingman_config.model_fields_set:
+                merged_config.discoverable_mcps = existing_config.discoverable_mcps
+
         # update the wingman
         wingman = self.tower.get_wingman_by_name(wingman_file.name)
         if not wingman:
             # try to enable a previously disabled wingman
             disabled_config = self.tower.get_disabled_wingman_by_name(
-                wingman_config.name
+                merged_config.name
             )
-            if disabled_config and not wingman_config.disabled:
+            if disabled_config and not merged_config.disabled:
                 enabled = await self.tower.enable_wingman(
-                    wingman_name=wingman_config.name,
+                    wingman_name=merged_config.name,
                     settings=self.config_manager.settings_config,
                 )
                 if enabled:
@@ -306,12 +964,13 @@ class ConfigService:
                 return
 
         updated = await wingman.update_config(
-            config=wingman_config, validate=validate, update_skills=update_skills
+            config=merged_config,
+            skip_config_validation=skip_config_validation,
         )
 
         if not updated:
             self.printr.toast_error(
-                f"New config for Wingman '{wingman_config.name}' is invalid."
+                f"New config for Wingman '{merged_config.name}' is invalid."
             )
             return
 
@@ -319,97 +978,93 @@ class ConfigService:
         self.config_manager.save_wingman_config(
             config_dir=config_dir,
             wingman_file=wingman_file,
-            wingman_config=wingman_config,
+            wingman_config=merged_config,
         )
 
-        message = f"Wingman {wingman_config.name}'s config changed."
+        message = f"Wingman {merged_config.name}'s config changed."
         if not silent:
             self.printr.toast(message)
         else:
             self.printr.print(text=message, server_only=True)
 
-    # POST config/save-wingman-basic
-    async def save_basic_wingman_config(
+    @staticmethod
+    def _merge_skill_configs(
+        existing: list[SkillConfig] | None,
+        incoming: list[SkillConfig] | None,
+    ) -> list[SkillConfig] | None:
+        if incoming is None:
+            return existing
+        if existing is None:
+            return incoming
+
+        def _key(skill_cfg: SkillConfig) -> str:
+            return f"{skill_cfg.module}:{skill_cfg.name}"
+
+        merged_by_key: dict[str, SkillConfig] = {_key(s): s for s in existing}
+        for skill_cfg in incoming:
+            merged_by_key[_key(skill_cfg)] = skill_cfg
+
+        # Preserve existing order, then append new incoming entries
+        ordered: list[SkillConfig] = []
+        seen: set[str] = set()
+        for skill_cfg in existing:
+            k = _key(skill_cfg)
+            ordered.append(merged_by_key[k])
+            seen.add(k)
+        for skill_cfg in incoming:
+            k = _key(skill_cfg)
+            if k not in seen:
+                ordered.append(skill_cfg)
+                seen.add(k)
+
+        return ordered
+
+    # POST config/save-commands
+    async def save_commands(
         self,
-        config_dir: ConfigDirInfo,
-        wingman_file: WingmanConfigFileInfo,
-        basic_config: BasicWingmanConfig,
-        silent: bool = False,
-        validate: bool = False,
+        wingman_name: str,
+        silent: bool = True,
     ):
-        # update the wingman
-        wingman = self.tower.get_wingman_by_name(wingman_file.name)
-        if not wingman:
-            # try to enable a previously disabled wingman
-            disabled_config = self.tower.get_disabled_wingman_by_name(basic_config.name)
-            if disabled_config and not basic_config.disabled:
-                enabled = await self.tower.enable_wingman(
-                    wingman_name=basic_config.name,
-                    settings=self.config_manager.settings_config,
-                )
-                if enabled:
-                    # now this should work
-                    wingman = self.tower.get_wingman_by_name(wingman_file.name)
-            # else fail
-            if not wingman:
-                self.printr.toast_error(f"Wingman '{wingman_file.name}' not found.")
-                return
+        """Save only the commands section of a wingman config.
 
-        wingman_config = wingman.config
-        wingman_config.name = basic_config.name
-        wingman_config.disabled = basic_config.disabled
-        wingman_config.record_key = basic_config.record_key
-        wingman_config.record_key_codes = basic_config.record_key_codes
-        wingman_config.sound = basic_config.sound
-        wingman_config.prompts = basic_config.prompts
+        This is a targeted save operation for skills that modify commands
+        (e.g., QuickCommands adding instant_activation phrases).
 
-        reload_config = (
-            wingman_config.record_joystick_button != basic_config.record_joystick_button
-            or wingman_config.record_mouse_button != basic_config.record_mouse_button
-            or wingman_file.name != wingman_config.name
-        )
-
-        wingman_config.record_joystick_button = basic_config.record_joystick_button
-        wingman_config.record_mouse_button = basic_config.record_mouse_button
-
-        wingman_config.features = basic_config.features
-        wingman_config.openai = basic_config.openai
-        wingman_config.mistral = basic_config.mistral
-        wingman_config.groq = basic_config.groq
-        wingman_config.cerebras = basic_config.cerebras
-        wingman_config.google = basic_config.google
-        wingman_config.openrouter = basic_config.openrouter
-        wingman_config.local_llm = basic_config.local_llm
-        wingman_config.edge_tts = basic_config.edge_tts
-        wingman_config.elevenlabs = basic_config.elevenlabs
-        wingman_config.azure = basic_config.azure
-        wingman_config.xvasynth = basic_config.xvasynth
-        wingman_config.hume = basic_config.hume
-        wingman_config.whispercpp = basic_config.whispercpp
-        wingman_config.fasterwhisper = basic_config.fasterwhisper
-        wingman_config.wingman_pro = basic_config.wingman_pro
-        wingman_config.perplexity = basic_config.perplexity
-        wingman_config.openai_compatible_tts = basic_config.openai_compatible_tts
-
-        updated = await wingman.update_config(config=wingman_config, validate=validate)
-
-        if not updated:
-            self.printr.toast_error(
-                f"New config for Wingman '{wingman_config.name}' is invalid."
-            )
+        Args:
+            wingman_name: Name of the wingman whose commands to save
+            silent: If True, don't show toast notification (default: True)
+        """
+        if not self.tower:
+            self.printr.toast_error("Cannot save commands: Tower not initialized.")
             return
 
-        # save the config file
-        self.config_manager.save_wingman_config(
-            config_dir=config_dir,
+        wingman = self.tower.get_wingman_by_name(wingman_name)
+        if not wingman:
+            self.printr.toast_error(f"Wingman '{wingman_name}' not found.")
+            return
+
+        # Get the wingman file info
+        wingman_file = None
+        for wf in self.config_manager.get_wingmen_configs(
+            self.config_manager.config_dir
+        ):
+            if wf.name == wingman_name:
+                wingman_file = wf
+                break
+
+        if not wingman_file:
+            self.printr.toast_error(f"Config file for '{wingman_name}' not found.")
+            return
+
+        # Use targeted save that only updates the commands field in YAML
+        # This avoids full config serialization and preserves other fields
+        self.config_manager.save_wingman_commands(
+            config_dir=self.config_manager.config_dir,
             wingman_file=wingman_file,
-            wingman_config=wingman_config,
+            commands=wingman.config.commands,
         )
 
-        if reload_config:
-            await self.load_config(config_dir=config_dir)
-
-        message = f"Wingman {wingman_config.name}'s basic config changed."
+        message = f"Commands saved for {wingman_name}."
         if not silent:
             self.printr.toast(message)
         else:
@@ -469,7 +1124,7 @@ class ConfigService:
         self,
         config: NestedConfig,
         silent: bool = False,
-        validate: bool = False,
+        skip_config_validation: bool = True,
     ):
         # save the defaults config file
         self.config_manager.default_config = config
@@ -502,7 +1157,7 @@ class ConfigService:
                         wingman_file=wingman_file,
                         wingman_config=wingman_config,
                         silent=silent,
-                        validate=validate,
+                        skip_config_validation=skip_config_validation,
                     )
 
                 else:
@@ -522,6 +1177,9 @@ class ConfigService:
 
     async def migrate_configs(self, system_manager: SystemManager):
         migration_service = ConfigMigrationService(
-            config_manager=self.config_manager, system_manager=system_manager
+            config_manager=self.config_manager,
+            system_manager=system_manager,
         )
         migration_service.migrate_to_latest()
+        # Reload defaults config after migration in case schema changed
+        self.config_manager.default_config = self.config_manager.load_defaults_config()

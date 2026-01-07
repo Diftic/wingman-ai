@@ -2,10 +2,12 @@ import os
 import shutil
 import math
 import copy
+from pathlib import Path
 from datetime import datetime, timedelta
 import requests
-from services.benchmark import Benchmark
 import truck_telemetry
+from rapidfuzz import process, fuzz
+
 from pyproj import Proj, transform
 import time
 from typing import TYPE_CHECKING
@@ -15,8 +17,7 @@ from api.interface import (
     WingmanInitializationError,
 )
 from api.enums import LogType
-from skills.skill_base import Skill
-from services.file import get_writable_dir
+from skills.skill_base import Skill, tool
 
 
 if TYPE_CHECKING:
@@ -30,7 +31,6 @@ class ATSTelemetry(Skill):
     ) -> None:
         self.loaded = False
         self.already_initialized_telemetry = False
-        self.use_metric_system = False
         self.telemetry_loop_cached_data = {}
         self.telemetry_loop_data_points = [
             "onJob",
@@ -77,11 +77,7 @@ class ATSTelemetry(Skill):
             "cargoMass",
         ]
         self.telemetry_loop_running = False
-        self.ats_install_directory = ""
-        self.ets_install_directory = ""
-        self.dispatcher_backstory = ""
-        self.autostart_dispatch_mode = False
-        
+
         # Define the ATS (American Truck Simulator) projection for use in converting in-game coordinates to real life
         self.ats_proj = Proj(
             proj="lcc",
@@ -121,71 +117,89 @@ class ATSTelemetry(Skill):
 
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
-        self.use_metric_system = self.retrieve_custom_property_value(
-            "use_metric_system", errors
-        )
-        self.ats_install_directory = self.retrieve_custom_property_value(
-            "ats_install_directory", errors
-        )
-        self.ets_install_directory = self.retrieve_custom_property_value(
-            "ets_install_directory", errors
-        )
-        self.dispatcher_backstory = self.retrieve_custom_property_value(
-            "dispatcher_backstory", errors
-        )
-        # Default back to wingman backstory
-        if (
-            self.dispatcher_backstory == ""
-            or self.dispatcher_backstory == " "
-            or not self.dispatcher_backstory
-        ):
-            self.dispatcher_backstory = self.wingman.config.prompts.backstory
-
-        self.autostart_dispatch_mode = self.retrieve_custom_property_value(
-            "autostart_dispatch_mode", errors
-        )
+        # Validate properties exist (don't cache values)
+        self.retrieve_custom_property_value("use_metric_system", errors)
+        self.retrieve_custom_property_value("ats_install_directory", errors)
+        self.retrieve_custom_property_value("ets_install_directory", errors)
+        self.retrieve_custom_property_value("dispatcher_backstory", errors)
+        self.retrieve_custom_property_value("autostart_dispatch_mode", errors)
         await self.check_and_install_telemetry_dlls()
         return errors
 
+    def _get_use_metric_system(self) -> bool:
+        """Retrieve fresh use_metric_system at runtime."""
+        errors: list[WingmanInitializationError] = []
+        return self.retrieve_custom_property_value("use_metric_system", errors) or False
+
+    def _get_ats_install_directory(self) -> str:
+        """Retrieve fresh ATS install directory at runtime."""
+        errors: list[WingmanInitializationError] = []
+        return (
+            self.retrieve_custom_property_value("ats_install_directory", errors) or ""
+        )
+
+    def _get_ets_install_directory(self) -> str:
+        """Retrieve fresh ETS install directory at runtime."""
+        errors: list[WingmanInitializationError] = []
+        return (
+            self.retrieve_custom_property_value("ets_install_directory", errors) or ""
+        )
+
+    def _get_dispatcher_backstory(self) -> str:
+        """Retrieve fresh dispatcher backstory at runtime."""
+        errors: list[WingmanInitializationError] = []
+        backstory = self.retrieve_custom_property_value("dispatcher_backstory", errors)
+        # Default back to wingman backstory
+        if not backstory or backstory.strip() == "":
+            return self.wingman.config.prompts.backstory
+        return backstory
+
+    def _get_autostart_dispatch_mode(self) -> bool:
+        """Retrieve fresh autostart_dispatch_mode at runtime."""
+        errors: list[WingmanInitializationError] = []
+        return (
+            self.retrieve_custom_property_value("autostart_dispatch_mode", errors)
+            or False
+        )
+
     # Try to find existing telemetry dlls, if not found, attempt to install
     async def check_and_install_telemetry_dlls(self):
-        skills_filepath = get_writable_dir("skills")
-        ats_telemetry_skill_filepath = os.path.join(skills_filepath, "ats_telemetry")
-        sdk_dll_filepath = os.path.join(
-            ats_telemetry_skill_filepath, "scs-telemetry.dll"
-        )
-        ats_plugins_dir = os.path.join(
-            self.ats_install_directory, "bin\\win_x64\\plugins"
-        )
-        ets_plugins_dir = os.path.join(
-            self.ets_install_directory, "bin\\win_x64\\plugins"
-        )
-        # Check and copy dll for ATS if applicable
-        if os.path.exists(self.ats_install_directory):
-            ats_dll_path = os.path.join(ats_plugins_dir, "scs-telemetry.dll")
-            if not os.path.exists(ats_dll_path):
-                try:
-                    if not os.path.exists(ats_plugins_dir):
-                        os.makedirs(ats_plugins_dir)
-                    shutil.copy2(sdk_dll_filepath, ats_plugins_dir)
-                except Exception:
-                    await self.printr.print_async(
-                        f"Could not install scs telemetry dll to {ats_plugins_dir}.",
-                        color=LogType.ERROR,
-                    )
-        # Check and copy dll for ETS if applicable
-        if os.path.exists(self.ets_install_directory):
-            ets_dll_path = os.path.join(ets_plugins_dir, "scs-telemetry.dll")
-            if not os.path.exists(ets_dll_path):
-                try:
-                    if not os.path.exists(ets_plugins_dir):
-                        os.makedirs(ets_plugins_dir)
-                    shutil.copy2(sdk_dll_filepath, ets_plugins_dir)
-                except Exception:
-                    await self.printr.print_async(
-                        f"Could not install scs telemetry dll to {ets_plugins_dir}.",
-                        color=LogType.ERROR,
-                    )
+        # The telemetry SDK DLL is shipped with this skill.
+        # - Dev: loaded from ./skills/ats_telemetry/scs-telemetry.dll
+        # - Release: loaded from _internal/skills/ats_telemetry/scs-telemetry.dll
+        sdk_dll_filepath = Path(__file__).resolve().parent / "scs-telemetry.dll"
+        if not sdk_dll_filepath.exists():
+            await self.printr.print_async(
+                f"Missing scs telemetry dll at '{sdk_dll_filepath}'. Cannot auto-install telemetry plugin.",
+                color=LogType.ERROR,
+            )
+            return
+
+        ats_install_dir = (self._get_ats_install_directory() or "").strip()
+        ets_install_dir = (self._get_ets_install_directory() or "").strip()
+
+        installs: list[tuple[str, str]] = [
+            (ats_install_dir, "ATS"),
+            (ets_install_dir, "ETS2"),
+        ]
+
+        for install_dir, label in installs:
+            if not install_dir or not os.path.exists(install_dir):
+                continue
+
+            plugins_dir = os.path.join(install_dir, "bin", "win_x64", "plugins")
+            target_dll_path = os.path.join(plugins_dir, "scs-telemetry.dll")
+            if os.path.exists(target_dll_path):
+                continue
+
+            try:
+                os.makedirs(plugins_dir, exist_ok=True)
+                shutil.copy2(str(sdk_dll_filepath), plugins_dir)
+            except OSError as exc:
+                await self.printr.print_async(
+                    f"Could not install scs telemetry dll to {label} plugins directory: {plugins_dir}. Error: {exc}",
+                    color=LogType.ERROR,
+                )
 
     # Start telemetry module connection with in-game telemetry SDK
     async def initialize_telemetry(self) -> bool:
@@ -296,15 +310,17 @@ class ATSTelemetry(Skill):
 
     # If telemetry data changed, get LLM to provide a verbal response to the user, without requiring the user to initiate a communication with the LLM
     async def initiate_llm_call_with_changed_data(self, changed_data):
+        use_metric = self._get_use_metric_system()
         units_phrase = "You are located in the US, so use US Customary Units, like feet, yards, miles, and pounds in your responses, and convert metric or imperial formats to these units.  All currency is in dollars."
-        if self.use_metric_system:
+        if use_metric:
             units_phrase = "Use the metric system like meters, kilometers, kilometers per hour, and kilograms in your responses."
+        backstory = self._get_dispatcher_backstory()
         user_content = f"{changed_data}"
         messages = [
             {
                 "role": "system",
                 "content": f"""
-                    {self.dispatcher_backstory}
+                    {backstory}
                     Acting in character at all times, react to the following changed information.
                     {units_phrase}
                 """,
@@ -333,172 +349,159 @@ class ATSTelemetry(Skill):
         self.threaded_execution(self.wingman.play_to_user, response, True)
         await self.wingman.add_assistant_message(response)
 
-    def get_tools(self) -> list[tuple[str, dict]]:
-        tools = [
-            (
-                "get_game_state",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_game_state",
-                        "description": "Retrieve the current game state variable from American Truck Simulator.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "variable": {
-                                    "type": "string",
-                                    "description": "The game state variable to retrieve (e.g., 'speed').",
-                                }
-                            },
-                            "required": ["variable"],
-                        },
-                    },
-                },
-            ),
-            (
-                "get_information_about_current_location",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_information_about_current_location",
-                        "description": "Used to provide more detailed information if the user asks a general question like 'where are we?', or 'what city are we in?'",
-                    },
-                },
-            ),
-            (
-                "start_or_activate_dispatch_telemetry_loop",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "start_or_activate_dispatch_telemetry_loop",
-                        "description": "Begin dispatch function, which will check telemetry at designated intervals.",
-                    },
-                },
-            ),
-            (
-                "end_or_stop_dispatch_telemetry_loop",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "end_or_stop_dispatch_telemetry_loop",
-                        "description": "End or stop dispatch function, to stop automatically checking telemetry at designated intervals.",
-                    },
-                },
-            ),
-        ]
-        return tools
+    @tool(
+        description="Retrieve telemetry from ATS/ETS2. Common variables: truckSpeed, speedLimit, gear, engineRpm, fuel*, cargo*, city*, job*, truckBrand, coordinates, damage/wear values, event flags (fined, tollgate, ferry). Tool returns error if variable doesn't exist."
+    )
+    async def get_game_state(self, variable: str) -> str:
+        """
+        Retrieve the current game state variable from American Truck Simulator.
 
-    async def execute_tool(
-        self, tool_name: str, parameters: dict[str, any], benchmark: Benchmark
-    ) -> tuple[str, str]:
-        function_response = ""
-        instant_response = ""
-
-        if tool_name in [
-            "get_game_state",
-            "start_or_activate_dispatch_telemetry_loop",
-            "end_or_stop_dispatch_telemetry_loop",
-            "get_information_about_current_location",
-        ]:
-            benchmark.start_snapshot(f"ATS Telemetry: {tool_name}")
-
+        Args:
+            variable: The game state variable to retrieve (e.g., 'speed').
+        """
+        if not self.already_initialized_telemetry:
+            self.already_initialized_telemetry = await self.initialize_telemetry()
             if not self.already_initialized_telemetry:
-                self.already_initialized_telemetry = await self.initialize_telemetry()
-                # If initialization of telemetry object fails because another instance is already running,
-                # try just checking getting the data as a fail safe; if still cannot get the data, trigger error
-                if not self.already_initialized_telemetry:
-                    try:
-                        _ = truck_telemetry.get_data()
-                        self.already_initialized_telemetry = True
-                    except Exception:
-                        function_response = "Error trying to access truck telemetry data. It appears there is a problem with the module. Check to see if the game is running, and that you have installed the SDK in the proper location."
-                        return function_response, instant_response
+                try:
+                    _ = truck_telemetry.get_data()
+                    self.already_initialized_telemetry = True
+                except Exception:
+                    return "Error trying to access truck telemetry data. It appears there is a problem with the module. Check to see if the game is running, and that you have installed the SDK in the proper location."
 
-                if self.settings.debug_mode:
-                    message = f"ATS Telemetry: executing tool '{tool_name}'"
-                    if parameters:
-                        message += f" with params: {parameters}"
-                    await self.printr.print_async(text=message, color=LogType.INFO)
+        data = truck_telemetry.get_data()
+        filtered_data = await self.filter_data(data)
+        if self.settings.debug_mode:
+            await self.printr.print_async(
+                f"Received telemetry data: {filtered_data}",
+                color=LogType.INFO,
+            )
+        # Try exact match first
+        if variable in filtered_data:
+            value = filtered_data[variable]
+            try:
+                string_value = str(value)
+            except Exception:
+                string_value = "value could not be found."
 
-            if tool_name == "get_game_state":
-                data = truck_telemetry.get_data()
-                filtered_data = await self.filter_data(data)
-                if self.settings.debug_mode:
-                    await self.printr.print_async(
-                        f"Received telemetry data: {filtered_data}",
-                        color=LogType.INFO,
-                    )
-                variable = parameters.get("variable")
-                if variable in filtered_data:
-                    value = filtered_data[variable]
-                    try:
-                        string_value = str(value)
-                    except Exception:
-                        string_value = "value could not be found."
-                    function_response = (
-                        f"The current value of '{variable}' is {string_value}."
-                    )
-                    if self.settings.debug_mode:
-                        await self.printr.print_async(
-                            f"Found variable result in telemetry for {variable}, {string_value}",
-                            color=LogType.INFO,
-                        )
-                else:
-                    function_response = f"Variable '{variable}' not found."
-                    if self.settings.debug_mode:
-                        await self.printr.print_async(
-                            f"Could not locate variable result in telemetry for {variable}.",
-                            color=LogType.INFO,
-                        )
-
-            elif tool_name == "start_or_activate_dispatch_telemetry_loop":
-                if self.telemetry_loop_running:
-                    function_response = "Dispatch communications already open."
-                    if self.settings.debug_mode:
-                        await self.printr.print_async(
-                            "Attempted to start dispatch communications loop but loop is already running",
-                            color=LogType.INFO,
-                        )
-                    return function_response, instant_response
-                if not self.telemetry_loop_running:
-                    await self.initialize_telemetry_cache_loop(10)
-                function_response = "Opened dispatch communications."
-
-            elif tool_name == "end_or_stop_dispatch_telemetry_loop":
-                await self.stop_telemetry_loop()
-                function_response = "Closed dispatch communications."
-
-            elif tool_name == "get_information_about_current_location":
-                data = truck_telemetry.get_data()
-                # Pull x, y coordinates from truck sim, note that there are x, y, z, so here z pertains to 2d y, and y pertains to altitude
-                x = data["coordinateX"]
-                y = data["coordinateZ"]
-                # Check if we're in ATS or ETS
-                is_ets2 = data["game"] == 1
-                # Convert to world latitude and longitude
-                if is_ets2:
-                    longitude, latitude = await self.from_ets2_coords_to_wgs84(
-                        data["coordinateX"], data["coordinateZ"]
-                    )                    
-                else:
-                    longitude, latitude = await self.from_ats_coords_to_wgs84(
-                        data["coordinateX"], data["coordinateZ"]
-                    )
-                if self.settings.debug_mode:
-                    await self.printr.print_async(
-                        f"Executing get_information_about_current_location function (game is ets2: {is_ets2}) with coordinateX as {x} and coordinateZ as {y}, latitude returned was {latitude}, longitude returned was {longitude}.",
-                        color=LogType.INFO,
-                    )
-                place_info = await self.convert_lat_long_data_into_place_data(
-                    latitude, longitude
+            if self.settings.debug_mode:
+                await self.printr.print_async(
+                    f"Found variable result in telemetry for {variable}, {string_value}",
+                    color=LogType.INFO,
                 )
-                if place_info:
-                    function_response = f"Information regarding the approximate location we are near: {place_info}"
-                else:
-                    function_response = "Unable to get more detailed information regarding the place based on the current truck coordinates."
+            return f"The current value of '{variable}' is {string_value}."
+        else:
+            if self.settings.debug_mode:
+                await self.printr.print_async(
+                    f"Could not locate variable result in telemetry for {variable}.",
+                    color=LogType.INFO,
+                )
+            # Try fuzzy match as fallback before failing
+            MATCH_THRESHOLD = 60 
+            choices = list(filtered_data.keys())
+            
+            # process.extract returns a list of tuples: [(string, score, index), ...]
+            matches = process.extract(
+                variable, 
+                choices, 
+                scorer=fuzz.WRatio, 
+                limit=3, 
+                score_cutoff=MATCH_THRESHOLD
+            )
 
-            benchmark.finish_snapshot()
-        return function_response, instant_response
+            if matches:
+                results_list = []
+                for match_str, score, _ in matches:
+                    val = filtered_data.get(match_str, "N/A")
+                    results_list.append(f"'{match_str}' (Value: {val})")
+                
+                # Format the output for the AI
+                matches_formatted = ", ".join(results_list)
+                
+                if self.settings.debug_mode:
+                    await self.printr.print_async(
+                        f"Fuzzy matches for '{variable}': {matches_formatted}",
+                        color=LogType.INFO,
+                    )
+
+                return (f"Exact variable '{variable}' not found. "
+                        f"Found the following close matches instead {matches_formatted}")
+            return f"Variable '{variable}' not found."
+
+    @tool(
+        description="Get detailed information about current truck location. Use when driver asks 'where are we?', 'what city is this?', or needs navigation context."
+    )
+    async def get_information_about_current_location(self) -> str:
+        """Used to provide more detailed information if the user asks a general question like 'where are we?'."""
+        if not self.already_initialized_telemetry:
+            self.already_initialized_telemetry = await self.initialize_telemetry()
+            if not self.already_initialized_telemetry:
+                try:
+                    _ = truck_telemetry.get_data()
+                    self.already_initialized_telemetry = True
+                except Exception:
+                    return "Error trying to access truck telemetry data. It appears there is a problem with the module. Check to see if the game is running, and that you have installed the SDK in the proper location."
+
+        data = truck_telemetry.get_data()
+        # Pull x, y coordinates from truck sim, note that there are x, y, z, so here z pertains to 2d y, and y pertains to altitude
+        x = data["coordinateX"]
+        y = data["coordinateZ"]
+        # Check if we're in ATS or ETS
+        is_ets2 = data["game"] == 1
+        # Convert to world latitude and longitude
+        if is_ets2:
+            longitude, latitude = await self.from_ets2_coords_to_wgs84(
+                data["coordinateX"], data["coordinateZ"]
+            )
+        else:
+            longitude, latitude = await self.from_ats_coords_to_wgs84(
+                data["coordinateX"], data["coordinateZ"]
+            )
+        if self.settings.debug_mode:
+            await self.printr.print_async(
+                f"Executing get_information_about_current_location function (game is ets2: {is_ets2}) with coordinateX as {x} and coordinateZ as {y}, latitude returned was {latitude}, longitude returned was {longitude}.",
+                color=LogType.INFO,
+            )
+        place_info = await self.convert_lat_long_data_into_place_data(
+            latitude, longitude
+        )
+        if place_info:
+            return f"Information regarding the approximate location we are near: {place_info}"
+        else:
+            return "Unable to get more detailed information regarding the place based on the current truck coordinates."
+
+    @tool(
+        description="Begin dispatch mode (telemetry monitoring loop). Provides ongoing commentary about trucking activities, job progress, and route information. Use for immersive AI dispatcher experience."
+    )
+    async def start_or_activate_dispatch_telemetry_loop(self) -> str:
+        """Begin dispatch function, which will check telemetry at designated intervals."""
+        if not self.already_initialized_telemetry:
+            self.already_initialized_telemetry = await self.initialize_telemetry()
+            if not self.already_initialized_telemetry:
+                try:
+                    _ = truck_telemetry.get_data()
+                    self.already_initialized_telemetry = True
+                except Exception:
+                    return "Error trying to access truck telemetry data. It appears there is a problem with the module. Check to see if the game is running, and that you have installed the SDK in the proper location."
+
+        if self.telemetry_loop_running:
+            if self.settings.debug_mode:
+                await self.printr.print_async(
+                    "Attempted to start dispatch communications loop but loop is already running",
+                    color=LogType.INFO,
+                )
+            return "Dispatch communications already open."
+
+        if not self.telemetry_loop_running:
+            await self.initialize_telemetry_cache_loop(10)
+        return "Opened dispatch communications."
+
+    @tool(
+        description="End dispatch mode (stop telemetry monitoring loop). Stops the ongoing commentary and monitoring."
+    )
+    async def end_or_stop_dispatch_telemetry_loop(self) -> str:
+        """End or stop dispatch function."""
+        await self.stop_telemetry_loop()
+        return "Closed dispatch communications."
 
     # Function to autostart dispatch mode
     async def autostart_dispatcher_mode(self):
@@ -519,12 +522,14 @@ class ATSTelemetry(Skill):
 
     # Autostart dispatch mode if option turned on in config
     async def prepare(self) -> None:
+        await super().prepare()
         self.loaded = True
-        if self.autostart_dispatch_mode:
+        if self._get_autostart_dispatch_mode():
             self.threaded_execution(self.autostart_dispatcher_mode)
 
     # Unload telemetry module and stop any ongoing loop when config / program unloads
     async def unload(self) -> None:
+        await super().unload()
         self.loaded = False
         await self.stop_telemetry_loop()
         truck_telemetry.deinit()
@@ -543,7 +548,8 @@ class ATSTelemetry(Skill):
             truck_speed_mph = data["speed"] * 2.23694
             truck_speed_kph = data["speed"] * 3.6
 
-            if self.use_metric_system:
+            use_metric = self._get_use_metric_system()
+            if use_metric:
                 enhanced_data["truckSpeed"] = (
                     str(abs(round(truck_speed_kph))) + " kilometers per hour"
                 )
@@ -609,7 +615,7 @@ class ATSTelemetry(Skill):
             days_hours_and_minutes = await self.convert_minutes_to_days_hours_minutes(
                 data["time_abs"]
             )
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["gameTime"] = await self.convert_to_clock_time(
                     days_hours_and_minutes, 24
                 )
@@ -623,7 +629,7 @@ class ATSTelemetry(Skill):
                     data["jobStartingTime"]
                 )
             )
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["jobStartingTime"] = await self.convert_to_clock_time(
                     job_start_days_hours_and_minutes, 24
                 )
@@ -637,7 +643,7 @@ class ATSTelemetry(Skill):
                     data["jobFinishedTime"]
                 )
             )
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["jobFinishedTime"] = await self.convert_to_clock_time(
                     job_finish_days_hours_and_minutes, 24
                 )
@@ -706,7 +712,7 @@ class ATSTelemetry(Skill):
             enhanced_data["cargoMassInTons"] = (
                 str(tons) + " t" if data["trailer"][0]["attached"] else ""
             )
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["cargoMass"] = (
                     str(round(data["cargoMass"])) + " kg"
                     if data["trailer"][0]["attached"]
@@ -723,7 +729,7 @@ class ATSTelemetry(Skill):
             route_distance_km = data["routeDistance"] / 1000
             route_distance_miles = route_distance_km * 0.621371
 
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["routeDistance"] = (
                     str(math.floor(route_distance_km)) + " kilometers"
                 )
@@ -776,7 +782,7 @@ class ATSTelemetry(Skill):
             )
 
             # Convert temperatures
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["brakeTemperature"] = (
                     str(round(data["brakeTemperature"])) + " degrees Celsius"
                 )
@@ -801,7 +807,7 @@ class ATSTelemetry(Skill):
                 )
 
             # Convert volumes
-            if self.use_metric_system:
+            if use_metric:
                 enhanced_data["fuelTankSize"] = (
                     "Fuel tank can hold " + str(round(data["fuelCapacity"])) + " liters"
                 )
@@ -1016,7 +1022,8 @@ class ATSTelemetry(Skill):
         )  # If external in job type means world of trucks contract
 
     async def get_currency(self, money):
-        currency_code = "EUR" if self.use_metric_system else "USD"
+        use_metric = self._get_use_metric_system()
+        currency_code = "EUR" if use_metric else "USD"
 
         if currency_code == "EUR":
             return f"€{money}"

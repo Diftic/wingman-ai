@@ -7,10 +7,10 @@ from random import randint
 from api.interface import AudioFile, AudioFileConfig
 from services.printr import Printr
 from services.audio_player import AudioPlayer
-from services.file import get_writable_dir
+from services.file import get_audio_library_dir
 
 printr = Printr()
-DIR_AUDIO_LIBRARY = "audio_library"
+
 
 class AudioLibrary:
     def __init__(
@@ -25,10 +25,12 @@ class AudioLibrary:
         )
 
         # Internal settings
-        self.audio_library_path = get_writable_dir(DIR_AUDIO_LIBRARY)
+        self.audio_library_path = get_audio_library_dir()
         self.current_playbacks = {}
 
-    async def handle_action(self, audio_file: AudioFile | AudioFileConfig, volume_modifier: float = 1.0):
+    async def handle_action(
+        self, audio_file: AudioFile | AudioFileConfig, volume_modifier: float = 1.0
+    ):
         audio_config = self.__get_audio_file_config(audio_file)
 
         if audio_config.stop:
@@ -38,16 +40,21 @@ class AudioLibrary:
             if audio_config.wait:
                 await self.start_playback(audio_config, volume_modifier)
             else:
-                self.__threaded_execution(self.start_playback, audio_config, volume_modifier)
+                self.__threaded_execution(
+                    self.start_playback, audio_config, volume_modifier
+                )
 
-    async def audio_library_toggle_play(self, audio_file: AudioFile | AudioFileConfig, volume_modifier: float = 1.0):
+    async def audio_library_toggle_play(
+        self, audio_file: AudioFile | AudioFileConfig, volume_modifier: float = 1.0
+    ):
         audio_config = self.__get_audio_file_config(audio_file)
 
         # Check if any of the configured files are currently playing
         current_playbacks = [
             file
             for file in audio_config.files
-            if self.get_playback_status(file)[1] and self.get_playback_status(file)[0]  # has player & is playing
+            if self.get_playback_status(file)[1]
+            and self.get_playback_status(file)[0]  # has player & is playing
         ]
 
         if current_playbacks:
@@ -70,7 +77,8 @@ class AudioLibrary:
             current_playbacks = [
                 True
                 for file in audio_file.files
-                if self.get_playback_status(file)[1] and self.get_playback_status(file)[0] # audio player & playing
+                if self.get_playback_status(file)[1]
+                and self.get_playback_status(file)[0]  # audio player & playing
             ]
             if current_playbacks:
                 # still playing, nothing to do
@@ -103,7 +111,9 @@ class AudioLibrary:
 
         selected_file = self.__get_random_audio_file_from_config(audio_file)
         # skip if file does not exist
-        if not path.exists(path.join(self.audio_library_path, selected_file.path, selected_file.name)):
+        if not path.exists(
+            path.join(self.audio_library_path, selected_file.path, selected_file.name)
+        ):
             printr.toast_error(
                 f"Skipping playback of {selected_file.name} as it does not exist (anymore) in the audio library."
             )
@@ -145,7 +155,7 @@ class AudioLibrary:
             while True:
                 time.sleep(0.1)
                 status = self.get_playback_status(selected_file)
-                if not status[1]: # no audio player
+                if not status[1]:  # no audio player
                     break
 
     async def stop_playback(
@@ -187,9 +197,9 @@ class AudioLibrary:
         if playback_key in self.current_playbacks:
             audio_player = self.current_playbacks[playback_key][0]
             return [
-                audio_player.is_playing, # Is playing
-                audio_player, # AudioPlayer
-                self.current_playbacks[playback_key][1], # Current Volume list
+                audio_player.is_playing,  # Is playing
+                audio_player,  # AudioPlayer
+                self.current_playbacks[playback_key][1],  # Current Volume list
             ]
         return [False, None, None]
 
@@ -198,8 +208,7 @@ class AudioLibrary:
     ):
         audio_file = self.__get_audio_file_config(audio_file)
         playback_keys = [
-            self.__get_playback_key(current_file)
-            for current_file in audio_file.files
+            self.__get_playback_key(current_file) for current_file in audio_file.files
         ]
 
         for playback_key in playback_keys:

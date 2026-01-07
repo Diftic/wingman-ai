@@ -1,3 +1,4 @@
+import asyncio
 from api.enums import LogSource, LogType, WingmanInitializationErrorType
 from api.interface import (
     Config,
@@ -51,9 +52,13 @@ class Tower:
         if not self.config.wingmen:
             return errors
 
+        # Prepare wingman instantiation tasks for parallel execution
+        tasks = []
+        disabled_wingmen = []
+
         for wingman_name, wingman_config in self.config.wingmen.items():
             if wingman_config.disabled is True:
-                self.disabled_wingmen.append(wingman_config)
+                disabled_wingmen.append(wingman_config)
                 printr.print(
                     f"Skipped instantiating disabled wingman {wingman_config.name}.",
                     color=LogType.WARNING,
@@ -63,12 +68,21 @@ class Tower:
                 )
                 continue
 
-            _wingman = await self.__instantiate_wingman(
+            # Create task for this wingman
+            task = self.__instantiate_wingman(
                 wingman_name=wingman_name,
                 wingman_config=wingman_config,
                 settings=settings,
                 errors=errors,
             )
+            tasks.append(task)
+
+        # Instantiate all wingmen in parallel
+        if tasks:
+            await asyncio.gather(*tasks)
+
+        # Add disabled wingmen to the list
+        self.disabled_wingmen.extend(disabled_wingmen)
 
         printr.print(
             f"Instantiated wingmen: {', '.join([w.name for w in self.wingmen])}.",
@@ -141,9 +155,37 @@ class Tower:
             errors.extend(validation_errors)
 
             # init and validate skills
+            # Note: skill errors are non-fatal but should be shown to user
             skill_errors = await wingman.init_skills()
+            errors.extend(skill_errors)  # Add to errors for client notification
 
-            if not errors or len(errors) == 0:
+            # init MCP servers (if the wingman supports them)
+            # Note: MCP errors are non-fatal but should be shown to user
+            if hasattr(wingman, "init_mcps"):
+                try:
+                    mcp_errors = await wingman.init_mcps()
+                    errors.extend(mcp_errors)  # Add to errors for client notification
+                except Exception as e:
+                    printr.print(
+                        f"Error initializing MCP servers for {wingman_name}: {e}",
+                        color=LogType.ERROR,
+                        server_only=True,
+                    )
+
+            # Check for fatal errors that should prevent wingman loading
+            # MCP, skill, and missing secret errors are non-fatal
+            fatal_errors = [
+                e
+                for e in errors
+                if e.error_type
+                not in [
+                    WingmanInitializationErrorType.MCP_CONNECTION_FAILED,
+                    WingmanInitializationErrorType.MISSING_SECRET,
+                    WingmanInitializationErrorType.SKILL_INITIALIZATION_FAILED,
+                ]
+            ]
+
+            if not fatal_errors:
                 await wingman.prepare()
                 self.wingmen.append(wingman)
 
@@ -193,7 +235,7 @@ class Tower:
                 self.disabled_wingmen.remove(wingman_config)
                 printr.print(
                     f"Enabled wingman {wingman_name}.",
-                    color=LogType.INFO,
+                    color=LogType.SYSTEM,
                     server_only=True,
                     source_name=self.log_source_name,
                     source=LogSource.SYSTEM,
@@ -209,7 +251,7 @@ class Tower:
                 self.wingmen.remove(wingman)
                 printr.print(
                     f"Disabled wingman {wingman_name}.",
-                    color=LogType.INFO,
+                    color=LogType.SYSTEM,
                     server_only=True,
                     source_name=self.log_source_name,
                     source=LogSource.SYSTEM,
@@ -231,7 +273,7 @@ class Tower:
                         )
                         printr.print(
                             f"Saved wingman {wingman_name}.",
-                            color=LogType.INFO,
+                            color=LogType.SYSTEM,
                             server_only=True,
                             source_name=self.log_source_name,
                             source=LogSource.SYSTEM,
@@ -240,6 +282,40 @@ class Tower:
 
         printr.print(
             f"Unable to save wingman {wingman_name}.",
+            color=LogType.WARNING,
+            server_only=True,
+            source_name=self.log_source_name,
+            source=LogSource.SYSTEM,
+        )
+        return False
+
+    def save_wingman_commands(self, wingman_name: str):
+        """Save only the commands section of a wingman config.
+
+        Uses partial YAML update to avoid full config serialization.
+        """
+        for wingman in self.wingmen:
+            if wingman.name == wingman_name:
+                for wingman_file in self.config_manager.get_wingmen_configs(
+                    self.config_dir
+                ):
+                    if wingman_file.name == wingman_name:
+                        self.config_manager.save_wingman_commands(
+                            config_dir=self.config_dir,
+                            wingman_file=wingman_file,
+                            commands=wingman.config.commands,
+                        )
+                        printr.print(
+                            f"Saved commands for {wingman_name}.",
+                            color=LogType.SYSTEM,
+                            server_only=True,
+                            source_name=self.log_source_name,
+                            source=LogSource.SYSTEM,
+                        )
+                        return True
+
+        printr.print(
+            f"Unable to save commands for {wingman_name}.",
             color=LogType.WARNING,
             server_only=True,
             source_name=self.log_source_name,

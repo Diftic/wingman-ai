@@ -1,31 +1,77 @@
 aiofiles==24.1.0
-azure-cognitiveservices-speech==1.42.0
-edge-tts==7.0.2
+azure-cognitiveservices-speech==1.47.0
+backports-tarfile>=1.0.0
+edge-tts==7.2.7
 elevenlabslib==0.32.1
 fastapi==0.115.7
-faster_whisper==1.1.1
-google-genai==1.19.0
+faster_whisper==1.2.1
+google-genai==1.56.0
+
+# setuptools vendored dependencies - required for PyInstaller bundling
+jaraco-context>=6.0.0
+jaraco-functools>=4.0.0
+
+# NVIDIA CUDA libraries for GPU-accelerated FasterWhisper (ctranslate2)
+# These are bundled with PyInstaller to provide zero-config GPU support
+# IMPORTANT: Must stay on CUDA 12.x (12.4-12.8 tested). CUDA 13.x is NOT compatible with ctranslate2.
+nvidia-cublas-cu12>=12.4.2,<13.0
+nvidia-cuda-runtime-cu12>=12.4.99,<13.0
+nvidia-cudnn-cu12>=9.1.0,<10.0
+nvidia-cuda-nvrtc-cu12>=12.4.99,<13.0
 httptools==0.6.4
-hume==0.8.5
-markdown==3.7
+hume==0.13.5
+markdown==3.10
+mcp==1.22.0
 numpy==1.26.4
-openai==1.60.2
+openai==2.14.0
 packaging==24.2
-pedalboard==0.9.17
+pedalboard==0.9.19
 platformdirs==4.3.6
 pyaudio==0.2.14
-pydantic==2.10.6
+pydantic==2.11.4
 pydirectinput-rgx==2.1.2
-pyinstaller==6.11.1
+pyinstaller==6.17.0
 pygame==2.6.1
 python-multipart==0.0.20
+rapidfuzz==3.10.1
 PyYAML==6.0.2
 requests==2.32.3
 scipy==1.15.1
 setuptools==75.8.0
 show-in-file-manager==1.1.5
-sounddevice==0.5.1
+sounddevice==0.5.3
 soundfile==0.13.1
-SpeechRecognition==3.14.3
+SpeechRecognition==3.14.4
 typing_extensions==4.12.2
 uvicorn==0.34.0
+
+# =============================================================================
+# SKILL DEPENDENCIES
+# These are requirements from built-in skills. TODO: Refactor skills to reduce deps.
+# =============================================================================
+
+# --- api_request skill ---
+aiohttp>=3.11.12
+
+# --- vision_ai / auto_screenshot skills ---
+mss>=10.0.0
+pillow>=11.1.0
+PyGetWindow>=0.0.9
+PyRect>=0.2.0
+
+# --- spotify skill ---
+spotipy>=2.25.0
+
+# --- file_manager skill ---
+pdfminer.six>=20240706
+cryptography>=43.0.1
+
+# --- control_windows skill ---
+clip-util>=0.1.27
+
+# --- msfs2020_control skill ---
+SimConnect>=0.4.26
+
+# --- ats_telemetry skill ---
+truck-telemetry>=0.0.3
+pyproj>=3.6.1

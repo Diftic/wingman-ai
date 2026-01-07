@@ -4,9 +4,7 @@ import requests
 from typing import TYPE_CHECKING
 from api.enums import LogSource, LogType
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
-from services.benchmark import Benchmark
-from skills.skill_base import Skill
-from services.file import get_writable_dir
+from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
     from wingmen.open_ai_wingman import OpenAiWingman
@@ -21,41 +19,37 @@ class ImageGeneration(Skill):
         wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
-        self.image_path = get_writable_dir(
-            path.join("skills", "image_generation", "generated_images")
-        )
+        self.image_path = self.get_generated_files_dir()
 
     async def validate(self) -> list[WingmanInitializationError]:
         errors = await super().validate()
 
-        self.save_images = self.retrieve_custom_property_value("save_images", errors)
+        self.retrieve_custom_property_value("save_images", errors)
 
         return errors
 
-    async def execute_tool(
-        self, tool_name: str, parameters: dict[str, any], benchmark: Benchmark
-    ) -> tuple[str, str]:
-        instant_response = ""
-        function_response = "Unable to generate an image. Please try another provider."
+    def _get_save_images(self) -> bool:
+        """Get save_images property value just-in-time."""
+        errors = []
+        return self.retrieve_custom_property_value("save_images", errors)
 
-        if tool_name == "generate_image":
-            benchmark.start_snapshot(f"Image Generation: {tool_name}")
+    @tool(
+        name="generate_image",
+        description="""Generates an image using DALL-E 3 based on a text description.
 
-            if self.settings.debug_mode:
-                message = f"Image Generation: executing tool '{tool_name}'"
-                if parameters:
-                    message += f" with params: {parameters}"
-                await self.printr.print_async(text=message, color=LogType.INFO)
+        WHEN TO USE:
+        - User requests image creation: 'Generate an image of...', 'Create a picture of...'
+        - User wants visual content created from a description
+        - Any request for AI-generated artwork or illustrations
 
-            prompt = parameters["prompt"]
-            await self.generate_image(prompt)
-
-            function_response = "Here is an image based on your prompt."
-            benchmark.finish_snapshot()
-
-        return function_response, instant_response
-
+        Produces high-quality, detailed images matching user specifications.""",
+        wait_response=True,
+    )
     async def generate_image(self, prompt: str) -> str:
+        """
+        Args:
+            prompt: The image generation prompt describing what to create.
+        """
         if self.settings.debug_mode:
             await self.printr.print_async(
                 f"Generate image with prompt: {prompt}.", color=LogType.INFO
@@ -70,10 +64,13 @@ class ImageGeneration(Skill):
             skill_name=self.name,
             additional_data={"image_url": image},
         )
+
+        function_response = "Unable to generate an image. Please try another provider."
+
         if image:
             function_response = "Here is an image based on your prompt."
 
-            if self.save_images:
+            if self._get_save_images():
                 image_path = path.join(
                     self.image_path,
                     f"{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_{prompt[:40]}.png",
@@ -93,28 +90,4 @@ class ImageGeneration(Skill):
                             color=LogType.INFO,
                         )
 
-    async def is_waiting_response_needed(self, tool_name: str) -> bool:
-        return True
-
-    def get_tools(self) -> list[tuple[str, dict]]:
-        tools = [
-            (
-                "generate_image",
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "generate_image",
-                        "description": "Generate an image based on the users prompt.",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "prompt": {"type": "string"},
-                            },
-                            "required": ["prompt"],
-                        },
-                    },
-                },
-            ),
-        ]
-
-        return tools
+        return function_response

@@ -4,6 +4,7 @@ import json
 from os import makedirs, path, remove, walk
 import copy
 import shutil
+import re
 from typing import Optional, Tuple
 from pydantic import BaseModel, ValidationError
 import yaml
@@ -11,13 +12,14 @@ from api.enums import LogSource, LogType, enum_representer
 from api.interface import (
     Config,
     ConfigDirInfo,
+    McpConfig,
     NestedConfig,
     NewWingmanTemplate,
     SettingsConfig,
     WingmanConfig,
     WingmanConfigFileInfo,
 )
-from services.file import get_writable_dir
+from services.file import get_writable_dir, get_custom_skills_dir
 from services.printr import Printr
 
 TEMPLATES_DIR = "templates"
@@ -26,12 +28,16 @@ SKILLS_DIR = "skills"
 
 SETTINGS_CONFIG_FILE = "settings.yaml"
 DEFAULT_CONFIG_FILE = "defaults.yaml"
+MCP_CONFIG_FILE = "mcp.yaml"
 SECRETS_FILE = "secrets.yaml"
 DEFAULT_WINGMAN_AVATAR = "default-wingman-avatar.png"
 DEFAULT_SKILLS_CONFIG = "default_config.yaml"
 
 DELETED_PREFIX = "."
 DEFAULT_PREFIX = "_"
+
+
+_WINGMAN_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 -]*$")
 
 
 class ConfigManager:
@@ -47,9 +53,13 @@ class ConfigManager:
 
         self.settings_config_path = path.join(self.config_dir, SETTINGS_CONFIG_FILE)
         self.default_config_path = path.join(self.config_dir, DEFAULT_CONFIG_FILE)
+        self.mcp_config_path = path.join(self.config_dir, MCP_CONFIG_FILE)
         self.create_settings_config()
         self.settings_config = self.load_settings_config()
-        self.default_config = self.load_defaults_config()
+        # Load defaults silently - migration may need to run first to fix validation errors
+        self.default_config = self.load_defaults_config(silent_on_error=True)
+        # Load MCP config silently - migration may need to run first
+        self.mcp_config = self.load_mcp_config(silent_on_error=True)
 
     def find_default_config(self) -> ConfigDirInfo:
         """Find the (first) default config (name starts with "_") found or another normal config as fallback."""
@@ -122,8 +132,24 @@ class ConfigManager:
         )
 
     def copy_templates(self, force: bool = False):
+        """Copy templates to the user's config directory.
+
+        Note: Skills are NO LONGER copied from templates. Built-in skills are now
+        loaded directly from the bundled location (_internal/skills/ in release).
+        Custom skills go in APPDATA/WingmanAI/custom_skills/ (not versioned).
+
+        This method now only copies config templates (configs/, migration/*/configs/).
+        Skills directories are skipped entirely.
+        """
         for root, dirs, files in walk(self.templates_dir):
             relative_path = path.relpath(root, self.templates_dir)
+            path_parts = relative_path.split(path.sep)
+
+            # Skip ALL skills directories - both top-level and within migration folders
+            # e.g., "skills/...", "migration/1_8_0/skills/...", etc.
+            if "skills" in path_parts:
+                continue
+
             if relative_path != ".":
                 config_dir_name = (
                     relative_path.replace(DELETED_PREFIX, "", 1)
@@ -132,8 +158,8 @@ class ConfigManager:
                     .replace("/", path.sep)
                 )
                 config_dir = self.get_config_dir(config_dir_name)
-                if not force and config_dir:
-                    # skip logically deleted and default (renamed) config dirs
+                if not force and config_dir and config_dir.is_deleted:
+                    # skip logically deleted config dirs
                     continue
 
             # Create the same relative path in the target directory
@@ -145,7 +171,6 @@ class ConfigManager:
                 makedirs(target_path)
 
             for filename in files:
-                # yaml files
                 if filename == ".DS_Store":
                     continue
 
@@ -268,7 +293,37 @@ class ConfigManager:
         return base64_data_uri
 
     def get_new_wingman_template(self):
+        from services.module_manager import ModuleManager
+
         parsed_config = self.read_default_config()
+
+        # Get discoverable_mcps from servers that are discoverable by default in mcp.yaml
+        discoverable_mcps = []
+        mcp_config = self.mcp_config
+        if mcp_config and mcp_config.servers:
+            discoverable_mcps = [
+                server.name
+                for server in mcp_config.servers
+                if server.discoverable_by_default
+            ]
+
+        # Get discoverable_skills from skills where discoverable_by_default is True
+        discoverable_skills = []
+        try:
+            all_skills = ModuleManager.read_available_skills()
+            for skill in all_skills:
+                # Check if skill has discoverable_by_default set to True (default)
+                if skill.config.discoverable_by_default is not False:
+                    discoverable_skills.append(skill.name)
+        except Exception as e:
+            self.printr.print(
+                f"Could not read skills for discoverable_skills: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
         wingman_config = {
             "name": "",
             "description": "",
@@ -277,6 +332,8 @@ class ConfigManager:
             "commands": [],
             "skills": [],
             "prompts": {"backstory": ""},
+            "discoverable_mcps": discoverable_mcps,
+            "discoverable_skills": discoverable_skills,
         }
         validated_config = self.merge_configs(parsed_config, wingman_config)
         return NewWingmanTemplate(
@@ -508,6 +565,156 @@ class ConfigManager:
                     wingmen.append(wingman_file)
         return wingmen
 
+    def _validate_wingman_name(self, name: str) -> str:
+        """Validate Wingman name using the same constraints as the client.
+
+        Client pattern: ^[a-zA-Z0-9][a-zA-Z0-9 -]*$
+        """
+
+        if name is None:
+            raise ValueError("Wingman name is required.")
+
+        cleaned = name.strip()
+        if not cleaned:
+            raise ValueError("Wingman name is required.")
+
+        if not _WINGMAN_NAME_PATTERN.fullmatch(cleaned):
+            raise ValueError(
+                "Invalid Wingman name. Use letters, numbers, spaces, and '-' only; must start with a letter or number."
+            )
+
+        return cleaned
+
+    def _wingman_name_exists_in_config_dir(
+        self, config_dir: ConfigDirInfo, name: str
+    ) -> bool:
+        """Check whether a wingman name already exists in the target context.
+
+        Treats case-insensitive collisions as existing (important on macOS/Windows).
+        Also treats logically-deleted '.Name.yaml' as existing.
+        """
+
+        target_path = path.join(self.config_dir, config_dir.directory)
+        wanted = name.casefold()
+
+        for _, _, files in walk(target_path):
+            for filename in files:
+                if not filename.endswith(".yaml"):
+                    continue
+
+                base_file_name = filename.replace(".yaml", "")
+                if base_file_name.startswith(DELETED_PREFIX):
+                    base_file_name = base_file_name.replace(DELETED_PREFIX, "", 1)
+                if base_file_name.casefold() == wanted:
+                    return True
+
+        return False
+
+    def duplicate_wingman_config(
+        self,
+        source_config_dir: ConfigDirInfo,
+        source_wingman_file: WingmanConfigFileInfo,
+        target_config_dir: ConfigDirInfo,
+        new_name: str,
+    ) -> WingmanConfigFileInfo:
+        """Duplicate an existing Wingman configuration into another context.
+
+        Copies all settings from the source Wingman (via merged/validated WingmanConfig),
+        but writes them under a new filename and sets the internal 'name' field to match.
+        Also copies the avatar PNG if present.
+        """
+
+        if source_wingman_file.is_deleted or source_wingman_file.file.startswith(
+            DELETED_PREFIX
+        ):
+            raise ValueError("Cannot duplicate a deleted/hidden Wingman.")
+
+        cleaned_name = self._validate_wingman_name(new_name)
+
+        if self._wingman_name_exists_in_config_dir(target_config_dir, cleaned_name):
+            raise FileExistsError(
+                f"Wingman '{cleaned_name}' already exists in '{target_config_dir.name}'."
+            )
+
+        source_config_path = path.join(
+            self.config_dir, source_config_dir.directory, source_wingman_file.file
+        )
+        if not path.exists(source_config_path):
+            raise FileNotFoundError(
+                f"Source Wingman config not found: '{source_wingman_file.file}' in '{source_config_dir.name}'."
+            )
+
+        source_config_raw = self.read_config(source_config_path)
+        if source_config_raw is None:
+            raise ValueError("Failed to read source Wingman configuration.")
+        if not isinstance(source_config_raw, dict):
+            raise ValueError("Invalid Wingman config format; expected a YAML mapping.")
+
+        # Ensure the internal name matches the filename stem.
+        source_config_raw["name"] = cleaned_name
+
+        # Clear push-to-talk binding in the duplicate so the user can rebind.
+        source_config_raw["record_key"] = ""
+        source_config_raw["record_key_codes"] = None
+        source_config_raw["record_mouse_button"] = ""
+        source_config_raw["record_joystick_button"] = None
+        source_config_raw["is_voice_activation_default"] = False
+
+        target_config_path = path.join(
+            self.config_dir, target_config_dir.directory, f"{cleaned_name}.yaml"
+        )
+        written = self.write_config(target_config_path, source_config_raw)
+        if not written:
+            raise OSError(
+                f"Failed to write duplicated Wingman config to '{target_config_path}'."
+            )
+
+        new_wingman_file = WingmanConfigFileInfo(
+            name=cleaned_name,
+            file=f"{cleaned_name}.yaml",
+            is_deleted=False,
+            avatar=source_wingman_file.avatar,
+        )
+
+        # Always create the duplicated avatar file from the source avatar (base64 data URI).
+        # This avoids relying on a physical source .png being present on disk.
+        try:
+            target_avatar_path = path.join(
+                self.config_dir, target_config_dir.directory, f"{cleaned_name}.png"
+            )
+
+            avatar_str = source_wingman_file.avatar
+            if not avatar_str:
+                # Extremely defensive fallback: write the default avatar.
+                default_avatar_path = self.get_wingman_avatar_path(
+                    target_config_dir, cleaned_name
+                )
+                shutil.copyfile(default_avatar_path, target_avatar_path)
+            else:
+                avatar_b64 = (
+                    avatar_str.split("base64,", 1)[1]
+                    if "base64," in avatar_str
+                    else avatar_str
+                )
+                image_data = base64.b64decode(avatar_b64)
+                with open(target_avatar_path, "wb") as file:
+                    file.write(image_data)
+        except Exception as e:
+            self.printr.print(
+                f"Failed to copy duplicated avatar for '{cleaned_name}': {e}",
+                color=LogType.WARNING,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
+        # Return the canonical file info as it will appear to the client.
+        wingmen = self.get_wingmen_configs(target_config_dir)
+        created = next(
+            (w for w in wingmen if w.name == cleaned_name and not w.is_deleted), None
+        )
+        return created if created else new_wingman_file
+
     def save_last_wingman_message(
         self,
         config_dir: ConfigDirInfo,
@@ -600,26 +807,91 @@ class ConfigManager:
         )
         default_config = self.read_default_config()
         wingman_config_dict = self.convert_to_dict(wingman_config)
+
+        # Strip skills to only keep module, prompt, custom_properties, and discovery_keywords with overridden values
+        # Other skill fields come from skill default_config.yaml and shouldn't be saved per wingman
+        if "skills" in wingman_config_dict and wingman_config_dict["skills"]:
+            stripped_skills = []
+            for skill in wingman_config_dict["skills"]:
+                has_custom_props = skill.get("custom_properties")
+                has_prompt = skill.get("prompt")
+                has_discovery_keywords = skill.get("discovery_keywords")
+
+                if has_custom_props or has_prompt or has_discovery_keywords:
+                    stripped_skill = {"module": skill.get("module")}
+
+                    # Keep prompt override if present
+                    if has_prompt:
+                        stripped_skill["prompt"] = has_prompt
+
+                    # Keep discovery_keywords override if present
+                    if has_discovery_keywords:
+                        stripped_skill["discovery_keywords"] = has_discovery_keywords
+
+                    # Only keep id and value for each custom property
+                    # Other fields (name, hint, property_type, etc.) come from skill defaults
+                    if has_custom_props:
+                        stripped_skill["custom_properties"] = [
+                            {"id": prop.get("id"), "value": prop.get("value")}
+                            for prop in skill.get("custom_properties", [])
+                        ]
+
+                    stripped_skills.append(stripped_skill)
+            wingman_config_dict["skills"] = stripped_skills if stripped_skills else None
+
         wingman_config_diff = self.deep_diff(default_config, wingman_config_dict)
 
-        if wingman_config.skills:
-            skills = []
-
-            for skill_config in wingman_config.skills:
-                skill_dir = skill_config.module.replace(".main", "").replace(".", "/")
-                skill_default_config_path = path.join(
-                    get_writable_dir(skill_dir), DEFAULT_SKILLS_CONFIG
-                )
-                skill_default_config = self.read_config(skill_default_config_path)
-                skill_config_diff = self.deep_diff(
-                    skill_default_config, self.convert_to_dict(skill_config)
-                )
-                skill_config_diff["module"] = skill_config.module
-                skills.append(skill_config_diff)
-
-            wingman_config_diff["skills"] = skills
-
         return self.write_config(config_path, wingman_config_diff)
+
+    def save_wingman_commands(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        commands: list,
+    ):
+        """Save only the commands section of a wingman config.
+
+        This performs a partial YAML update - it reads the existing YAML file,
+        updates only the commands field, and writes it back. This avoids
+        serializing the entire wingman config and reduces the risk of data loss.
+
+        Args:
+            config_dir: The config directory info
+            wingman_file: The wingman file info
+            commands: The commands list from wingman.config.commands
+        """
+        config_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            wingman_file.file,
+        )
+
+        # Read existing YAML
+        existing_yaml = {}
+        if path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as file:
+                existing_yaml = yaml.safe_load(file) or {}
+
+        # Convert commands to dict format
+        commands_dict = []
+        if commands:
+            for command in commands:
+                command_dict = self.convert_to_dict(command)
+                commands_dict.append(command_dict)
+
+        # Get default config to diff against
+        default_config = self.read_default_config()
+        default_commands = default_config.get("commands", [])
+
+        # Only save commands if they differ from defaults
+        if commands_dict != default_commands:
+            existing_yaml["commands"] = commands_dict
+        elif "commands" in existing_yaml:
+            # Remove commands key if it matches defaults (keep config minimal)
+            del existing_yaml["commands"]
+
+        # Write back the YAML with only commands changed
+        return self.write_config(config_path, existing_yaml)
 
     def get_wingman_avatar_path(
         self, config_dir: ConfigDirInfo, wingman_file_base_name: str, create=False
@@ -702,7 +974,7 @@ class ConfigManager:
                     (
                         content
                         if isinstance(content, dict)
-                        else content.dict(exclude_none=True)
+                        else content.model_dump(exclude_none=True)
                     ),
                     stream,
                 )
@@ -757,7 +1029,7 @@ class ConfigManager:
                 )
         return SettingsConfig()
 
-    def load_defaults_config(self):
+    def load_defaults_config(self, silent_on_error: bool = False):
         """Load and validate Defaults config"""
         parsed = self.read_default_config()
         if parsed:
@@ -765,9 +1037,10 @@ class ConfigManager:
                 validated = NestedConfig(**parsed)
                 return validated
             except ValidationError as e:
-                self.printr.toast_error(
-                    f"Invalid default config '{self.default_config_path}':\n{str(e)}"
-                )
+                if not silent_on_error:
+                    self.printr.toast_error(
+                        f"Invalid default config '{self.default_config_path}':\n{str(e)}"
+                    )
         return None
 
     def load_wingman_config(
@@ -788,11 +1061,47 @@ class ConfigManager:
         """Write Defaults config to file"""
         return self.write_config(self.default_config_path, self.default_config)
 
+    def load_mcp_config(self, silent_on_error: bool = False) -> Optional[McpConfig]:
+        """Load and validate MCP config from mcp.yaml"""
+        if not path.exists(self.mcp_config_path):
+            if not silent_on_error:
+                self.printr.print(
+                    f"MCP config not found at {self.mcp_config_path}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+            return McpConfig(servers=[])
+
+        parsed = self.read_config(self.mcp_config_path)
+        if parsed:
+            try:
+                validated = McpConfig(**parsed)
+                return validated
+            except ValidationError as e:
+                if not silent_on_error:
+                    self.printr.toast_error(
+                        f"Invalid MCP config '{self.mcp_config_path}':\n{str(e)}"
+                    )
+        return McpConfig(servers=[])
+
+    def save_mcp_config(self):
+        """Write MCP config to file"""
+        return self.write_config(self.mcp_config_path, self.mcp_config)
+
+    def read_mcp_config(self) -> dict:
+        """Read raw MCP config as dict (for migration)"""
+        if path.exists(self.mcp_config_path):
+            return self.read_config(self.mcp_config_path) or {}
+        return {}
+
     # Config merging:
 
     def convert_to_dict(self, obj):
         if isinstance(obj, BaseModel):
-            json_obj = obj.model_dump_json(exclude_none=True, exclude_unset=True)
+            # Use exclude_unset=False to preserve runtime-set fields like discoverable_skills.
+            # Without this, fields not in the original YAML get dropped during save,
+            # causing them to revert to defaults on reload.
+            json_obj = obj.model_dump_json(exclude_none=True, exclude_unset=False)
             return json.loads(json_obj)
         elif isinstance(obj, dict):
             return {k: self.convert_to_dict(v) for k, v in obj.items()}
@@ -969,12 +1278,14 @@ class ConfigManager:
             "edge_tts",
             "elevenlabs",
             "hume",
+            "inworld",
             "azure",
             "whispercpp",
             "fasterwhisper",
             "xvasynth",
             "wingman_pro",
             "perplexity",
+            "xai",
             "openai_compatible_tts",
         ]:
             if key in default:
@@ -1003,16 +1314,65 @@ class ConfigManager:
                     .split("/")[1]
                 )
 
-                skill_default_config_path = path.join(
-                    self.skills_dir, skill_dir, DEFAULT_SKILLS_CONFIG
-                )
-                skill_config = self.read_config(skill_default_config_path)
-                skill_config = self.__deep_merge(skill_config, skill_config_wingman)
+                # Look for skill default_config.yaml in multiple locations:
+                # 1. Bundled skills directory (set by main.py)
+                # 2. Custom skills directory (non-versioned)
+                # 3. Legacy: versioned APPDATA skills directory
+                from services.module_manager import get_bundled_skills_dir
+
+                skill_default_config_path = None
+                search_paths = []
+
+                # 1. Bundled skills
+                bundled_dir = get_bundled_skills_dir()
+                if bundled_dir:
+                    bundled_path = path.join(
+                        bundled_dir, skill_dir, DEFAULT_SKILLS_CONFIG
+                    )
+                    search_paths.append(bundled_path)
+                    if path.exists(bundled_path):
+                        skill_default_config_path = bundled_path
+
+                # 2. Custom skills (non-versioned)
+                if not skill_default_config_path:
+                    custom_path = path.join(
+                        get_custom_skills_dir(), skill_dir, DEFAULT_SKILLS_CONFIG
+                    )
+                    search_paths.append(custom_path)
+                    if path.exists(custom_path):
+                        skill_default_config_path = custom_path
+
+                # 3. Legacy: versioned APPDATA (for migration compatibility)
+                if not skill_default_config_path:
+                    legacy_path = path.join(
+                        self.skills_dir, skill_dir, DEFAULT_SKILLS_CONFIG
+                    )
+                    search_paths.append(legacy_path)
+                    if path.exists(legacy_path):
+                        skill_default_config_path = legacy_path
+
+                if skill_default_config_path:
+                    skill_config = self.read_config(skill_default_config_path)
+                    skill_config = self.__deep_merge(skill_config, skill_config_wingman)
+                else:
+                    # Custom skill without default_config.yaml - use wingman config as-is
+                    skill_config = skill_config_wingman
+                    self.printr.print(
+                        f"Custom skill '{skill_dir}' has no default_config.yaml, using wingman configuration only.",
+                        color=LogType.WARNING,
+                        server_only=True,
+                        source=LogSource.SYSTEM,
+                        source_name=self.log_source_name,
+                    )
 
                 merged_skills.append(skill_config)
 
             merged["skills"] = merged_skills
         elif "skills" in default:
             merged["skills"] = default["skills"]
+
+        # discoverable_mcps - inherit from default if not overridden in wingman config
+        if "discoverable_mcps" not in wingman and "discoverable_mcps" in default:
+            merged["discoverable_mcps"] = default["discoverable_mcps"]
 
         return WingmanConfig(**merged)

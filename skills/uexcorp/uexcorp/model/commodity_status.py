@@ -1,7 +1,4 @@
-try:
-    from skills.uexcorp.uexcorp.model.data_model import DataModel
-except ModuleNotFoundError:
-    from uexcorp.uexcorp.model.data_model import DataModel
+from skills.uexcorp.uexcorp.model.data_model import DataModel
 
 class CommodityStatus(DataModel):
 
@@ -38,15 +35,11 @@ class CommodityStatus(DataModel):
         return {
             "name": self.get_name(),
             "percentage": self.get_percentage(),
-            "type": "buy" if self.get_is_buy() else "sell",
+            "type": "buy (higher inventory means more can be bought here and is better)" if self.get_is_buy() else "sell (lower inventory means higher demand and is better)",
         }
 
     def get_data_for_ai_minimal(self) -> dict:
-        return {
-            "name": self.get_name(),
-            "percentage": self.get_percentage(),
-            "type": "buy (higher percentage = better)" if self.get_is_buy() else "sell (lower percentage = better)",
-        }
+        return self.get_data_for_ai()
 
     def get_code(self) -> str:
         return self.data["code"]

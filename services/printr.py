@@ -23,12 +23,16 @@ class StreamToLogger:
             for line in buf.rstrip().splitlines():
                 self.logger.log(self.log_level, line.rstrip())
                 if isinstance(line, str):
-                    self.stream.write(line.encode('utf-8', errors='replace').decode('utf-8') + "\n")
+                    self.stream.write(
+                        line.encode("utf-8", errors="replace").decode("utf-8") + "\n"
+                    )
                 else:
                     self.stream.write(line + "\n")
         except Exception as e:
-            original_stderr = getattr(sys, '__stderr__', sys.stderr)
-            original_stderr.write(f"Error in StreamToLogger: {str(e)} - Buffer: {buf}\n")
+            original_stderr = getattr(sys, "__stderr__", sys.stderr)
+            original_stderr.write(
+                f"Error in StreamToLogger: {str(e)} - Buffer: {buf}\n"
+            )
 
     def flush(self):
         self.stream.flush()
@@ -68,7 +72,7 @@ class Printr(WebSocketUser):
             # log file with timestamp
             fh = RotatingFileHandler(
                 path.join(get_writable_dir("logs"), f"wingman-core.{timestamp}.log"),
-                encoding='utf-8'
+                encoding="utf-8",
             )
             fh.setLevel(logging.DEBUG)
             file_formatter = Formatter(
@@ -146,7 +150,7 @@ class Printr(WebSocketUser):
     def print(
         self,
         text,
-        color: LogType = LogType.SUBTLE,
+        color: LogType = LogType.SYSTEM,
         source=LogSource.SYSTEM,
         source_name: str = "",
         toast: ToastType = None,
@@ -154,8 +158,10 @@ class Printr(WebSocketUser):
         command_tag: CommandTag = None,
         additional_data: dict = None,
     ):
-        # print to server (terminal)
-        self.print_colored(text, color=self.get_terminal_color(color))
+        # print to server (terminal) with source_name prefix
+        self.print_colored(
+            text, color=self.get_terminal_color(color), source_name=source_name
+        )
 
         if not server_only and self._connection_manager is not None:
             # send to GUI without print() having to be async
@@ -174,7 +180,7 @@ class Printr(WebSocketUser):
     async def print_async(
         self,
         text,
-        color: LogType = LogType.SUBTLE,
+        color: LogType = LogType.SYSTEM,
         source=LogSource.SYSTEM,
         source_name: str = "",
         toast: ToastType = None,
@@ -184,7 +190,7 @@ class Printr(WebSocketUser):
         additional_data: dict = None,
         benchmark_result: BenchmarkResult = None,
     ):
-        # print to server (terminal)
+        # print to server (terminal) with source_name prefix
         self.print_colored(
             (
                 text
@@ -192,12 +198,14 @@ class Printr(WebSocketUser):
                 else f"{text} ({benchmark_result.formatted_execution_time})"
             ),
             color=self.get_terminal_color(color),
+            source_name=source_name,
         )
         if benchmark_result and benchmark_result.snapshots:
             for snapshot in benchmark_result.snapshots:
                 self.print_colored(
                     f"  - {snapshot.label}: {snapshot.formatted_execution_time}",
                     color=self.get_terminal_color(color),
+                    source_name=source_name,
                 )
 
         if not server_only and self._connection_manager is not None:
@@ -228,26 +236,44 @@ class Printr(WebSocketUser):
     # INTERNAL METHODS
 
     def get_terminal_color(self, tag: LogType):
-        if tag == LogType.SUBTLE:
-            return "\033[90m"
-        elif tag == LogType.INFO:
-            return "\033[94m"
-        elif tag == LogType.HIGHLIGHT:
-            return "\033[96m"
-        elif tag == LogType.POSITIVE:
-            return "\033[92m"
-        elif tag == LogType.WARNING:
-            return "\033[93m"
-        elif tag == LogType.ERROR:
-            return "\033[91m"
-        elif tag == LogType.PURPLE:
-            return "\033[95m"
+        # System/Runtime messages
+        if tag == LogType.SYSTEM or tag.value == "system":
+            return "\033[90m"  # Gray - lifecycle/system events
+        elif tag == LogType.INFO or tag.value == "info":
+            return "\033[38;5;75m"  # Light blue (#5fafff) - general runtime info
+        elif tag == LogType.STARTUP or tag.value == "startup":
+            return "\033[96m"  # Cyan/Teal - startup status, version, paths
+
+        # Feature-specific categories
+        elif tag == LogType.MCP or tag.value == "mcp":
+            return "\033[38;5;39m"  # Deep sky blue (#00afff) - MCP messages
+        elif tag == LogType.SKILL or tag.value == "skill":
+            return "\033[38;5;214m"  # Orange (#ffaf00) - Skill messages
+        elif tag == LogType.COMMAND or tag.value == "command":
+            return "\033[38;5;159m"  # Pale blue (#afffff) - Command execution
+        elif tag == LogType.WINGMAN or tag.value == "wingman":
+            return "\033[38;5;183m"  # Light purple (#d7afff) - Wingman status
+
+        # Attention messages
+        elif tag == LogType.WARNING or tag.value == "warning":
+            return "\033[93m"  # Yellow - warnings
+        elif tag == LogType.ERROR or tag.value == "error":
+            return "\033[91m"  # Red - errors
+
+        # Conversation messages
+        elif tag == LogType.USER or tag.value == "user":
+            return "\033[95m"  # Magenta/Pink - user speech
+        elif tag == LogType.POSITIVE or tag.value == "positive":
+            return "\033[92m"  # Green - LLM responses, success
+
         else:
             return self.CLEAR
 
     def clr(self, text, color):
         return f"{color}{text}{Printr.CLEAR}"
 
-    def print_colored(self, text, color):
-        self.console_logger.info(self.clr(text, color))
-        self.logger.info(text)
+    def print_colored(self, text, color, source_name: str = ""):
+        # Add source_name prefix for console and file output only
+        display_text = f"[{source_name}] {text}" if source_name else text
+        self.console_logger.info(self.clr(display_text, color))
+        self.logger.info(display_text)

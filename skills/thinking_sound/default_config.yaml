@@ -2,12 +2,14 @@ module: skills.thinking_sound.main
 name: ThinkingSound
 display_name: Thinking Sounds
 author: JayMatthew
+auto_activate: true
 tags:
   - Utility
   - Music
 description:
   en: Plays back sounds while waiting on AI response.
   de: Spielt Sounds ab, während auf die Antwort der AI gewartet wird.
+discoverable_by_default: false
 custom_properties:
   - id: audio_config
     name: Audio Configuration
