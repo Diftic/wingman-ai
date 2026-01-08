@@ -923,6 +923,12 @@ class ConfigMigrationService:
                             )
                     except ValidationError as e:
                         self.err(f"Unable to migrate defaults.yaml:\n{str(e)}")
+                # MCP
+                # NOTE: mcp.yaml is a top-level config file, not a wingman.
+                # It's handled after the main walk so we can create it from template
+                # when missing and optionally transform it via migrate_mcp.
+                elif filename == "mcp.yaml":
+                    continue
                 # Wingmen
                 elif filename.endswith(".yaml"):
                     self.log_highlight(f"Migrating Wingman {filename}...")
@@ -1033,8 +1039,17 @@ class ConfigMigrationService:
                     secret_keeper = SecretKeeper()
                     secret_keeper.secrets = secret_keeper.load()
 
-        # Handle mcp.yaml - this is a new file in 2.0.0
-        if migrate_mcp:
+        # Handle mcp.yaml (introduced in 2.0.0).
+        # Treat it like settings/defaults: ensure it's present for all versions >= 2.0.0.
+        # - If old exists: copy it by default
+        # - If old doesn't exist: create from template
+        # - If migrate_mcp is provided: transform old/template into migrated config
+        try:
+            supports_mcp = [int(n) for n in new_version.split("_")] >= [2, 0, 0]
+        except Exception:
+            supports_mcp = False
+
+        if supports_mcp:
             new_mcp_file = path.join(new_config_path, "mcp.yaml")
             old_mcp_file = path.join(old_config_path, "mcp.yaml")
 
@@ -1043,21 +1058,29 @@ class ConfigMigrationService:
             template_mcp_file = path.join(
                 self.templates_dir, "configs", "mcp.template.yaml"
             )
-            new_mcp_config = {}
+            template_mcp_config = {}
             if path.exists(template_mcp_file):
-                new_mcp_config = (
+                template_mcp_config = (
                     self.config_manager.read_config(template_mcp_file) or {}
                 )
 
+            old_mcp_config = {}
             if path.exists(old_mcp_file):
-                # mcp.yaml exists in old version - migrate it
-                self.log_highlight("Migrating mcp.yaml...")
                 old_mcp_config = self.config_manager.read_config(old_mcp_file) or {}
-                migrated_mcp = migrate_mcp(old_mcp_config, new_mcp_config)
+
+            if migrate_mcp:
+                if path.exists(old_mcp_file):
+                    self.log_highlight("Migrating mcp.yaml...")
+                else:
+                    self.log_highlight(
+                        "Creating mcp.yaml (not found in old version)..."
+                    )
+                migrated_mcp = migrate_mcp(old_mcp_config, template_mcp_config)
             else:
-                # mcp.yaml doesn't exist in old version - create from template
-                self.log_highlight("Creating mcp.yaml (not found in old version)...")
-                migrated_mcp = migrate_mcp({}, new_mcp_config)
+                # No custom migration: preserve old if present, else create from template
+                migrated_mcp = (
+                    old_mcp_config if path.exists(old_mcp_file) else template_mcp_config
+                )
 
             if not path.exists(new_config_path):
                 os.makedirs(new_config_path)
