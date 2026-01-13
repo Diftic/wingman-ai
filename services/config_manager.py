@@ -1061,6 +1061,59 @@ class ConfigManager:
         """Write Defaults config to file"""
         return self.write_config(self.default_config_path, self.default_config)
 
+    def perform_hardware_scan(self, system_manager):
+        """Scans for hardware changes and updates settings accordingly."""
+        if self.settings_config.hardware_scan_performed:
+            return
+
+        self.printr.print(
+            "Performing initial hardware scan...",
+            color=LogType.STARTUP,
+            server_only=True,
+            source=LogSource.SYSTEM,
+            source_name=self.log_source_name,
+        )
+
+        changes = False
+        if system_manager.is_cuda_available():
+            self.settings_config.voice_activation.fasterwhisper.device = "cuda"
+            self.settings_config.voice_activation.fasterwhisper.compute_type = "auto"
+            self.printr.print(
+                f"- GPU detected: {system_manager.get_gpu_name()}",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+            self.printr.print(
+                "- Auto-configured FasterWhisper to use CUDA",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+            changes = True
+        else:
+            self.printr.print(
+                "- No NVIDIA GPU detected, keeping current STT settings",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
+        self.settings_config.hardware_scan_performed = True
+        self.save_settings_config()
+
+        if changes:
+            self.printr.print(
+                "Hardware scan complete. Settings updated.",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
     def load_mcp_config(self, silent_on_error: bool = False) -> Optional[McpConfig]:
         """Load and validate MCP config from mcp.yaml"""
         if not path.exists(self.mcp_config_path):

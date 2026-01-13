@@ -315,6 +315,7 @@ class WingmanCore(WebSocketUser):
         )
 
         self.config_manager = config_manager
+        self.config_manager.perform_hardware_scan(self.system_manager)
         self.config_service = ConfigService(config_manager=config_manager)
         self.config_service.config_events.subscribe(
             "config_loaded", self.initialize_tower

@@ -1048,6 +1048,7 @@ class SettingsConfig(BaseModel):
     cancel_tts_key_codes: Optional[list[int]] = None
     cancel_tts_joystick_button: Optional[CommandJoystickConfig] = None
     user_name: Optional[str] = None
+    hardware_scan_performed: bool = False
 
 
 class BenchmarkResult(BaseModel):
