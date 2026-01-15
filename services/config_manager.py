@@ -906,6 +906,140 @@ class ConfigManager:
             avatar_path if create or path.exists(avatar_path) else default_avatar_path
         )
 
+    def restore_wingman_from_template(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> None:
+        """Overwrite a Wingman config with its shipped template defaults.
+
+        Eligibility is intentionally simple (and matches UI behavior): only specific
+        shipped Wingmen within specific shipped contexts are restorable.
+
+        This performs a full replace of the Wingman YAML file.
+        """
+
+        if wingman_file.is_deleted or wingman_file.file.startswith(DELETED_PREFIX):
+            raise ValueError("Cannot restore defaults for a deleted/hidden Wingman.")
+
+        template_yaml_path, template_dir_name = self._resolve_wingman_template_yaml(
+            config_dir=config_dir, wingman_name=wingman_file.name
+        )
+        if not template_yaml_path or not template_dir_name:
+            raise FileNotFoundError(
+                f"No template found for Wingman '{wingman_file.name}' in '{config_dir.name}'."
+            )
+
+        target_yaml_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            f"{wingman_file.name}.yaml",
+        )
+
+        # Full replace.
+        shutil.copyfile(template_yaml_path, target_yaml_path)
+        self.printr.print(
+            f"Restored Wingman '{wingman_file.name}' in '{config_dir.name}' from template.",
+            color=LogType.INFO,
+            server_only=True,
+            source=LogSource.SYSTEM,
+            source_name=self.log_source_name,
+        )
+
+        # Restore avatar if a template avatar exists, else delete the custom avatar
+        # so the UI falls back to the default wingman avatar.
+        template_avatar_path = path.join(
+            self.templates_dir,
+            CONFIGS_DIR,
+            template_dir_name,
+            f"{wingman_file.name}.png",
+        )
+        target_avatar_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            f"{wingman_file.name}.png",
+        )
+        try:
+            if path.exists(template_avatar_path):
+                shutil.copyfile(template_avatar_path, target_avatar_path)
+            elif path.exists(target_avatar_path):
+                remove(target_avatar_path)
+        except (OSError, PermissionError) as e:
+            self.printr.print(
+                f"Failed to restore avatar for '{wingman_file.name}': {e}",
+                color=LogType.WARNING,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
+    def can_restore_wingman_from_template(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> bool:
+        """Return True if a shipped template exists for this Wingman in this context."""
+
+        if wingman_file.is_deleted or wingman_file.file.startswith(DELETED_PREFIX):
+            return False
+
+        template_yaml_path, _ = self._resolve_wingman_template_yaml(
+            config_dir=config_dir, wingman_name=wingman_file.name
+        )
+        return bool(template_yaml_path)
+
+    def _resolve_wingman_template_yaml(
+        self, config_dir: ConfigDirInfo, wingman_name: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve the shipped template YAML path for a Wingman.
+
+        This scans the template directory in the Wingman AI installation (or repo
+        when running from source) and supports default-prefixed template folders
+        such as '_Star Citizen'.
+        """
+
+        templates_root = path.join(self.templates_dir, CONFIGS_DIR)
+        if not path.exists(templates_root):
+            return (None, None)
+
+        candidates: list[str] = []
+
+        # Prefer exact matches first.
+        preferred = [
+            config_dir.directory,
+            config_dir.name,
+            f"{DEFAULT_PREFIX}{config_dir.name}",
+        ]
+        for d in preferred:
+            # Defensive: some legacy code paths may accidentally set `directory` to an
+            # absolute path. We only accept plain directory names here.
+            if not d or path.isabs(d) or path.sep in d:
+                continue
+
+            if path.exists(path.join(templates_root, d)) and d not in candidates:
+                candidates.append(d)
+
+        # Then add any other template dirs whose normalized name matches.
+        try:
+            _, dirs, _ = next(walk(templates_root))
+        except StopIteration:
+            dirs = []
+
+        def normalize_dir_name(dir_name: str) -> str:
+            return dir_name.replace(DELETED_PREFIX, "", 1).replace(
+                DEFAULT_PREFIX, "", 1
+            )
+
+        for d in dirs:
+            if normalize_dir_name(d) == config_dir.name and d not in candidates:
+                candidates.append(d)
+
+        template_filename = f"{wingman_name}.template.yaml"
+        for template_dir_name in candidates:
+            template_yaml_path = path.join(
+                templates_root, template_dir_name, template_filename
+            )
+            if path.exists(template_yaml_path):
+                return (template_yaml_path, template_dir_name)
+
+        return (None, None)
+
     def delete_wingman_config(
         self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
     ):

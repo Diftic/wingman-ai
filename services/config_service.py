@@ -120,6 +120,20 @@ class ConfigService:
         )
         self.router.add_api_route(
             methods=["POST"],
+            path="/config/wingman/restore-defaults",
+            endpoint=self.restore_wingman_defaults,
+            response_model=ConfigWithDirInfo,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/config/wingman/can-restore-defaults",
+            endpoint=self.can_restore_wingman_defaults,
+            response_model=bool,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
             path="/config/create",
             endpoint=self.create_config,
             tags=tags,
@@ -887,6 +901,40 @@ class ConfigService:
             config_dir=request.target_config_dir,
             wingman_file=new_wingman_file,
         )
+
+    # POST /config/wingman/restore-defaults
+    async def restore_wingman_defaults(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> ConfigWithDirInfo:
+        """Restore a Wingman to its shipped default configuration.
+
+        The shipped default is determined by scanning template files under
+        templates/configs/ (installation templates in release, repo templates in dev).
+        After restoring, the config is reloaded so the active context reflects the reset.
+        """
+
+        try:
+            self.config_manager.restore_wingman_from_template(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        return await self.load_config(config_dir)
+
+    # POST /config/wingman/can-restore-defaults
+    async def can_restore_wingman_defaults(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> bool:
+        """Return whether a Wingman has shipped template defaults in this context."""
+
+        can_restore = self.config_manager.can_restore_wingman_from_template(
+            config_dir=config_dir,
+            wingman_file=wingman_file,
+        )
+        return can_restore
 
     # POST config/save-wingman
     async def save_wingman_config(
