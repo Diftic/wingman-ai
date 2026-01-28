@@ -7,8 +7,11 @@ import shutil
 import re
 from typing import Optional, Tuple
 from pydantic import BaseModel, ValidationError
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+
 import yaml
-from api.enums import LogSource, LogType, enum_representer
+from api.enums import LogSource, LogType
 from api.interface import (
     Config,
     ConfigDirInfo,
@@ -1090,27 +1093,102 @@ class ConfigManager:
                 parsed = yaml.safe_load(stream)
                 return parsed
             except yaml.YAMLError as e:
+                # Migration legacy: older versions accidentally wrote Python object tags
+                # (e.g. !!python/object:api.interface.ElevenlabsVoiceConfig). These are
+                # not supported by safe_load and should never be present in user configs.
+                # We defensively strip them and retry as plain YAML.
+                error_str = str(e)
+                if "tag:yaml.org,2002:python/object:" in error_str:
+                    try:
+                        stream.seek(0)
+                        raw = stream.read()
+                        sanitized = re.sub(
+                            r"(^|\s)(!!python/object:[^\s]+)",
+                            r"\1",
+                            raw,
+                            flags=re.MULTILINE,
+                        )
+                        sanitized = re.sub(
+                            r"(^|\s)(!python/object:[^\s]+)",
+                            r"\1",
+                            sanitized,
+                            flags=re.MULTILINE,
+                        )
+                        parsed = yaml.safe_load(sanitized)
+                        self.printr.print(
+                            f"Sanitized legacy python/object YAML tags in '{file_path}'.",
+                            color=LogType.WARNING,
+                            server_only=True,
+                            source=LogSource.SYSTEM,
+                            source_name=self.log_source_name,
+                        )
+                        return parsed
+                    except Exception:
+                        # Fall through to the normal error toast below
+                        pass
+
                 self.printr.toast_error(
-                    f"Could not read config '{file_path}':\n{str(e)}"
+                    f"Could not read config '{file_path}':\n{error_str}"
                 )
         return None
 
-    def write_config(self, file_path: str, content) -> bool:
-        yaml.add_multi_representer(Enum, enum_representer)
+    def __make_yaml_safe(self, value):
+        """Convert nested config structures into YAML-safe primitives.
 
+        PyYAML's default dumper may emit !!python/object tags when encountering
+        arbitrary Python objects (e.g. Pydantic models nested inside dicts).
+        This ensures we only write plain YAML that safe_load can read.
+        """
+
+        if value is None:
+            return None
+
+        if isinstance(value, Enum):
+            return value.value
+
+        if isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, Path):
+            return str(value)
+
+        if is_dataclass(value):
+            return self.__make_yaml_safe(asdict(value))
+
+        # Pydantic v2 models (and other objects exposing model_dump)
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return self.__make_yaml_safe(model_dump(exclude_none=True))
+
+        if isinstance(value, dict):
+            return {
+                self.__make_yaml_safe(k): self.__make_yaml_safe(v)
+                for k, v in value.items()
+            }
+
+        if isinstance(value, (list, tuple, set)):
+            return [self.__make_yaml_safe(v) for v in value]
+
+        # Last resort: stringify unknown objects (should be rare in configs)
+        return str(value)
+
+    def write_config(self, file_path: str, content) -> bool:
         dir_path = path.dirname(file_path)
         if not path.exists(dir_path):
             makedirs(dir_path)
 
         with open(file_path, "w", encoding="UTF-8") as stream:
             try:
-                yaml.dump(
-                    (
-                        content
-                        if isinstance(content, dict)
-                        else content.model_dump(exclude_none=True)
-                    ),
+                raw = (
+                    content
+                    if isinstance(content, dict)
+                    else content.model_dump(exclude_none=True)
+                )
+                yaml.safe_dump(
+                    self.__make_yaml_safe(raw),
                     stream,
+                    sort_keys=False,
+                    allow_unicode=True,
                 )
                 return True
             except yaml.YAMLError as e:

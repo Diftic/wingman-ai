@@ -931,6 +931,10 @@ class ConfigMigrationService:
                     continue
                 # Wingmen
                 elif filename.endswith(".yaml"):
+                    # Templates are not Wingman configs and may not validate.
+                    if filename.endswith("template.yaml"):
+                        self.copy_file(old_file, new_file)
+                        continue
                     self.log_highlight(f"Migrating Wingman {filename}...")
                     # defaults are already migrated because the Wingman config is in a subdirectory
                     try:
@@ -992,6 +996,9 @@ class ConfigMigrationService:
                         self.err(f"Unable to migrate {filename}:\n{str(e)}")
                         # Copy the wingman file anyway so user doesn't lose it
                         if not path.exists(new_file):
+                            new_file_dir = path.dirname(new_file)
+                            if not path.exists(new_file_dir):
+                                os.makedirs(new_file_dir)
                             shutil.copyfile(old_file, new_file)
                         continue
                 else:
