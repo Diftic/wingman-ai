@@ -11,6 +11,7 @@ from api.interface import (
     SoundConfig,
     VoiceInfo,
     XVASynthTtsConfig,
+    PocketTTSConfig,
 )
 from providers.edge import Edge
 from providers.elevenlabs import ElevenLabs
@@ -19,6 +20,8 @@ from providers.inworld import Inworld
 from providers.open_ai import OpenAi, OpenAiAzure, OpenAiCompatibleTts
 from providers.wingman_pro import WingmanPro
 from providers.xvasynth import XVASynth
+from providers.pocket_tts import PocketTTS
+
 from services.audio_player import AudioPlayer
 from services.config_manager import ConfigManager
 from services.printr import Printr
@@ -30,11 +33,13 @@ class VoiceService:
         config_manager: ConfigManager,
         audio_player: AudioPlayer,
         xvasynth: XVASynth,
+        pocket_tts: PocketTTS,
     ):
         self.printr = Printr()
         self.config_manager = config_manager
         self.audio_player = audio_player
         self.xvasynth = xvasynth
+        self.pocket_tts = pocket_tts
 
         self.router = APIRouter()
         tags = ["voice"]
@@ -87,7 +92,21 @@ class VoiceService:
             response_model=list[VoiceInfo],
             tags=tags,
         )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/voices/pocket-tts",
+            endpoint=self.get_pocket_tts_voices,
+            response_model=list[VoiceInfo],
+            tags=tags,
+        )
 
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/voices/preview/pocket-tts",
+            endpoint=self.play_pocket_tts,
+            tags=tags,
+        )
+        
         self.router.add_api_route(
             methods=["POST"],
             path="/voices/preview/openai",
@@ -370,6 +389,22 @@ class VoiceService:
         self, text: str, config: XVASynthTtsConfig, sound_config: SoundConfig
     ):
         await self.xvasynth.play_audio(
+            text=text,
+            config=config,
+            sound_config=sound_config,
+            audio_player=self.audio_player,
+            wingman_name="system",
+        )
+
+    # GET /voices/pocket-tts
+    async def get_pocket_tts_voices(self) -> list[VoiceInfo]:
+        return await self.pocket_tts.get_available_voices()
+    
+    # POST /play/pocket-tts
+    async def play_pocket_tts(
+        self, text: str, config: PocketTTSConfig, sound_config: SoundConfig
+    ):
+        await self.pocket_tts.play_audio(
             text=text,
             config=config,
             sound_config=sound_config,

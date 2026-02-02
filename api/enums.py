@@ -134,6 +134,7 @@ class TtsProvider(Enum):
     OPENAI_COMPATIBLE = "openai_compatible"
     HUME = "hume"
     INWORLD = "inworld"
+    POCKET_TTS = "pocket_tts"
 
 
 class SttProvider(Enum):
