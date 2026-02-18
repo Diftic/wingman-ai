@@ -1056,12 +1056,38 @@ class DuplicateWingmanResult(BaseModel):
     wingman_file: WingmanConfigFileInfo
 
 
+class HudServerSettings(BaseModel):
+    """HUD Server settings for global configuration."""
+
+    enabled: bool
+    """Whether the HUD server should auto-start with Wingman AI Core."""
+
+    host: str
+    """The interface to listen on. Use '127.0.0.1' for local only, '0.0.0.0' for LAN access."""
+
+    port: int
+    """The port to listen on."""
+
+    framerate: int
+    """HUD overlay rendering framerate. Higher = smoother but more CPU. Minimum 1."""
+
+    layout_margin: int
+    """Margin from screen edges in pixels for HUD elements. Between 0 and 200."""
+
+    layout_spacing: int
+    """Spacing between stacked HUD windows in pixels. Between 0 and 100."""
+
+    screen: int
+    """Which screen/monitor to render the HUD on (1 = primary, 2 = secondary, etc.)."""
+
+
 class SettingsConfig(BaseModel):
     audio: Optional[AudioSettings] = None
     voice_activation: VoiceActivationSettings
     wingman_pro: WingmanProSettings
     xvasynth: XVASynthSettings
     pocket_tts: PocketTTSSettings
+    hud_server: HudServerSettings
     debug_mode: bool
     streamer_mode: bool
     cancel_tts_key: Optional[str] = None

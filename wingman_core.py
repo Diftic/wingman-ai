@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import os
+import platform
 import re
 import threading
 from typing import Optional
@@ -58,6 +59,8 @@ from services.secret_keeper import SecretKeeper
 from services.system_manager import SystemManager
 from services.tower import Tower
 from services.websocket_user import WebSocketUser
+from hud_server.server import HudServer
+from hud_server.validation import validate_hud_settings, get_invalid_summary
 
 
 class WingmanCore(WebSocketUser):
@@ -349,6 +352,9 @@ class WingmanCore(WebSocketUser):
 
         self.tower: Tower = None
 
+        # HUD Server
+        self._hud_server: Optional[HudServer] = None
+
         self.active_recording = {"key": "", "wingman": None}
 
         self.is_started = False
@@ -380,6 +386,9 @@ class WingmanCore(WebSocketUser):
         )
         self.settings_service.settings_events.subscribe(
             "va_settings_changed", self.on_va_settings_changed
+        )
+        self.settings_service.settings_events.subscribe(
+            "hud_server_settings_changed", self._on_hud_server_settings_changed
         )
 
         self.whispercpp = Whispercpp(
@@ -421,6 +430,104 @@ class WingmanCore(WebSocketUser):
     async def startup(self):
         if self.settings_service.settings.voice_activation.enabled:
             await self.set_voice_activation(is_enabled=True)
+
+        # Start HUD Server if enabled
+        await self._start_hud_server_if_enabled()
+
+    def _get_validated_hud_settings(self, hud_settings, log_invalid: bool = True) -> dict:
+        """Validate HUD settings and return dict with defaults for invalid values."""
+        result = validate_hud_settings(hud_settings)
+        invalid = result.pop('_invalid', {})
+
+        if log_invalid and invalid:
+            self.printr.print(
+                "[HUD] " + get_invalid_summary(invalid),
+                color=LogType.INFO
+            )
+
+        return result
+
+    async def _start_hud_server_if_enabled(self):
+        """Start the HUD server if enabled in settings."""
+        hud_settings = getattr(self.settings_service.settings, 'hud_server', None)
+        if not hud_settings or not hud_settings.enabled:
+            return
+
+        if platform.system() != "Windows":
+            self.printr.print(
+                "[HUD] Server is only supported on Windows.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return
+
+        try:
+            validated = self._get_validated_hud_settings(hud_settings)
+            self._hud_server = HudServer()
+            # Run blocking start() in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                self._hud_server.start,
+                validated['host'],
+                validated['port'],
+                validated['framerate'],
+                validated['layout_margin'],
+                validated['layout_spacing'],
+                validated['screen'],
+            )
+            if not success:
+                self.printr.print(
+                    f"[HUD] Server failed to start on port {validated['port']}",
+                    color=LogType.ERROR,
+                    server_only=False,
+                )
+                self._hud_server = None
+        except Exception as e:
+            self.printr.print(
+                f"[HUD] Server error: {e}",
+                color=LogType.ERROR,
+                server_only=False,
+            )
+            self._hud_server = None
+
+    async def _on_hud_server_settings_changed(self, hud_settings):
+        """Handle HUD server settings changes — start or stop as needed."""
+        # Validate settings and apply defaults for invalid values
+        validated = self._get_validated_hud_settings(hud_settings)
+
+        should_run = (
+            hud_settings is not None
+            and hud_settings.enabled
+            and platform.system() == "Windows"
+        )
+        is_running = self._hud_server is not None and self._hud_server.is_running
+
+        if should_run and not is_running:
+            await self._start_hud_server_if_enabled()
+        elif not should_run and is_running:
+            await self._stop_hud_server()
+        elif should_run and is_running:
+            # Server already running - update settings without restart
+            try:
+                self._hud_server.update_settings(
+                    framerate=validated['framerate'],
+                    layout_margin=validated['layout_margin'],
+                    layout_spacing=validated['layout_spacing'],
+                    screen=validated['screen'],
+                )
+            except Exception as e:
+                self.printr.print(
+                    f"Error updating HUD server settings: {e}",
+                    color=LogType.ERROR,
+                    server_only=True
+                )
+
+    async def _stop_hud_server(self):
+        """Stop the HUD server if running."""
+        if self._hud_server and self._hud_server.is_running:
+            await self._hud_server.stop()
+            self._hud_server = None
 
     async def set_core_state(self, state: CoreState) -> None:
         """Update the core state and broadcast to all connected clients.
@@ -1592,10 +1699,13 @@ class WingmanCore(WebSocketUser):
     async def shutdown(self):
         await self.set_core_state(CoreState.SHUTTING_DOWN)
 
+        # Stop HUD Server
+        await self._stop_hud_server()
+
         if self.settings_service.settings.xvasynth.enable:
-            await self.stop_xvasynth()
+            self.stop_xvasynth()
         if self.settings_service.settings.pocket_tts.enable:
-            await self.stop_pocket_tts()
+            self.stop_pocket_tts()
         await self.unload_tower()
 
         self.printr.print(
