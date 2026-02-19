@@ -146,7 +146,7 @@ class OpenAiWingman(Wingman):
 
             if self.uses_provider("fasterwhisper"):
                 self.fasterwhisper.validate(errors)
-            
+
             if self.uses_provider("pocket_tts"):
                 self.pocket_tts.validate(errors)
 
@@ -725,7 +725,8 @@ class OpenAiWingman(Wingman):
             result = OpenRouterEndpointResult(**content.get("data", {}))
             supports_tools = any(
                 all(
-                    p in endpoint.supported_parameters for p in ["tools", "tool_choice"]
+                    p in (endpoint.supported_parameters or [])
+                    for p in ["tools", "tool_choice"]
                 )
                 for endpoint in result.endpoints
             )

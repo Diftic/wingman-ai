@@ -448,10 +448,13 @@ class OpenRouterArchitecture(BaseModel):
 
 
 class OpenRouterEndpointPricing(BaseModel):
-    request: str
-    image: str
-    prompt: str
-    completion: str
+    request: Optional[str] = None
+    image: Optional[str] = None
+    prompt: Optional[str] = None
+    completion: Optional[str] = None
+    input: Optional[str] = None
+    output: Optional[str] = None
+    discount: Optional[float] = None
 
 
 class OpenRouterEndpoint(BaseModel):
@@ -459,7 +462,7 @@ class OpenRouterEndpoint(BaseModel):
     context_length: float
     pricing: OpenRouterEndpointPricing
     provider_name: str
-    supported_parameters: list[str]
+    supported_parameters: Optional[list[str]] = None
 
 
 class OpenRouterEndpointResult(BaseModel):
