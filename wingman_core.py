@@ -46,7 +46,7 @@ from providers.xvasynth import XVASynth
 from providers.pocket_tts import PocketTTS
 from wingmen.open_ai_wingman import OpenAiWingman
 from wingmen.wingman import Wingman
-from services.file import get_writable_dir, get_audio_library_dir
+from services.file import get_writable_dir, get_audio_library_dir, get_custom_voices_dir
 from services.voice_service import VoiceService
 from services.settings_service import SettingsService
 from services.config_service import ConfigService
@@ -217,6 +217,12 @@ class WingmanCore(WebSocketUser):
             methods=["POST"],
             path="/open-filemanager/audio-library",
             endpoint=self.open_audio_library_directory,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/open-filemanager/custom-voices",
+            endpoint=self.open_custom_voices_directory,
             tags=tags,
         )
         self.router.add_api_route(
@@ -434,22 +440,23 @@ class WingmanCore(WebSocketUser):
         # Start HUD Server if enabled
         await self._start_hud_server_if_enabled()
 
-    def _get_validated_hud_settings(self, hud_settings, log_invalid: bool = True) -> dict:
+    def _get_validated_hud_settings(
+        self, hud_settings, log_invalid: bool = True
+    ) -> dict:
         """Validate HUD settings and return dict with defaults for invalid values."""
         result = validate_hud_settings(hud_settings)
-        invalid = result.pop('_invalid', {})
+        invalid = result.pop("_invalid", {})
 
         if log_invalid and invalid:
             self.printr.print(
-                "[HUD] " + get_invalid_summary(invalid),
-                color=LogType.INFO
+                "[HUD] " + get_invalid_summary(invalid), color=LogType.INFO
             )
 
         return result
 
     async def _start_hud_server_if_enabled(self):
         """Start the HUD server if enabled in settings."""
-        hud_settings = getattr(self.settings_service.settings, 'hud_server', None)
+        hud_settings = getattr(self.settings_service.settings, "hud_server", None)
         if not hud_settings or not hud_settings.enabled:
             return
 
@@ -469,12 +476,12 @@ class WingmanCore(WebSocketUser):
             success = await loop.run_in_executor(
                 None,
                 self._hud_server.start,
-                validated['host'],
-                validated['port'],
-                validated['framerate'],
-                validated['layout_margin'],
-                validated['layout_spacing'],
-                validated['screen'],
+                validated["host"],
+                validated["port"],
+                validated["framerate"],
+                validated["layout_margin"],
+                validated["layout_spacing"],
+                validated["screen"],
             )
             if not success:
                 self.printr.print(
@@ -511,16 +518,16 @@ class WingmanCore(WebSocketUser):
             # Server already running - update settings without restart
             try:
                 self._hud_server.update_settings(
-                    framerate=validated['framerate'],
-                    layout_margin=validated['layout_margin'],
-                    layout_spacing=validated['layout_spacing'],
-                    screen=validated['screen'],
+                    framerate=validated["framerate"],
+                    layout_margin=validated["layout_margin"],
+                    layout_spacing=validated["layout_spacing"],
+                    screen=validated["screen"],
                 )
             except Exception as e:
                 self.printr.print(
                     f"Error updating HUD server settings: {e}",
                     color=LogType.ERROR,
-                    server_only=True
+                    server_only=True,
                 )
 
     async def _stop_hud_server(self):
@@ -1448,6 +1455,10 @@ class WingmanCore(WebSocketUser):
     # POST /open-filemanager/audio-library
     def open_audio_library_directory(self):
         show_in_file_manager(get_audio_library_dir())
+
+    # POST /open-filemanager/custom-voices
+    def open_custom_voices_directory(self):
+        show_in_file_manager(get_custom_voices_dir())
 
     # GET /models/openrouter
     async def get_openrouter_models(self):
