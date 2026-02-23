@@ -327,6 +327,7 @@ We would like to thank their creators for their great work and contributions to 
 - [openai](https://github.com/openai/openai-python) - Apache-2.0
 - [packaging](https://github.com/pypa/packaging) - Apache/BSD, © Donald Stufft and individual contributors
 - [pedalboard](https://github.com/spotify/pedalboard) - GPL-3.0, © 2021-2023 Spotify AB
+- [pocket-tts](https://github.com/kyutai-labs/pocket-tts) - MIT
 - [platformdirs](https://github.com/platformdirs/platformdirs) - MIT, © 2010-202x plaformdirs developers
 - [pydantic](https://github.com/pydantic/pydantic) - MIT, © 2017 to present Pydantic Services Inc. and individual contributors
 - [pydirectinput-rgx](https://github.com/ReggX/pydirectinput_rgx) - MIT, © 2022 dev@reggx.eu, 2020 Ben Johnson
