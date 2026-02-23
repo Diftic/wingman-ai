@@ -1436,6 +1436,9 @@ class ConfigManager:
                             default_dict[item_key], wingman_dict[item_key]
                         )
                         if nested_diff:
+                            # Always preserve the identifier key so the item
+                            # can be matched back during merge on load.
+                            nested_diff[identifier] = item_key
                             diff.append(nested_diff)
                     else:
                         diff.append(wingman_dict[item_key])
@@ -1518,6 +1521,9 @@ class ConfigManager:
         # Use a dictionary to ensure unique names and allow easy overrides
         merged_commands = {cmd["name"]: cmd for cmd in default_commands}
         for cmd in wingman_commands:
+            if "name" not in cmd:
+                # Skip malformed command entries (e.g. from older diff format)
+                continue
             merged_commands[cmd["name"]] = (
                 cmd  # Will override or add the wingman-specific command
             )
