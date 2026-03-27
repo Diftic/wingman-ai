@@ -1,5 +1,6 @@
 from datetime import datetime
 import logging
+import re
 import sys
 import inspect
 from logging import Formatter
@@ -11,6 +12,19 @@ from api.interface import BenchmarkResult
 from services.file import get_writable_dir
 from services.websocket_user import WebSocketUser
 
+_SENSITIVE_PARAM_PATTERN = re.compile(
+    r'([?&](?:[a-zA-Z_]*(?:key|token|secret|password|auth)[a-zA-Z_]*)=)([^&\s"\']+)',
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive_params(text: str) -> str:
+    """Redact sensitive query parameters (e.g. api_key) from log text."""
+    return _SENSITIVE_PARAM_PATTERN.sub(
+        lambda m: m.group(1) + m.group(2)[:4] + "***REDACTED***",
+        text,
+    )
+
 
 class StreamToLogger:
     def __init__(self, logger, log_level=logging.INFO, stream=sys.stdout):
@@ -21,13 +35,15 @@ class StreamToLogger:
     def write(self, buf):
         try:
             for line in buf.rstrip().splitlines():
-                self.logger.log(self.log_level, line.rstrip())
-                if isinstance(line, str):
+                redacted = _redact_sensitive_params(line.rstrip())
+                self.logger.log(self.log_level, redacted)
+                if isinstance(redacted, str):
                     self.stream.write(
-                        line.encode("utf-8", errors="replace").decode("utf-8") + "\n"
+                        redacted.encode("utf-8", errors="replace").decode("utf-8")
+                        + "\n"
                     )
                 else:
-                    self.stream.write(line + "\n")
+                    self.stream.write(redacted + "\n")
         except Exception as e:
             original_stderr = getattr(sys, "__stderr__", sys.stderr)
             original_stderr.write(

@@ -30,6 +30,7 @@ from api.enums import (
 from providers.faster_whisper import FasterWhisper
 from providers.whispercpp import Whispercpp
 from providers.xvasynth import XVASynth
+from providers.pocket_tts import PocketTTS
 from services.audio_player import AudioPlayer
 from services.benchmark import Benchmark
 from services.module_manager import ModuleManager
@@ -65,6 +66,7 @@ class Wingman:
         whispercpp: Whispercpp,
         fasterwhisper: FasterWhisper,
         xvasynth: XVASynth,
+        pocket_tts: PocketTTS,
         tower: "Tower",
     ):
         """The constructor of the Wingman class. You can override it in your custom wingman.
@@ -106,6 +108,9 @@ class Wingman:
 
         self.xvasynth = xvasynth
         """A class that handles the communication with the XVASynth server for TTS."""
+        
+        self.pocket_tts = pocket_tts
+        """A class that handles the communication with the PocketTTS server for TTS."""
 
         self.tower = tower
         """The Tower instance that manages all Wingmen in the same config dir."""
@@ -255,7 +260,7 @@ class Wingman:
         # Get discoverable skills list (whitelist)
         discoverable_skills = self.config.discoverable_skills
 
-        for skill_folder_name, skill_config_path in available_skills:
+        for skill_folder_name, skill_config_path, _is_custom, _is_local in available_skills:
             try:
                 # Load default skill config first to get the display name
                 skill_config_dict = ModuleManager.read_config(skill_config_path)
@@ -381,7 +386,7 @@ class Wingman:
                 folder_name = _get_skill_folder_from_module(skill_config.module)
                 user_skill_configs[folder_name] = skill_config
 
-        for skill_folder_name, skill_config_path in available_skills:
+        for skill_folder_name, skill_config_path, _is_custom, _is_local in available_skills:
             try:
                 skill_config_dict = ModuleManager.read_config(skill_config_path)
                 if not skill_config_dict:
@@ -625,7 +630,7 @@ class Wingman:
         )
         return command
 
-    def _select_command_response(self, command: CommandConfig) -> str | None:
+    def _select_instant_command_response(self, command: CommandConfig) -> str | None:
         """Returns one of the configured responses of the command. This base implementation returns a random one.
 
         Args:
@@ -692,18 +697,21 @@ class Wingman:
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
             return None
 
-    async def _execute_command(self, command: CommandConfig, is_instant=False) -> str:
+    async def _execute_command(self, command: CommandConfig, is_instant=False) -> tuple[str | None, str]:
         """Triggers the execution of a command. This base implementation executes the keypresses defined in the command.
 
         Args:
             command (dict): The command object from the config to execute
 
         Returns:
-            str: the selected response from the command's responses list in the config. "Ok" if there are none.
+            tuple[str | None, str]: A 2-tuple of:
+                - Instant response (str) to play immediately, or None if there is no instant response.
+                - Function/tool response (str) to feed back to the LLM (uses command's additional_context,
+                  falls back to "OK", or an error string on failure).
         """
 
         if not command:
-            return "Command not found"
+            return None, "Command not found"
 
         try:
             if len(command.actions or []) == 0:
@@ -725,14 +733,14 @@ class Wingman:
                     f"Executed command: {command.name}", color=LogType.COMMAND
                 )
 
-            return self._select_command_response(command) or "Ok"
+            return self._select_instant_command_response(command), command.additional_context or "OK"
         except Exception as e:
             await printr.print_async(
                 f"Error executing command '{command.name}' for Wingman '{self.name}': {str(e)}",
                 color=LogType.ERROR,
             )
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
-            return "ERROR DURING PROCESSING"  # hints to AI that there was an Error
+            return None, "ERROR DURING PROCESSING"
 
     async def execute_action(self, command: CommandConfig):
         """Executes the actions defined in the command (in order).
@@ -743,15 +751,35 @@ class Wingman:
         if not command or not command.actions:
             return
 
+        def contains_numpad_key(hotkey: str) -> bool:
+            """Check if the hotkey string contains a numpad key anywhere in the chord.
+
+            Args:
+                hotkey: The hotkey string (e.g., 'num 1', 'ctrl+num 1', 'alt+num 2')
+
+            Returns:
+                True if any token in the chord is a numpad key (num 0 - num 9)
+            """
+            if not hotkey:
+                return False
+            tokens = hotkey.lower().split('+')
+            return any(token.startswith('num ') for token in tokens)
+
         try:
             for action in command.actions:
                 if action.keyboard:
+                    if action.keyboard.hotkey_codes and not contains_numpad_key(action.keyboard.hotkey):
+                        code = action.keyboard.hotkey_codes
+                    else:
+                        code = action.keyboard.hotkey
+
                     if action.keyboard.press == action.keyboard.release:
                         # compressed key events
                         hold = action.keyboard.hold or 0.1
                         if (
                             action.keyboard.hotkey_codes
                             and len(action.keyboard.hotkey_codes) == 1
+                            and not contains_numpad_key(action.keyboard.hotkey)
                         ):
                             keyboard.direct_event(
                                 action.keyboard.hotkey_codes[0],
@@ -763,18 +791,15 @@ class Wingman:
                                 2 + (1 if action.keyboard.hotkey_extended else 0),
                             )
                         else:
-                            keyboard.press(
-                                action.keyboard.hotkey_codes or action.keyboard.hotkey
-                            )
+                            keyboard.press(code)
                             time.sleep(hold)
-                            keyboard.release(
-                                action.keyboard.hotkey_codes or action.keyboard.hotkey
-                            )
+                            keyboard.release(code)
                     else:
                         # single key events
                         if (
                             action.keyboard.hotkey_codes
                             and len(action.keyboard.hotkey_codes) == 1
+                            and not contains_numpad_key(action.keyboard.hotkey)
                         ):
                             keyboard.direct_event(
                                 action.keyboard.hotkey_codes[0],
@@ -783,7 +808,7 @@ class Wingman:
                             )
                         else:
                             keyboard.send(
-                                action.keyboard.hotkey_codes or action.keyboard.hotkey,
+                                code,
                                 action.keyboard.press,
                                 action.keyboard.release,
                             )
@@ -840,6 +865,7 @@ class Wingman:
 
             thread = threading.Thread(target=start_thread, args=(function, *args))
             thread.name = function.__name__
+            thread.daemon = True  # Mark as daemon so it dies when main process exits
             thread.start()
             return thread
         except Exception as e:
@@ -973,11 +999,12 @@ class Wingman:
         self.tower.save_wingman_commands(self.name)
 
     async def update_settings(self, settings: SettingsConfig):
-        """Update the settings of the Wingman. This method should always be called when the user Settings have changed."""
+        """Update the settings of the Wingman. This method should always be called when the user Settings have changed.
+        """
         self.settings = settings
-        await self.init_skills()
-        # Also reload MCPs if the wingman supports them
-        if hasattr(self, "init_mcps"):
-            await self.init_mcps()
+
+        # Propagate settings changes to already-loaded skills
+        for skill in self.skills:
+            skill.settings = settings
 
         printr.print(f"Wingman {self.name}'s settings changed", server_only=True)

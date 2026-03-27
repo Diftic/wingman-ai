@@ -91,3 +91,76 @@ def get_generated_files_dir(skill_name: str) -> str:
     if not path.exists(generated_files_path):
         makedirs(generated_files_path)
     return generated_files_path
+
+
+def get_custom_voices_dir() -> str:
+    """Get the path to the custom voices directory used for PocketTTS or future cloning providers.
+
+    Unlike get_writable_dir(), this is NOT versioned - custom voices persist
+    across Wingman AI updates. Location: APPDATA/WingmanAI/custom_voices/
+    """
+    dirs = PlatformDirs(
+        appname=APP_NAME,
+        appauthor=APP_AUTHOR,
+        ensure_exists=True,
+        roaming=True,
+    )
+    custom_voices_path = path.join(dirs.user_data_dir, "custom_voices")
+    if not path.exists(custom_voices_path):
+        makedirs(custom_voices_path)
+    _create_custom_voices_readme(custom_voices_path)
+    return custom_voices_path
+
+
+def _create_custom_voices_readme(custom_voices_path: str) -> None:
+    """Create a readme file in the custom voices directory with instructions in all supported languages."""
+    content = """# Voice Cloning
+
+To clone a voice, simply put a cloning sample into this directory here and reopen the voice selection dropdown in Wingman AI afterwards. There are 2 possible formats:
+- safetensor: Very fast and recommended
+- wav: Slower but also possible
+
+Voice samples should be around 30secs long and contain clean audio of the voice to clone - without any background noise or other interference.
+
+The best wav format to clone is 22.050Hz Mono.
+
+---
+
+# Stimmenklonen (Deutsch)
+
+Um eine Stimme zu klonen, lege einfach eine Klonvorlage in dieses Verzeichnis und öffne anschließend das Stimmenauswahl-Dropdown in Wingman AI erneut. Es gibt 2 mögliche Formate:
+- safetensor: Sehr schnell und empfohlen
+- wav: Langsamer, aber ebenfalls möglich
+
+Stimmproben sollten ca. 30 Sekunden lang sein und sauberes Audio der zu klonenden Stimme enthalten - ohne Hintergrundgeräusche oder andere Störungen.
+
+Das beste WAV-Format zum Klonen ist 22.050Hz Mono.
+
+---
+
+# Clonación de voz (Español)
+
+Para clonar una voz, simplemente coloca una muestra de clonación en este directorio y vuelve a abrir el menú desplegable de selección de voz en Wingman AI. Hay 2 formatos posibles:
+- safetensor: Muy rápido y recomendado
+- wav: Más lento pero también posible
+
+Las muestras de voz deben tener unos 30 segundos de duración y contener audio limpio de la voz a clonar, sin ruido de fondo ni otras interferencias.
+
+El mejor formato wav para clonar es 22.050Hz Mono.
+
+---
+
+# Clonage vocal (Français)
+
+Pour cloner une voix, placez simplement un échantillon de clonage dans ce répertoire et rouvrez le menu déroulant de sélection de voix dans Wingman AI. Il existe 2 formats possibles :
+- safetensor : Très rapide et recommandé
+- wav : Plus lent mais également possible
+
+Les échantillons vocaux doivent durer environ 30 secondes et contenir un audio propre de la voix à cloner, sans bruit de fond ni autre interférence.
+
+Le meilleur format wav pour le clonage est 22.050Hz Mono.
+"""
+    readme_path = path.join(custom_voices_path, "README.txt")
+    if not path.exists(readme_path):
+        with open(readme_path, "w", encoding="utf-8") as f:
+            f.write(content)

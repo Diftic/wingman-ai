@@ -5,10 +5,13 @@ from os import makedirs, path, remove, walk
 import copy
 import shutil
 import re
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 from pydantic import BaseModel, ValidationError
+from dataclasses import asdict, is_dataclass
+from pathlib import Path
+
 import yaml
-from api.enums import LogSource, LogType, enum_representer
+from api.enums import LogSource, LogType
 from api.interface import (
     Config,
     ConfigDirInfo,
@@ -40,6 +43,15 @@ DEFAULT_PREFIX = "_"
 _WINGMAN_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 -]*$")
 
 
+class ConfigValidationError(ValueError):
+    """Raised when a YAML config file fails Pydantic validation.
+
+    The message is already formatted for end-user display (human-readable paths,
+    no raw Pydantic noise). Callers should show ``str(e)`` directly and avoid
+    printing the traceback to the terminal.
+    """
+
+
 class ConfigManager:
     def __init__(self, app_root_path: str):
         self.log_source_name = "ConfigManager"
@@ -60,6 +72,82 @@ class ConfigManager:
         self.default_config = self.load_defaults_config(silent_on_error=True)
         # Load MCP config silently - migration may need to run first
         self.mcp_config = self.load_mcp_config(silent_on_error=True)
+
+    @staticmethod
+    def _format_validation_error(
+        error: ValidationError, data: Any, wingman_name: str = ""
+    ) -> str:
+        """Converts a Pydantic ValidationError into a human-readable message.
+
+        Replaces numeric list indices in the error path with the actual name/id
+        of the offending item so users immediately see *which* skill or property
+        is broken instead of a raw index like ``skills.7.custom_properties.2``.
+        """
+        lines: list[str] = []
+        for err in error.errors():
+            loc: tuple = err["loc"]
+            raw_msg: str = err["msg"]
+            err_type: str = err.get("type", "")
+
+            readable_parts: list[str] = []
+            current: Any = data
+
+            for part in loc:
+                if isinstance(part, int):
+                    # Numeric index – try to resolve it to a friendly label from
+                    # the current list element.
+                    item: Any = (
+                        current[part]
+                        if isinstance(current, list) and part < len(current)
+                        else None
+                    )
+                    label: Optional[str] = None
+                    if isinstance(item, dict):
+                        label = (
+                            item.get("display_name")
+                            or item.get("name")
+                            or item.get("id")
+                        )
+
+                    if label is not None:
+                        # Escape single quotes so path segments like ['{label}'] remain unambiguous
+                        label = label.replace("'", "\\'")
+
+                    if readable_parts and label:
+                        readable_parts[-1] = f"{readable_parts[-1]}['{label}']"
+                    elif readable_parts:
+                        readable_parts[-1] = f"{readable_parts[-1]}[{part}]"
+                    else:
+                        readable_parts.append(f"['{label}']" if label else f"[{part}]")
+
+                    current = item
+                else:
+                    readable_parts.append(str(part))
+                    if isinstance(current, dict) and part in current:
+                        current = current[part]
+                    else:
+                        current = None
+
+            path_str = ".".join(readable_parts)
+            if wingman_name:
+                safe_wingman_name = wingman_name.replace("'", "\\'")
+                path_str = f"wingman['{safe_wingman_name}'].{path_str}"
+
+            if err_type == "missing":
+                field = loc[-1] if loc else "?"
+                lines.append(
+                    f"  • {path_str}: required field '{field}' is missing"
+                )
+            else:
+                lines.append(f"  • {path_str}: {raw_msg}")
+
+        n = len(error.errors())
+        return (
+            f"Config validation failed"
+            + (f" for wingman '{wingman_name}'" if wingman_name else "")
+            + f" — {n} issue{'s' if n != 1 else ''}:\n"
+            + "\n".join(lines)
+        )
 
     def find_default_config(self) -> ConfigDirInfo:
         """Find the (first) default config (name starts with "_") found or another normal config as fallback."""
@@ -357,14 +445,24 @@ class ConfigManager:
             for filename in files:
                 if filename.endswith(".yaml") and not filename.startswith("."):
                     wingman_config = self.read_config(path.join(root, filename))
-                    merged_config = self.merge_configs(default_config, wingman_config)
+                    try:
+                        merged_config = self.merge_configs(default_config, wingman_config)
+                    except ConfigValidationError as e:
+                        # Re-raise with the source YAML file name prepended so the
+                        # user immediately knows which file to open and fix.
+                        raise ConfigValidationError(
+                            f"Invalid config in '{filename}':\n{e}"
+                        ) from None
                     default_config["wingmen"][
                         filename.replace(".yaml", "")
                     ] = merged_config
 
-        validated_config = Config(**default_config)
-        # not catching ValidationExceptions here, because we can't recover from it
-        # TODO: Notify the client about the error somehow
+        try:
+            validated_config = Config(**default_config)
+        except ValidationError as e:
+            raise ConfigValidationError(
+                self._format_validation_error(e, default_config)
+            ) from None
 
         return config_dir, validated_config
 
@@ -906,6 +1004,140 @@ class ConfigManager:
             avatar_path if create or path.exists(avatar_path) else default_avatar_path
         )
 
+    def restore_wingman_from_template(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> None:
+        """Overwrite a Wingman config with its shipped template defaults.
+
+        Eligibility is intentionally simple (and matches UI behavior): only specific
+        shipped Wingmen within specific shipped contexts are restorable.
+
+        This performs a full replace of the Wingman YAML file.
+        """
+
+        if wingman_file.is_deleted or wingman_file.file.startswith(DELETED_PREFIX):
+            raise ValueError("Cannot restore defaults for a deleted/hidden Wingman.")
+
+        template_yaml_path, template_dir_name = self._resolve_wingman_template_yaml(
+            config_dir=config_dir, wingman_name=wingman_file.name
+        )
+        if not template_yaml_path or not template_dir_name:
+            raise FileNotFoundError(
+                f"No template found for Wingman '{wingman_file.name}' in '{config_dir.name}'."
+            )
+
+        target_yaml_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            f"{wingman_file.name}.yaml",
+        )
+
+        # Full replace.
+        shutil.copyfile(template_yaml_path, target_yaml_path)
+        self.printr.print(
+            f"Restored Wingman '{wingman_file.name}' in '{config_dir.name}' from template.",
+            color=LogType.INFO,
+            server_only=True,
+            source=LogSource.SYSTEM,
+            source_name=self.log_source_name,
+        )
+
+        # Restore avatar if a template avatar exists, else delete the custom avatar
+        # so the UI falls back to the default wingman avatar.
+        template_avatar_path = path.join(
+            self.templates_dir,
+            CONFIGS_DIR,
+            template_dir_name,
+            f"{wingman_file.name}.png",
+        )
+        target_avatar_path = path.join(
+            self.config_dir,
+            config_dir.directory,
+            f"{wingman_file.name}.png",
+        )
+        try:
+            if path.exists(template_avatar_path):
+                shutil.copyfile(template_avatar_path, target_avatar_path)
+            elif path.exists(target_avatar_path):
+                remove(target_avatar_path)
+        except (OSError, PermissionError) as e:
+            self.printr.print(
+                f"Failed to restore avatar for '{wingman_file.name}': {e}",
+                color=LogType.WARNING,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
+    def can_restore_wingman_from_template(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> bool:
+        """Return True if a shipped template exists for this Wingman in this context."""
+
+        if wingman_file.is_deleted or wingman_file.file.startswith(DELETED_PREFIX):
+            return False
+
+        template_yaml_path, _ = self._resolve_wingman_template_yaml(
+            config_dir=config_dir, wingman_name=wingman_file.name
+        )
+        return bool(template_yaml_path)
+
+    def _resolve_wingman_template_yaml(
+        self, config_dir: ConfigDirInfo, wingman_name: str
+    ) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve the shipped template YAML path for a Wingman.
+
+        This scans the template directory in the Wingman AI installation (or repo
+        when running from source) and supports default-prefixed template folders
+        such as '_Star Citizen'.
+        """
+
+        templates_root = path.join(self.templates_dir, CONFIGS_DIR)
+        if not path.exists(templates_root):
+            return (None, None)
+
+        candidates: list[str] = []
+
+        # Prefer exact matches first.
+        preferred = [
+            config_dir.directory,
+            config_dir.name,
+            f"{DEFAULT_PREFIX}{config_dir.name}",
+        ]
+        for d in preferred:
+            # Defensive: some legacy code paths may accidentally set `directory` to an
+            # absolute path. We only accept plain directory names here.
+            if not d or path.isabs(d) or path.sep in d:
+                continue
+
+            if path.exists(path.join(templates_root, d)) and d not in candidates:
+                candidates.append(d)
+
+        # Then add any other template dirs whose normalized name matches.
+        try:
+            _, dirs, _ = next(walk(templates_root))
+        except StopIteration:
+            dirs = []
+
+        def normalize_dir_name(dir_name: str) -> str:
+            return dir_name.replace(DELETED_PREFIX, "", 1).replace(
+                DEFAULT_PREFIX, "", 1
+            )
+
+        for d in dirs:
+            if normalize_dir_name(d) == config_dir.name and d not in candidates:
+                candidates.append(d)
+
+        template_filename = f"{wingman_name}.template.yaml"
+        for template_dir_name in candidates:
+            template_yaml_path = path.join(
+                templates_root, template_dir_name, template_filename
+            )
+            if path.exists(template_yaml_path):
+                return (template_yaml_path, template_dir_name)
+
+        return (None, None)
+
     def delete_wingman_config(
         self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
     ):
@@ -956,27 +1188,102 @@ class ConfigManager:
                 parsed = yaml.safe_load(stream)
                 return parsed
             except yaml.YAMLError as e:
+                # Migration legacy: older versions accidentally wrote Python object tags
+                # (e.g. !!python/object:api.interface.ElevenlabsVoiceConfig). These are
+                # not supported by safe_load and should never be present in user configs.
+                # We defensively strip them and retry as plain YAML.
+                error_str = str(e)
+                if "tag:yaml.org,2002:python/object:" in error_str:
+                    try:
+                        stream.seek(0)
+                        raw = stream.read()
+                        sanitized = re.sub(
+                            r"(^|\s)(!!python/object:[^\s]+)",
+                            r"\1",
+                            raw,
+                            flags=re.MULTILINE,
+                        )
+                        sanitized = re.sub(
+                            r"(^|\s)(!python/object:[^\s]+)",
+                            r"\1",
+                            sanitized,
+                            flags=re.MULTILINE,
+                        )
+                        parsed = yaml.safe_load(sanitized)
+                        self.printr.print(
+                            f"Sanitized legacy python/object YAML tags in '{file_path}'.",
+                            color=LogType.WARNING,
+                            server_only=True,
+                            source=LogSource.SYSTEM,
+                            source_name=self.log_source_name,
+                        )
+                        return parsed
+                    except Exception:
+                        # Fall through to the normal error toast below
+                        pass
+
                 self.printr.toast_error(
-                    f"Could not read config '{file_path}':\n{str(e)}"
+                    f"Could not read config '{file_path}':\n{error_str}"
                 )
         return None
 
-    def write_config(self, file_path: str, content) -> bool:
-        yaml.add_multi_representer(Enum, enum_representer)
+    def __make_yaml_safe(self, value):
+        """Convert nested config structures into YAML-safe primitives.
 
+        PyYAML's default dumper may emit !!python/object tags when encountering
+        arbitrary Python objects (e.g. Pydantic models nested inside dicts).
+        This ensures we only write plain YAML that safe_load can read.
+        """
+
+        if value is None:
+            return None
+
+        if isinstance(value, Enum):
+            return value.value
+
+        if isinstance(value, (str, int, float, bool)):
+            return value
+
+        if isinstance(value, Path):
+            return str(value)
+
+        if is_dataclass(value):
+            return self.__make_yaml_safe(asdict(value))
+
+        # Pydantic v2 models (and other objects exposing model_dump)
+        model_dump = getattr(value, "model_dump", None)
+        if callable(model_dump):
+            return self.__make_yaml_safe(model_dump(exclude_none=True))
+
+        if isinstance(value, dict):
+            return {
+                self.__make_yaml_safe(k): self.__make_yaml_safe(v)
+                for k, v in value.items()
+            }
+
+        if isinstance(value, (list, tuple, set)):
+            return [self.__make_yaml_safe(v) for v in value]
+
+        # Last resort: stringify unknown objects (should be rare in configs)
+        return str(value)
+
+    def write_config(self, file_path: str, content) -> bool:
         dir_path = path.dirname(file_path)
         if not path.exists(dir_path):
             makedirs(dir_path)
 
         with open(file_path, "w", encoding="UTF-8") as stream:
             try:
-                yaml.dump(
-                    (
-                        content
-                        if isinstance(content, dict)
-                        else content.model_dump(exclude_none=True)
-                    ),
+                raw = (
+                    content
+                    if isinstance(content, dict)
+                    else content.model_dump(exclude_none=True)
+                )
+                yaml.safe_dump(
+                    self.__make_yaml_safe(raw),
                     stream,
+                    sort_keys=False,
+                    allow_unicode=True,
                 )
                 return True
             except yaml.YAMLError as e:
@@ -1060,6 +1367,59 @@ class ConfigManager:
     def save_defaults_config(self):
         """Write Defaults config to file"""
         return self.write_config(self.default_config_path, self.default_config)
+
+    def perform_hardware_scan(self, system_manager):
+        """Scans for hardware changes and updates settings accordingly."""
+        if self.settings_config.hardware_scan_performed:
+            return
+
+        self.printr.print(
+            "Performing initial hardware scan...",
+            color=LogType.STARTUP,
+            server_only=True,
+            source=LogSource.SYSTEM,
+            source_name=self.log_source_name,
+        )
+
+        changes = False
+        if system_manager.is_cuda_available():
+            self.settings_config.voice_activation.fasterwhisper.device = "cuda"
+            self.settings_config.voice_activation.fasterwhisper.compute_type = "auto"
+            self.printr.print(
+                f"- GPU detected: {system_manager.get_gpu_name()}",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+            self.printr.print(
+                "- Auto-configured FasterWhisper to use CUDA",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+            changes = True
+        else:
+            self.printr.print(
+                "- No NVIDIA GPU detected, keeping current STT settings",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
+
+        self.settings_config.hardware_scan_performed = True
+        self.save_settings_config()
+
+        if changes:
+            self.printr.print(
+                "Hardware scan complete. Settings updated.",
+                color=LogType.STARTUP,
+                server_only=True,
+                source=LogSource.SYSTEM,
+                source_name=self.log_source_name,
+            )
 
     def load_mcp_config(self, silent_on_error: bool = False) -> Optional[McpConfig]:
         """Load and validate MCP config from mcp.yaml"""
@@ -1171,6 +1531,9 @@ class ConfigManager:
                             default_dict[item_key], wingman_dict[item_key]
                         )
                         if nested_diff:
+                            # Always preserve the identifier key so the item
+                            # can be matched back during merge on load.
+                            nested_diff[identifier] = item_key
                             diff.append(nested_diff)
                     else:
                         diff.append(wingman_dict[item_key])
@@ -1253,6 +1616,9 @@ class ConfigManager:
         # Use a dictionary to ensure unique names and allow easy overrides
         merged_commands = {cmd["name"]: cmd for cmd in default_commands}
         for cmd in wingman_commands:
+            if "name" not in cmd:
+                # Skip malformed command entries (e.g. from older diff format)
+                continue
             merged_commands[cmd["name"]] = (
                 cmd  # Will override or add the wingman-specific command
             )
@@ -1283,6 +1649,7 @@ class ConfigManager:
             "whispercpp",
             "fasterwhisper",
             "xvasynth",
+            "pocket_tts",
             "wingman_pro",
             "perplexity",
             "xai",
@@ -1375,4 +1742,10 @@ class ConfigManager:
         if "discoverable_mcps" not in wingman and "discoverable_mcps" in default:
             merged["discoverable_mcps"] = default["discoverable_mcps"]
 
-        return WingmanConfig(**merged)
+        try:
+            return WingmanConfig(**merged)
+        except ValidationError as e:
+            wingman_name = merged.get("name", "")
+            raise ConfigValidationError(
+                self._format_validation_error(e, merged, wingman_name=wingman_name)
+            ) from None

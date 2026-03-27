@@ -132,7 +132,9 @@ class BaseMigration(ABC):
         Returns:
             Migrated MCP config
         """
-        return new
+        # Preserve user-defined MCP servers by default.
+        # If mcp.yaml did not exist in the old version, fall back to the template.
+        return old if old else new
 
     def has_secrets_migration(self) -> bool:
         """Check if this migration has custom secrets logic.

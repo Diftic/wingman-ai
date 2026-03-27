@@ -45,14 +45,13 @@ from api.interface import BenchmarkResult, CoreStatusResponse
 from api.enums import ENUM_TYPES, CoreState, LogType, WingmanInitializationErrorType
 import keyboard.keyboard as keyboard
 from services.command_handler import CommandHandler
-from services.config_manager import ConfigManager
+from services.config_manager import ConfigManager, ConfigValidationError
 from services.connection_manager import ConnectionManager
 from services.esp32_handler import Esp32Handler
 from services.secret_keeper import SecretKeeper
 from services.printr import Printr
 from services.system_manager import SystemManager
 from wingman_core import WingmanCore
-
 port = None
 host = None
 
@@ -112,7 +111,6 @@ core = WingmanCore(
 core.set_connection_manager(connection_manager)
 
 keyboard.hook(core.on_key)
-
 
 def custom_generate_unique_id(route: APIRoute):
     return f"{route.tags[0]}-{route.name}"
@@ -488,6 +486,7 @@ async def async_main(host: str, port: int, sidecar: bool):
 
 
 if __name__ == "__main__":
+    
     parser = argparse.ArgumentParser(description="Run the FastAPI server.")
     parser.add_argument(
         "-H",
@@ -536,6 +535,11 @@ if __name__ == "__main__":
 
     try:
         loop.run_until_complete(async_main(host=host, port=port, sidecar=args.sidecar))
+    except ConfigValidationError:
+        # The error message was already formatted and displayed by the config service
+        # (toast_error). Just record the traceback in the log file silently so the
+        # terminal shows only the clean, user-friendly message.
+        printr.logger.info(f"Config validation failed at startup:\n{traceback.format_exc()}")
     except Exception as e:
         printr.print(f"Error starting application: {str(e)}", color=LogType.ERROR)
         printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)

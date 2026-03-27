@@ -143,6 +143,11 @@ class XVASynthSettings(BaseModel):
     """Can be cpu or gpu. You may need to take additional steps to have XVASynth run on your GPU."""
 
 
+class PocketTTSSettings(BaseModel):
+    enable: bool
+    custom_model_path: Optional[str] = None
+
+
 class WhispercppSttConfig(BaseModel):
     temperature: float
 
@@ -273,9 +278,6 @@ class ElevenlabsConfig(BaseModel):
     model: str
     """see https://elevenlabs.io/docs/speech-synthesis/models"""
 
-    latency: Annotated[int, Field(strict=True, ge=0, le=4)]
-    """Optimization - Higher values are faster but can produce audio stuttering. 0 - 4"""
-
     voice: ElevenlabsVoiceConfig
     voice_settings: ElevenlabsVoiceSettingsConfig
     output_streaming: bool
@@ -328,6 +330,12 @@ class EdgeTtsConfig(BaseModel):
 
     Voice samples: https://speech.microsoft.com/portal/voicegallery
     """
+
+
+class PocketTTSConfig(BaseModel):
+    voice: Optional[str] = None
+    speed: float
+    output_streaming: bool
 
 
 class OpenAiCompatibleTtsConfig(BaseModel):
@@ -440,10 +448,13 @@ class OpenRouterArchitecture(BaseModel):
 
 
 class OpenRouterEndpointPricing(BaseModel):
-    request: str
-    image: str
-    prompt: str
-    completion: str
+    request: Optional[str] = None
+    image: Optional[str] = None
+    prompt: Optional[str] = None
+    completion: Optional[str] = None
+    input: Optional[str] = None
+    output: Optional[str] = None
+    discount: Optional[float] = None
 
 
 class OpenRouterEndpoint(BaseModel):
@@ -451,7 +462,7 @@ class OpenRouterEndpoint(BaseModel):
     context_length: float
     pricing: OpenRouterEndpointPricing
     provider_name: str
-    supported_parameters: list[str]
+    supported_parameters: Optional[list[str]] = None
 
 
 class OpenRouterEndpointResult(BaseModel):
@@ -624,6 +635,16 @@ class CommandActionConfig(BaseModel):
     """The joystick configuration for this action. Optional."""
 
 
+class CommandCategoryConfig(BaseModel):
+    """Configuration for a command category."""
+
+    id: str
+    """Unique identifier for the category (UUID)."""
+
+    name: str
+    """Display name of the category."""
+
+
 class CommandConfig(BaseModel):
     name: str
     """This is where the magic happens!
@@ -631,6 +652,8 @@ class CommandConfig(BaseModel):
     We use "DeployLandingGear" here but a number of lines like "I want to land", "Get ready to land" etc. will also work.
     If the Wingman doesn't call your command, try to rephrase the name here.
     """
+    category_id: Optional[str] = None
+    """Optional category ID to group commands."""
     is_system_command: Optional[bool] = False
     """Whether this is a system command that cannot be deleted or edited by the user."""
     instant_activation: Optional[list[str]] = None
@@ -639,6 +662,8 @@ class CommandConfig(BaseModel):
     """Optional: If true, the command will only be executed if the exact phrase is said. If false, the command will be executed if the exact phrase is said, or if the AI thinks it makes sense based on name and context."""
     responses: Optional[list[str]] = None
     """Optional: Provide responses that will be used when the command is executed. A random one will be chosen (if multiple)."""
+    additional_context: Optional[str] = None
+    """Optional: Provide additional context for the LLM after command execution."""
     actions: Optional[list[CommandActionConfig]] = None
     """The actions to execute when the command is called. You can use keyboard, mouse and wait actions here."""
 
@@ -772,6 +797,16 @@ class SkillBase(BaseModel):
     tools: Optional[list[SkillToolInfo]] = None
     """List of tools provided by this skill."""
 
+    is_custom: bool = False
+    """Whether this skill is a custom (user-installed) skill from custom_skills directory."""
+
+    is_local: bool = False
+    """Whether this skill is a local/in-development skill in the source skills dir (not git-tracked).
+    Only True in dev mode for skills that exist in ./skills/ but are not committed to git."""
+
+    folder_name: str = ""
+    """The skill's directory name on disk (e.g. 'heads_up'). May differ from 'name' (the class name)."""
+
 
 class WingmanSkillState(BaseModel):
     """Skill info with enabled/disabled state for a specific wingman."""
@@ -822,7 +857,7 @@ class McpServerConfig(BaseModel):
     """Connection timeout in seconds. Defaults to 30s for HTTP/SSE, 60s for stdio."""
 
     # Common settings
-    discoverable_by_default: bool = True
+    discoverable_by_default: bool = False
     """Whether this MCP server is discoverable by default for new wingmen.
     Set to False for specialized MCP servers that most users won't need immediately.
     Users can still make MCP servers discoverable per wingman."""
@@ -931,12 +966,14 @@ class NestedConfig(BaseModel):
     inworld: InworldConfig
     azure: AzureConfig
     xvasynth: XVASynthTtsConfig
+    pocket_tts: PocketTTSConfig
     whispercpp: WhispercppSttConfig
     fasterwhisper: FasterWhisperSttConfig
     wingman_pro: WingmanProConfig
     perplexity: PerplexityConfig
     xai: XaiConfig
     commands: Optional[list[CommandConfig]] = None
+    command_categories: Optional[list[CommandCategoryConfig]] = None
     skills: Optional[list[SkillConfig]] = None
     """User's skill configuration overrides. Skills not listed here use defaults."""
 
@@ -982,6 +1019,8 @@ class WingmanConfig(NestedConfig):
     """The "push-to-talk" joystick config for this wingman. Keep it pressed while talking! Don't use the same button for multiple wingmen!"""
     is_voice_activation_default: Optional[bool] = None
     """If voice activation is enabled and this is true, the Wingman will listen to your voice by default and without saying its name."""
+    created_with_version: Optional[str] = None
+    """The version of Wingman AI that created this configuration. Used to detect configs that may benefit from restoring updated defaults."""
 
 
 class Config(NestedConfig):
@@ -1024,17 +1063,45 @@ class DuplicateWingmanResult(BaseModel):
     wingman_file: WingmanConfigFileInfo
 
 
+class HudServerSettings(BaseModel):
+    """HUD Server settings for global configuration."""
+
+    enabled: bool
+    """Whether the HUD server should auto-start with Wingman AI Core."""
+
+    host: str
+    """The interface to listen on. Use '127.0.0.1' for local only, '0.0.0.0' for LAN access."""
+
+    port: int
+    """The port to listen on."""
+
+    framerate: int
+    """HUD overlay rendering framerate. Higher = smoother but more CPU. Minimum 1."""
+
+    layout_margin: int
+    """Margin from screen edges in pixels for HUD elements. Between 0 and 200."""
+
+    layout_spacing: int
+    """Spacing between stacked HUD windows in pixels. Between 0 and 100."""
+
+    screen: int
+    """Which screen/monitor to render the HUD on (1 = primary, 2 = secondary, etc.)."""
+
+
 class SettingsConfig(BaseModel):
     audio: Optional[AudioSettings] = None
     voice_activation: VoiceActivationSettings
     wingman_pro: WingmanProSettings
     xvasynth: XVASynthSettings
+    pocket_tts: PocketTTSSettings
+    hud_server: HudServerSettings
     debug_mode: bool
     streamer_mode: bool
     cancel_tts_key: Optional[str] = None
     cancel_tts_key_codes: Optional[list[int]] = None
     cancel_tts_joystick_button: Optional[CommandJoystickConfig] = None
     user_name: Optional[str] = None
+    hardware_scan_performed: bool = False
 
 
 class BenchmarkResult(BaseModel):

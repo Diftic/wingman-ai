@@ -1,19 +1,20 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import os
+import platform
 import re
 import threading
 from typing import Optional
 import pygame
 from google.genai import types
-from fastapi import APIRouter, File, UploadFile
+from fastapi import APIRouter, Body, File, UploadFile
 import requests
 import sounddevice as sd
 from showinfm import show_in_file_manager
 import azure.cognitiveservices.speech as speechsdk
 import keyboard.keyboard as keyboard
 import mouse.mouse as mouse
-from api.commands import CoreStateChangedCommand, VoiceActivationMutedCommand
+from api.commands import AudioLibraryPlaybackFinishedCommand, CoreStateChangedCommand, VoiceActivationMutedCommand
 from api.enums import (
     AzureRegion,
     CommandTag,
@@ -42,9 +43,10 @@ from providers.open_ai import OpenAi
 from providers.whispercpp import Whispercpp
 from providers.wingman_pro import WingmanPro
 from providers.xvasynth import XVASynth
+from providers.pocket_tts import PocketTTS
 from wingmen.open_ai_wingman import OpenAiWingman
 from wingmen.wingman import Wingman
-from services.file import get_writable_dir, get_audio_library_dir
+from services.file import get_writable_dir, get_audio_library_dir, get_custom_voices_dir
 from services.voice_service import VoiceService
 from services.settings_service import SettingsService
 from services.config_service import ConfigService
@@ -57,6 +59,8 @@ from services.secret_keeper import SecretKeeper
 from services.system_manager import SystemManager
 from services.tower import Tower
 from services.websocket_user import WebSocketUser
+from hud_server.server import HudServer
+from hud_server.validation import validate_hud_settings, get_invalid_summary
 
 
 class WingmanCore(WebSocketUser):
@@ -181,6 +185,18 @@ class WingmanCore(WebSocketUser):
         )
         self.router.add_api_route(
             methods=["POST"],
+            path="/pocket_tts/start",
+            endpoint=self.start_pocket_tts,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/pocket_tts/stop",
+            endpoint=self.stop_pocket_tts,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
             path="/open-filemanager",
             endpoint=self.open_file_manager,
             tags=tags,
@@ -201,6 +217,12 @@ class WingmanCore(WebSocketUser):
             methods=["POST"],
             path="/open-filemanager/audio-library",
             endpoint=self.open_audio_library_directory,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/open-filemanager/custom-voices",
+            endpoint=self.open_custom_voices_directory,
             tags=tags,
         )
         self.router.add_api_route(
@@ -315,9 +337,13 @@ class WingmanCore(WebSocketUser):
         )
 
         self.config_manager = config_manager
+        self.config_manager.perform_hardware_scan(self.system_manager)
         self.config_service = ConfigService(config_manager=config_manager)
         self.config_service.config_events.subscribe(
             "config_loaded", self.initialize_tower
+        )
+        self.config_service.config_events.subscribe(
+            "wingman_config_saved", self.on_wingman_config_saved
         )
 
         self.secret_keeper: SecretKeeper = SecretKeeper()
@@ -328,9 +354,14 @@ class WingmanCore(WebSocketUser):
             on_playback_started=self.on_playback_started,
             on_playback_finished=self.on_playback_finished,
         )
-        self.audio_library = AudioLibrary()
+        self.audio_library = AudioLibrary(
+            callback_playback_finished=self.on_audio_library_playback_finished,
+        )
 
         self.tower: Tower = None
+
+        # HUD Server
+        self._hud_server: Optional[HudServer] = None
 
         self.active_recording = {"key": "", "wingman": None}
 
@@ -347,6 +378,16 @@ class WingmanCore(WebSocketUser):
 
         self.key_events = {}
 
+        # Joystick thread management
+        self._joystick_thread: Optional[threading.Thread] = None
+        self._joystick_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._joystick_task: Optional[asyncio.Task] = None
+        self._joystick_configs: list = []
+        self._mouse_hook_registered: bool = False
+        self._joystick_recording_active: bool = False
+        self._joystick_recording_event: Optional[threading.Event] = None
+        self._joystick_recording_result: Optional[dict] = None
+
         self.settings_service = SettingsService(
             config_manager=config_manager, config_service=self.config_service
         )
@@ -359,6 +400,9 @@ class WingmanCore(WebSocketUser):
         self.settings_service.settings_events.subscribe(
             "va_settings_changed", self.on_va_settings_changed
         )
+        self.settings_service.settings_events.subscribe(
+            "hud_server_settings_changed", self._on_hud_server_settings_changed
+        )
 
         self.whispercpp = Whispercpp(
             settings=self.settings_service.settings.voice_activation.whispercpp,
@@ -369,16 +413,19 @@ class WingmanCore(WebSocketUser):
             app_is_bundled=app_is_bundled,
         )
         self.xvasynth = XVASynth(settings=self.settings_service.settings.xvasynth)
+        self.pocket_tts = PocketTTS(settings=self.settings_service.settings.pocket_tts)
         self.settings_service.initialize(
             whispercpp=self.whispercpp,
             fasterwhisper=self.fasterwhisper,
             xvasynth=self.xvasynth,
+            pocket_tts=self.pocket_tts,
         )
 
         self.voice_service = VoiceService(
             config_manager=self.config_manager,
             audio_player=self.audio_player,
             xvasynth=self.xvasynth,
+            pocket_tts=self.pocket_tts,
         )
 
         # restore settings
@@ -396,6 +443,105 @@ class WingmanCore(WebSocketUser):
     async def startup(self):
         if self.settings_service.settings.voice_activation.enabled:
             await self.set_voice_activation(is_enabled=True)
+
+        # Start HUD Server if enabled
+        await self._start_hud_server_if_enabled()
+
+    def _get_validated_hud_settings(
+        self, hud_settings, log_invalid: bool = True
+    ) -> dict:
+        """Validate HUD settings and return dict with defaults for invalid values."""
+        result = validate_hud_settings(hud_settings)
+        invalid = result.pop("_invalid", {})
+
+        if log_invalid and invalid:
+            self.printr.print(
+                "[HUD] " + get_invalid_summary(invalid), color=LogType.INFO
+            )
+
+        return result
+
+    async def _start_hud_server_if_enabled(self):
+        """Start the HUD server if enabled in settings."""
+        hud_settings = getattr(self.settings_service.settings, "hud_server", None)
+        if not hud_settings or not hud_settings.enabled:
+            return
+
+        if platform.system() != "Windows":
+            self.printr.print(
+                "[HUD] Server is only supported on Windows.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return
+
+        try:
+            validated = self._get_validated_hud_settings(hud_settings)
+            self._hud_server = HudServer()
+            # Run blocking start() in executor to avoid blocking the event loop
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                self._hud_server.start,
+                validated["host"],
+                validated["port"],
+                validated["framerate"],
+                validated["layout_margin"],
+                validated["layout_spacing"],
+                validated["screen"],
+            )
+            if not success:
+                self.printr.print(
+                    f"[HUD] Server failed to start on port {validated['port']}",
+                    color=LogType.ERROR,
+                    server_only=False,
+                )
+                self._hud_server = None
+        except Exception as e:
+            self.printr.print(
+                f"[HUD] Server error: {e}",
+                color=LogType.ERROR,
+                server_only=False,
+            )
+            self._hud_server = None
+
+    async def _on_hud_server_settings_changed(self, hud_settings):
+        """Handle HUD server settings changes — start or stop as needed."""
+        # Validate settings and apply defaults for invalid values
+        validated = self._get_validated_hud_settings(hud_settings)
+
+        should_run = (
+            hud_settings is not None
+            and hud_settings.enabled
+            and platform.system() == "Windows"
+        )
+        is_running = self._hud_server is not None and self._hud_server.is_running
+
+        if should_run and not is_running:
+            await self._start_hud_server_if_enabled()
+        elif not should_run and is_running:
+            await self._stop_hud_server()
+        elif should_run and is_running:
+            # Server already running - update settings without restart
+            try:
+                self._hud_server.update_settings(
+                    framerate=validated["framerate"],
+                    layout_margin=validated["layout_margin"],
+                    layout_spacing=validated["layout_spacing"],
+                    screen=validated["screen"],
+                )
+            except Exception as e:
+                self.printr.print(
+                    f"Error updating HUD server settings: {e}",
+                    color=LogType.ERROR,
+                    server_only=True,
+                )
+
+    async def _stop_hud_server(self):
+        """Stop the HUD server if running."""
+        if self._hud_server and self._hud_server.is_running:
+            await self._hud_server.stop()
+            self._hud_server = None
 
     async def set_core_state(self, state: CoreState) -> None:
         """Update the core state and broadcast to all connected clients.
@@ -451,31 +597,15 @@ class WingmanCore(WebSocketUser):
 
         return is_any_wingman_joystick_configured or is_cancel_tts_joystick_configured
 
-    async def start_joysticks(self, config: Config):
+    async def start_joysticks(self):
         pygame.init()
-        # Get all joystick configs
-        joystick_configs: list[CommandJoystickConfig] = [
-            config.wingmen[wingman].record_joystick_button
-            for wingman in config.wingmen
-            if config.wingmen[wingman].record_joystick_button
-        ]
-
-        cancel_tts_joystick_button = getattr(
-            self.settings_service.settings, "cancel_tts_joystick_button", None
-        )
-        if cancel_tts_joystick_button is not None and cancel_tts_joystick_button.guid:
-            joystick_configs.append(cancel_tts_joystick_button)
-
+        # Initialize ALL joysticks upfront so they generate events for both
+        # normal operation and recording mode.
         joysticks = [
             pygame.joystick.Joystick(x) for x in range(pygame.joystick.get_count())
         ]
         for joystick in joysticks:
-            if any(
-                joystick.get_guid() == joystick_config.guid
-                for joystick_config in joystick_configs
-                if joystick_config is not None and joystick_config.guid is not None
-            ):
-                joystick.init()
+            joystick.init()
 
         running = True
         while running and pygame.joystick.get_init():
@@ -484,41 +614,207 @@ class WingmanCore(WebSocketUser):
                     running = False
                 elif event.type == pygame.JOYBUTTONDOWN:
                     joystick_origin = pygame.joystick.Joystick(event.joy)
-                    for joystick_config in joystick_configs:
-                        if joystick_origin.get_guid() == joystick_config.guid:
-                            self.on_press(
-                                joystick_config=CommandJoystickConfig(
-                                    guid=joystick_config.guid, button=event.button
+                    # In recording mode, skip normal press handling
+                    if not self._joystick_recording_active:
+                        for joystick_config in self._joystick_configs:
+                            if joystick_origin.get_guid() == joystick_config.guid:
+                                self.on_press(
+                                    joystick_config=CommandJoystickConfig(
+                                        guid=joystick_config.guid, button=event.button
+                                    )
                                 )
-                            )
                 elif event.type == pygame.JOYBUTTONUP:
                     joystick_origin = pygame.joystick.Joystick(event.joy)
-                    for joystick_config in joystick_configs:
-                        if joystick_origin.get_guid() == joystick_config.guid:
-                            self.on_release(
-                                joystick_config=CommandJoystickConfig(
-                                    guid=joystick_config.guid, button=event.button
+                    # In recording mode, capture the button press and signal the caller
+                    if self._joystick_recording_active and self._joystick_recording_event:
+                        self._joystick_recording_result = {
+                            "button": event.button,
+                            "guid": joystick_origin.get_guid(),
+                            "name": joystick_origin.get_name(),
+                        }
+                        self._joystick_recording_event.set()
+                    else:
+                        for joystick_config in self._joystick_configs:
+                            if joystick_origin.get_guid() == joystick_config.guid:
+                                self.on_release(
+                                    joystick_config=CommandJoystickConfig(
+                                        guid=joystick_config.guid, button=event.button
+                                    )
                                 )
-                            )
 
-            # Add a small sleep to prevent the loop from consuming too much CPU
-            await asyncio.sleep(0.01)
+            # Sleep longer when idle (no configs and not recording) to reduce CPU usage
+            if not self._joystick_configs and not self._joystick_recording_active:
+                await asyncio.sleep(0.1)
+            else:
+                await asyncio.sleep(0.01)
 
-    def init_joystick(self, config: Config):
+    def _build_joystick_configs(self, config: Config) -> list:
+        """Build the list of joystick configs from wingman and settings config."""
+        joystick_configs: list[CommandJoystickConfig] = [
+            config.wingmen[wingman].record_joystick_button
+            for wingman in config.wingmen
+            if config.wingmen[wingman].record_joystick_button
+        ]
+        cancel_tts_joystick_button = getattr(
+            self.settings_service.settings, "cancel_tts_joystick_button", None
+        )
+        if cancel_tts_joystick_button is not None and cancel_tts_joystick_button.guid:
+            joystick_configs.append(cancel_tts_joystick_button)
+        return joystick_configs
+
+    async def init_joystick(self, config: Config):
+        # Update the configs that the joystick loop reads dynamically
+        self._joystick_configs = self._build_joystick_configs(config)
+
+        # If the thread is already running, no need to restart it.
+        # The loop reads _joystick_configs on every iteration.
+        if self._joystick_thread and self._joystick_thread.is_alive():
+            return
+
+        # Clear stale references from a previously dead thread
+        self._joystick_thread = None
+        self._joystick_loop = None
+        self._joystick_task = None
 
         def run_async_process():
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
+            self._joystick_loop = loop  # Store reference for cleanup
             try:
-                # Create a task for start_joysticks instead of running it directly
-                loop.create_task(self.start_joysticks(config))
-                # Run the event loop forever instead of running until complete
+                self._joystick_task = loop.create_task(self.start_joysticks())
+
+                # Stop the loop if the task finishes unexpectedly (e.g. exception)
+                # so the finally block runs and the thread exits cleanly.
+                def on_task_done(task):
+                    if task.exception():
+                        self.printr.print(
+                            f"Joystick event loop error: {task.exception()}",
+                            color=LogType.WARNING,
+                            server_only=True,
+                        )
+                    loop.call_soon_threadsafe(loop.stop)
+
+                self._joystick_task.add_done_callback(on_task_done)
                 loop.run_forever()
             finally:
+                # Ensure the task is cancelled and awaited before closing the loop.
+                # asyncio.all_tasks() raises RuntimeError when no loop is running
+                # (Python 3.10+), so we use the task reference directly instead.
+                task = self._joystick_task
+                if task and not task.done():
+                    task.cancel()
+                    try:
+                        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
+                    except Exception:
+                        pass
                 loop.close()
 
-        play_thread = threading.Thread(target=run_async_process)
-        play_thread.start()
+        self._joystick_thread = threading.Thread(target=run_async_process, daemon=True)
+        self._joystick_thread.name = "JoystickEventLoop"
+        self._joystick_thread.start()
+
+    async def record_joystick_action(self) -> dict|None:
+        """Record a single joystick button press using the existing joystick event loop.
+
+        If no joystick thread is running, starts one for recording.
+        Returns a dict with 'button', 'guid', and 'name' keys, or None if cancelled.
+        """
+        if not self._joystick_thread or not self._joystick_thread.is_alive():
+            config = (
+                self.tower.config
+                if self.tower
+                else self.config_service.current_config
+            )
+            await self.init_joystick(config)
+
+        # Use a threading.Event to synchronize across event loops instead of
+        # asyncio futures, which cannot be awaited from a different loop.
+        self._joystick_recording_event = threading.Event()
+        self._joystick_recording_result = None
+        self._joystick_recording_active = True
+
+        try:
+            # Poll the threading event from the caller's async loop
+            while not self._joystick_recording_event.is_set():
+                await asyncio.sleep(0.01)
+            return self._joystick_recording_result
+        finally:
+            self._joystick_recording_active = False
+            self._joystick_recording_event = None
+            self._joystick_recording_result = None
+
+    def cancel_joystick_recording(self):
+        """Cancel an in-progress joystick recording."""
+        self._joystick_recording_active = False
+        if self._joystick_recording_event:
+            self._joystick_recording_event.set()
+
+    async def refresh_input_hooks(self):
+        """Refresh mouse and joystick hooks based on current wingman configurations.
+
+        This method should be called when a wingman's activation key (mouse button or
+        joystick button) configuration changes to ensure the new keys take effect immediately.
+
+        Note: The on_press handler already dynamically checks tower.wingmen for activation keys,
+        so we only need to ensure the hooks are registered and joystick thread has latest config.
+        """
+        if not self.tower:
+            return
+
+        # Check if any wingman has a mouse button configured
+        needs_mouse = any(
+            wingman.get_record_mouse_button() for wingman in self.tower.wingmen
+        )
+
+        # Register mouse hook if needed and not already registered
+        if needs_mouse and not self._mouse_hook_registered:
+            mouse.hook(self.on_mouse)
+            self._mouse_hook_registered = True
+            self.printr.print(
+                "Mouse hook registered for new activation key.",
+                color=LogType.INFO,
+                server_only=True,
+            )
+
+        # Check if any wingman has a joystick button configured
+        needs_joystick = any(
+            wingman.get_record_joystick_button() for wingman in self.tower.wingmen
+        )
+
+        # Also check for cancel TTS joystick button in settings
+        cancel_tts_joystick_button = getattr(
+            self.settings_service.settings, "cancel_tts_joystick_button", None
+        )
+        if cancel_tts_joystick_button is not None and cancel_tts_joystick_button.guid:
+            needs_joystick = True
+
+        joystick_running = (
+            self._joystick_thread is not None and self._joystick_thread.is_alive()
+        )
+
+        if needs_joystick:
+            # Update joystick configs dynamically — no thread restart needed.
+            # The joystick loop reads _joystick_configs on every iteration.
+            current_wingmen = {
+                wingman.name: wingman.config for wingman in self.tower.wingmen
+            }
+            current_config = self.tower.config.model_copy(
+                update={"wingmen": current_wingmen}
+            )
+            await self.init_joystick(current_config)
+            self.printr.print(
+                "Joystick hooks refreshed for new activation key.",
+                color=LogType.INFO,
+                server_only=True,
+            )
+        elif joystick_running and not needs_joystick:
+            # No joystick needed anymore — clear configs so the loop idles,
+            # but keep the thread alive for future recordings.
+            self._joystick_configs = []
+
+    async def on_wingman_config_saved(self, wingman_config):
+        """Called when a wingman config is saved. Refreshes input hooks if needed."""
+        await self.refresh_input_hooks()
 
     async def initialize_tower(self, config_dir_info: ConfigWithDirInfo):
         if not self.is_client_logged_in:
@@ -539,8 +835,9 @@ class WingmanCore(WebSocketUser):
         # Register hooks
         if self.is_mouse_configured(config):
             mouse.hook(self.on_mouse)
+            self._mouse_hook_registered = True
         if self.is_joystick_configured(config):
-            self.init_joystick(config)
+            await self.init_joystick(config)
 
         self.tower = Tower(
             config=config,
@@ -551,6 +848,7 @@ class WingmanCore(WebSocketUser):
             whispercpp=self.whispercpp,
             fasterwhisper=self.fasterwhisper,
             xvasynth=self.xvasynth,
+            pocket_tts=self.pocket_tts,
         )
         self.tower_errors = await self.tower.instantiate_wingmen(
             self.config_manager.settings_config
@@ -577,6 +875,19 @@ class WingmanCore(WebSocketUser):
                 await wingman.unload()
             self.tower = None
             self.config_service.set_tower(None)
+
+            # Clear joystick configs so the loop idles, but keep the thread
+            # alive. Restarting it on a new thread breaks pygame's DirectInput
+            # handles which are bound to the thread that created them.
+            self._joystick_configs = []
+
+            # Unhook mouse to prevent duplicate hooks
+            try:
+                mouse.unhook_all()
+                self._mouse_hook_registered = False
+            except Exception:
+                pass  # May fail if no hooks are registered
+
             self.printr.print(
                 "Tower unloaded.",
                 server_only=True,
@@ -995,7 +1306,9 @@ class WingmanCore(WebSocketUser):
         await self.audio_player.stop_playback()
 
     # POST /ask-wingman-conversation-provider
-    async def ask_wingman_conversation_provider(self, text: str, wingman_name: str):
+    async def ask_wingman_conversation_provider(
+        self, wingman_name: str, text: str = Body(...)
+    ):
         wingman = self.tower.get_wingman_by_name(wingman_name)
 
         if wingman and text:
@@ -1130,6 +1443,19 @@ class WingmanCore(WebSocketUser):
             devices.append("cuda")
         return devices
 
+    # POST /pocket_tts/start
+    def start_pocket_tts(self):
+        self.pocket_tts.load_model()
+
+    # Post /pocket_tts/stop
+    def stop_pocket_tts(self):
+        try:
+            self.pocket_tts.unload_model()
+        except Exception as e:
+            self.printr.print(
+                f"Error stopping PocketTTS: {e}", color=LogType.ERROR, server_only=True
+            )
+
     # POST /xvasynth/start
     def start_xvasynth(self):
         self.xvasynth.start_server()
@@ -1138,8 +1464,10 @@ class WingmanCore(WebSocketUser):
     def stop_xvasynth(self):
         try:
             self.xvasynth.stop_server()
-        except Exception:
-            pass
+        except Exception as e:
+            self.printr.print(
+                f"Error stopping XVASynth: {e}", color=LogType.ERROR, server_only=True
+            )
 
     def get_xvasynth_model_dirs(self):
         subfolders = []
@@ -1189,6 +1517,10 @@ class WingmanCore(WebSocketUser):
     # POST /open-filemanager/audio-library
     def open_audio_library_directory(self):
         show_in_file_manager(get_audio_library_dir())
+
+    # POST /open-filemanager/custom-voices
+    def open_custom_voices_directory(self):
+        show_in_file_manager(get_custom_voices_dir())
 
     # GET /models/openrouter
     async def get_openrouter_models(self):
@@ -1370,6 +1702,11 @@ class WingmanCore(WebSocketUser):
             audio_file=AudioFile(name=name, path=path), volume_modifier=volume
         )
 
+    def on_audio_library_playback_finished(self, audio_file: AudioFile):
+        if self._connection_manager:
+            command = AudioLibraryPlaybackFinishedCommand(audio_file=audio_file)
+            self.ensure_async(self._connection_manager.broadcast(command))
+
     # POST /elevenlabs/generate-sfx
     async def generate_sfx_elevenlabs(
         self,
@@ -1440,8 +1777,13 @@ class WingmanCore(WebSocketUser):
     async def shutdown(self):
         await self.set_core_state(CoreState.SHUTTING_DOWN)
 
+        # Stop HUD Server
+        await self._stop_hud_server()
+
         if self.settings_service.settings.xvasynth.enable:
-            await self.stop_xvasynth()
+            self.stop_xvasynth()
+        if self.settings_service.settings.pocket_tts.enable:
+            self.stop_pocket_tts()
         await self.unload_tower()
 
         self.printr.print(

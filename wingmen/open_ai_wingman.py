@@ -147,6 +147,9 @@ class OpenAiWingman(Wingman):
             if self.uses_provider("fasterwhisper"):
                 self.fasterwhisper.validate(errors)
 
+            if self.uses_provider("pocket_tts"):
+                self.pocket_tts.validate(errors)
+
             if self.uses_provider("openai"):
                 await self.validate_and_set_openai(errors)
 
@@ -217,6 +220,8 @@ class OpenAiWingman(Wingman):
                     self.config.features.stt_provider == SttProvider.OPENAI,
                     self.config.features.conversation_provider
                     == ConversationProvider.OPENAI,
+                    self.config.features.image_generation_provider
+                    == ImageGenerationProvider.OPENAI,
                 ]
             )
         elif provider_type == "mistral":
@@ -278,6 +283,8 @@ class OpenAiWingman(Wingman):
             return self.config.features.tts_provider == TtsProvider.ELEVENLABS
         elif provider_type == "openai_compatible":
             return self.config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE
+        elif provider_type == "pocket_tts":
+            return self.config.features.tts_provider == TtsProvider.POCKET_TTS
         elif provider_type == "hume":
             return self.config.features.tts_provider == TtsProvider.HUME
         elif provider_type == "inworld":
@@ -295,6 +302,8 @@ class OpenAiWingman(Wingman):
                     == ConversationProvider.WINGMAN_PRO,
                     self.config.features.tts_provider == TtsProvider.WINGMAN_PRO,
                     self.config.features.stt_provider == SttProvider.WINGMAN_PRO,
+                    self.config.features.image_generation_provider
+                    == ImageGenerationProvider.WINGMAN_PRO,
                 ]
             )
         elif provider_type == "perplexity":
@@ -716,7 +725,8 @@ class OpenAiWingman(Wingman):
             result = OpenRouterEndpointResult(**content.get("data", {}))
             supports_tools = any(
                 all(
-                    p in endpoint.supported_parameters for p in ["tools", "tool_choice"]
+                    p in (endpoint.supported_parameters or [])
+                    for p in ["tools", "tool_choice"]
                 )
                 for endpoint in result.endpoints
             )
@@ -1048,7 +1058,7 @@ class OpenAiWingman(Wingman):
             )
             return None, None, None, True
 
-        response_message, tool_calls = await self._process_completion(completion)
+        response_message, tool_calls = await self._process_completion(completion, instant_command_executed is False)
 
         # add message and dummy tool responses to conversation history
         is_waiting_response_needed, is_summarize_needed = await self._add_gpt_response(
@@ -1321,7 +1331,7 @@ class OpenAiWingman(Wingman):
             self.pending_tool_calls.append(tool_call.id)
 
     async def _update_tool_response(self, tool_call_id, response) -> bool:
-        """Updates a tool response in the conversation history. This also moves the message to the end of the history if all tool responses are given.
+        """Updates a tool response in the conversation history.
 
         Args:
             tool_call_id (str): The identifier of the tool call to update the response for.
@@ -1333,7 +1343,6 @@ class OpenAiWingman(Wingman):
         if not tool_call_id:
             return False
 
-        completed = False
         index = len(self.messages)
 
         # go through message history to find and update the tool call
@@ -1346,62 +1355,9 @@ class OpenAiWingman(Wingman):
                 message["content"] = str(response)
                 if tool_call_id in self.pending_tool_calls:
                     self.pending_tool_calls.remove(tool_call_id)
-                break
-        if not index:
-            return False
+                return True
 
-        # find the assistant message that triggered the tool call
-        for message in reversed(self.messages[:index]):
-            index -= 1
-            if self.__get_message_role(message) == "assistant":
-                break
-
-        # check if all tool calls are completed
-        completed = True
-        for tool_call in self.messages[index].tool_calls:
-            if tool_call.id in self.pending_tool_calls:
-                completed = False
-                break
-        if not completed:
-            return True
-
-        # find the first user message(s) that triggered this assistant message
-        index -= 1  # skip the assistant message
-        for message in reversed(self.messages[:index]):
-            index -= 1
-            if self.__get_message_role(message) != "user":
-                index += 1
-                break
-
-        # built message block to move
-        start_index = index
-        end_index = start_index
-        reached_tool_call = False
-        for message in self.messages[start_index:]:
-            if not reached_tool_call and self.__get_message_role(message) == "tool":
-                reached_tool_call = True
-            if reached_tool_call and self.__get_message_role(message) == "user":
-                end_index -= 1
-                break
-            end_index += 1
-        if end_index == len(self.messages):
-            end_index -= 1  # loop ended at the end of the message history, so we have to go back one index
-        message_block = self.messages[start_index : end_index + 1]
-
-        # check if the message block is already at the end
-        if end_index == len(self.messages) - 1:
-            return True
-
-        # move message block to the end
-        del self.messages[start_index : end_index + 1]
-        self.messages.extend(message_block)
-
-        if self.settings.debug_mode:
-            await printr.print_async(
-                "Moved message block to the end.", color=LogType.INFO
-            )
-
-        return True
+        return False
 
     async def add_user_message(self, content: str):
         """Shortens the conversation history if needed and adds a user message to it.
@@ -1447,6 +1403,7 @@ class OpenAiWingman(Wingman):
             role="assistant",
             tool_calls=[],
         )
+        tool_id_to_command = {}
         for command in commands:
             tool_id = None
             if (
@@ -1462,8 +1419,13 @@ class OpenAiWingman(Wingman):
                 self.config.features.conversation_provider
                 == ConversationProvider.GOOGLE
             ):
-                if self.config.google.conversation_model.startswith("gemini-3"):
-                    # gemini 3 needs a thought signature like this, but we cant fake it:
+                if (
+                    self.config.google.conversation_model.startswith("gemini-3")
+                    or self.config.google.conversation_model == "gemini-flash-latest"
+                    or self.config.google.conversation_model == "gemini-pro-latest"
+                    or self.config.google.conversation_model == "gemini-flash-lite-latest"
+                ):
+                    # gemini 3+ (latest = 3+) needs a thought signature like this, but we cant fake it:
                     # {
                     #     'model_extra': {
                     #         'extra_content': {
@@ -1489,10 +1451,12 @@ class OpenAiWingman(Wingman):
                 type="function",
             )
             message.tool_calls.append(tool_call)
+            tool_id_to_command[tool_id] = command
 
         await self._add_gpt_response(message, message.tool_calls)
         for tool_call in message.tool_calls:
-            await self._update_tool_response(tool_call.id, "OK")
+            command = tool_id_to_command[tool_call.id]
+            await self._update_tool_response(tool_call.id, command.additional_context or "OK")
 
     async def _cleanup_conversation_history(self):
         """Cleans up the conversation history by removing messages that are too old."""
@@ -1568,7 +1532,7 @@ class OpenAiWingman(Wingman):
             responses = []
             for command in commands:
                 if command.responses:
-                    responses.append(self._select_command_response(command))
+                    responses.append(self._select_instant_command_response(command))
 
             if len(responses) == len(commands):
                 # clear duplicates
@@ -1881,7 +1845,7 @@ class OpenAiWingman(Wingman):
 
         return completion
 
-    async def _process_completion(self, completion: ChatCompletion):
+    async def _process_completion(self, completion: ChatCompletion, allow_tool_calls: bool = True):
         """Processes the completion returned by the LLM call.
 
         Args:
@@ -1896,6 +1860,10 @@ class OpenAiWingman(Wingman):
         content = response_message.content
         if content is None:
             response_message.content = ""
+
+        # remove hallucinated tools, if none were allowed
+        if not allow_tool_calls:
+            response_message.tool_calls = None
 
         # temporary fix for tool calls that have a command name as function name
         if response_message.tool_calls:
@@ -2112,15 +2080,15 @@ class OpenAiWingman(Wingman):
 
                 return function_response, None, None, tool_label
 
+        # Handle command calls
         if function_name == "execute_command":
             # get the command based on the argument passed by the LLM
             command = self.get_command(function_args["command_name"])
             # execute the command
-            function_response = await self._execute_command(command)
+            instant_response, function_response = await self._execute_command(command)
             tool_label = f"Command: {function_args.get('command_name', function_name)}"
             # if the command has responses, we have to play one of them
-            if command and command.responses:
-                instant_response = self._select_command_response(command)
+            if instant_response:
                 await self.play_to_user(instant_response)
 
         # Go through the skills and check if the function name matches any of the tools
@@ -2322,6 +2290,14 @@ class OpenAiWingman(Wingman):
                     wingman_name=self.name,
                     stream=self.config.openai_compatible_tts.output_streaming,
                 )
+            elif self.config.features.tts_provider == TtsProvider.POCKET_TTS:
+                await self.pocket_tts.play_audio(
+                    text=text,
+                    config=self.config.pocket_tts,
+                    sound_config=sound_config,
+                    audio_player=self.audio_player,
+                    wingman_name=self.name,
+                )
             elif self.config.features.tts_provider == TtsProvider.WINGMAN_PRO:
                 if self.config.wingman_pro.tts_provider == WingmanProTtsProvider.OPENAI:
                     await self.wingman_pro.generate_openai_speech(
@@ -2364,12 +2340,15 @@ class OpenAiWingman(Wingman):
             )
             printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
 
-    async def _execute_command(self, command: CommandConfig, is_instant=False) -> str:
-        """Does what Wingman base does, but always returns "Ok" instead of a command response.
-        Otherwise, the AI will try to respond to the command and generate a "duplicate" response for instant_activation commands.
+    async def _execute_command(self, command: CommandConfig, is_instant=False) -> tuple[str | None, str]:
+        """Executes a command by delegating to the Wingman base implementation.
+
+        Returns:
+            tuple[str | None, str]: A 2-tuple of:
+                - Instant response (str) to play immediately, or None if there is no instant response.
+                - Function/tool response (str) to feed back to the LLM.
         """
-        await super()._execute_command(command, is_instant)
-        return "Ok"
+        return await super()._execute_command(command, is_instant)
 
     def build_tools(self) -> list[dict]:
         """

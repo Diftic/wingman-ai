@@ -1,7 +1,8 @@
 import asyncio
+import shutil
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from api.enums import LogType
+from api.enums import LogSource, LogType
 from api.interface import (
     ConfigDirInfo,
     ConfigWithDirInfo,
@@ -14,6 +15,7 @@ from api.interface import (
     McpServerState,
     NestedConfig,
     NewWingmanTemplate,
+    CommandCategoryConfig,
     SkillConfig,
     SkillBase,
     WingmanConfig,
@@ -22,6 +24,7 @@ from api.interface import (
 )
 from services.config_manager import ConfigManager
 from services.config_migration_service import ConfigMigrationService
+from services.file import get_custom_skills_dir
 from services.module_manager import ModuleManager
 from services.printr import Printr
 from services.pub_sub import PubSub
@@ -119,6 +122,20 @@ class ConfigService:
         )
         self.router.add_api_route(
             methods=["POST"],
+            path="/config/wingman/restore-defaults",
+            endpoint=self.restore_wingman_defaults,
+            response_model=ConfigWithDirInfo,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/config/wingman/can-restore-defaults",
+            endpoint=self.can_restore_wingman_defaults,
+            response_model=bool,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
             path="/config/create",
             endpoint=self.create_config,
             tags=tags,
@@ -167,6 +184,12 @@ class ConfigService:
             endpoint=self.toggle_wingman_skill,
             tags=tags,
         )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/custom-skills",
+            endpoint=self.uninstall_skill,
+            tags=tags,
+        )
         # MCP server endpoints
         self.router.add_api_route(
             methods=["GET"],
@@ -211,6 +234,24 @@ class ConfigService:
             methods=["POST"],
             path="/config/defaults",
             endpoint=self.save_defaults_config,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/config/wingman/command-category",
+            endpoint=self.add_command_category,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["PATCH"],
+            path="/config/wingman/command-category",
+            endpoint=self.update_command_category,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/config/wingman/command-category",
+            endpoint=self.delete_command_category,
             tags=tags,
         )
 
@@ -358,6 +399,193 @@ class ConfigService:
         except Exception as e:
             self.printr.toast_error(str(e))
             raise e
+
+    # DELETE /custom-skills
+    async def uninstall_skill(self, skill_name: str):
+        """Uninstall a custom skill globally: disable it on all wingmen, remove all
+        custom property overrides from every wingman config, and delete the skill
+        directory from custom_skills.
+
+        Args:
+            skill_name: The skill's folder name in custom_skills (e.g. 'heads_up'),
+                        NOT the internal class name (e.g. 'HeadsUp').
+
+        This is a cross-wingman, cross-config operation designed to allow users to
+        cleanly remove a custom skill version before installing a new one.
+        """
+        import os
+
+        # 1. Verify the skill is actually a custom skill
+        custom_skills_dir = get_custom_skills_dir()
+        skill_dir_path = os.path.join(custom_skills_dir, skill_name)
+
+        if not os.path.isdir(skill_dir_path):
+            msg = f"Custom skill '{skill_name}' not found in custom_skills directory."
+            self.printr.toast_error(msg)
+            raise HTTPException(status_code=404, detail=msg)
+
+        self.printr.print(
+            f"Starting uninstall of custom skill '{skill_name}'...",
+            color=LogType.WARNING,
+            source=LogSource.SYSTEM,
+            source_name=self.source_name,
+            server_only=True,
+        )
+
+        try:
+            # 2. Determine the skill's internal name from its default_config.yaml
+            skill_internal_name = skill_name  # fallback to folder name
+            default_config_path = os.path.join(skill_dir_path, "default_config.yaml")
+            if os.path.isfile(default_config_path):
+                try:
+                    skill_default_config = self.config_manager.read_config(
+                        default_config_path
+                    )
+                    if skill_default_config and "name" in skill_default_config:
+                        skill_internal_name = skill_default_config["name"]
+                except Exception:
+                    pass  # use folder name as fallback
+
+            skill_module_prefix = f"skills.{skill_name}.main"
+            affected_wingmen = []
+
+            # 3. Disable on all active wingmen in the tower (runtime)
+            if self.tower:
+                for wingman in self.tower.wingmen:
+                    skill_was_active = any(
+                        s.config.name == skill_internal_name for s in wingman.skills
+                    )
+                    if skill_was_active:
+                        try:
+                            success, msg = await wingman.disable_skill(
+                                skill_internal_name
+                            )
+                            self.printr.print(
+                                f"  Runtime disable '{skill_internal_name}' on '{wingman.name}': {msg}",
+                                server_only=True,
+                            )
+                        except Exception as e:
+                            self.printr.print(
+                                f"  Warning: could not runtime-disable '{skill_internal_name}' on '{wingman.name}': {e}",
+                                color=LogType.WARNING,
+                                server_only=True,
+                            )
+
+            # 4. Remove skill from ALL wingman configs across ALL config dirs
+            for config_dir in self.config_manager.get_config_dirs():
+                if config_dir.is_deleted:
+                    continue
+
+                wingman_files = self.config_manager.get_wingmen_configs(config_dir)
+                for wingman_file in wingman_files:
+                    if wingman_file.is_deleted:
+                        continue
+
+                    try:
+                        wingman_config = self.config_manager.load_wingman_config(
+                            config_dir=config_dir, wingman_file=wingman_file
+                        )
+                    except Exception as e:
+                        self.printr.print(
+                            f"  Warning: could not load config for '{wingman_file.name}' in '{config_dir.name}': {e}",
+                            color=LogType.WARNING,
+                            server_only=True,
+                        )
+                        continue
+
+                    modified = False
+
+                    # Remove from discoverable_skills list
+                    if (
+                        wingman_config.discoverable_skills
+                        and skill_internal_name in wingman_config.discoverable_skills
+                    ):
+                        wingman_config.discoverable_skills.remove(skill_internal_name)
+                        modified = True
+                        self.printr.print(
+                            f"  Removed '{skill_internal_name}' from discoverable_skills of '{wingman_file.name}' in '{config_dir.name}'.",
+                            server_only=True,
+                        )
+
+                    # Remove skill overrides from skills list (match by name OR module)
+                    if wingman_config.skills:
+                        original_count = len(wingman_config.skills)
+                        wingman_config.skills = [
+                            s
+                            for s in wingman_config.skills
+                            if s.name != skill_internal_name
+                            and s.module != skill_module_prefix
+                        ]
+                        if len(wingman_config.skills) < original_count:
+                            modified = True
+                            self.printr.print(
+                                f"  Removed skill config overrides for '{skill_internal_name}' from '{wingman_file.name}' in '{config_dir.name}'.",
+                                server_only=True,
+                            )
+                        if not wingman_config.skills:
+                            wingman_config.skills = None
+
+                    if modified:
+                        affected_wingmen.append(
+                            f"{wingman_file.name} ({config_dir.name})"
+                        )
+                        # Save the cleaned config (wrapped in try/except so one failure
+                        # doesn't prevent cleanup of remaining configs)
+                        try:
+                            self.config_manager.save_wingman_config(
+                                config_dir=config_dir,
+                                wingman_file=wingman_file,
+                                wingman_config=wingman_config,
+                            )
+                        except Exception as e:
+                            self.printr.print(
+                                f"  Warning: failed to save cleaned config for '{wingman_file.name}' in '{config_dir.name}': {e}",
+                                color=LogType.WARNING,
+                                server_only=True,
+                            )
+
+            # 5. Delete the custom skill directory
+            try:
+                shutil.rmtree(skill_dir_path)
+                self.printr.print(
+                    f"  Deleted custom skill directory: {skill_dir_path}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+            except Exception as e:
+                msg = f"Failed to delete skill directory '{skill_dir_path}': {e}"
+                self.printr.toast_error(msg)
+                raise HTTPException(status_code=500, detail=msg) from e
+
+            # 6. Summary logging and toast
+            if affected_wingmen:
+                affected_list = ", ".join(affected_wingmen)
+                self.printr.print(
+                    f"Custom skill '{skill_internal_name}' uninstalled. Affected Wingmen: {affected_list}",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                self.printr.toast(
+                    f"Custom skill '{skill_internal_name}' uninstalled. Cleaned up configs for: {affected_list}"
+                )
+            else:
+                self.printr.print(
+                    f"Custom skill '{skill_internal_name}' uninstalled. No Wingman configs were affected.",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+                self.printr.toast(
+                    f"Custom skill '{skill_internal_name}' uninstalled successfully."
+                )
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            self.printr.toast_error(f"Failed to uninstall skill '{skill_name}': {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to uninstall skill '{skill_name}': {e}",
+            ) from e
 
     # GET /wingman-mcps
     async def get_wingman_mcps(
@@ -869,6 +1097,40 @@ class ConfigService:
             wingman_file=new_wingman_file,
         )
 
+    # POST /config/wingman/restore-defaults
+    async def restore_wingman_defaults(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> ConfigWithDirInfo:
+        """Restore a Wingman to its shipped default configuration.
+
+        The shipped default is determined by scanning template files under
+        templates/configs/ (installation templates in release, repo templates in dev).
+        After restoring, the config is reloaded so the active context reflects the reset.
+        """
+
+        try:
+            self.config_manager.restore_wingman_from_template(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+        except FileNotFoundError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
+
+        return await self.load_config(config_dir)
+
+    # POST /config/wingman/can-restore-defaults
+    async def can_restore_wingman_defaults(
+        self, config_dir: ConfigDirInfo, wingman_file: WingmanConfigFileInfo
+    ) -> bool:
+        """Return whether a Wingman has shipped template defaults in this context."""
+
+        can_restore = self.config_manager.can_restore_wingman_from_template(
+            config_dir=config_dir,
+            wingman_file=wingman_file,
+        )
+        return can_restore
+
     # POST config/save-wingman
     async def save_wingman_config(
         self,
@@ -987,6 +1249,9 @@ class ConfigService:
         else:
             self.printr.print(text=message, server_only=True)
 
+        # Notify listeners that a wingman config was saved (for input hook refresh)
+        await self.config_events.publish("wingman_config_saved", merged_config)
+
     @staticmethod
     def _merge_skill_configs(
         existing: list[SkillConfig] | None,
@@ -1069,6 +1334,140 @@ class ConfigService:
             self.printr.toast(message)
         else:
             self.printr.print(text=message, server_only=True)
+
+    # POST /config/wingman/command-category
+    async def add_command_category(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        category: CommandCategoryConfig,
+    ):
+        """Add a new command category to a wingman."""
+        try:
+            # Load config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            # Initialize categories if needed
+            if wingman_config.command_categories is None:
+                wingman_config.command_categories = []
+
+            # Check if ID exists
+            if any(c.id == category.id for c in wingman_config.command_categories):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Category with ID {category.id} already exists.",
+                )
+
+            wingman_config.command_categories.append(category)
+
+            # Save
+            await self.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+                wingman_config=wingman_config,
+                silent=True,
+            )
+            self.printr.print(
+                f"Added category '{category.name}' to {wingman_file.name}",
+                server_only=True,
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # PATCH /config/wingman/command-category
+    async def update_command_category(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        category: CommandCategoryConfig,
+    ):
+        """Update an existing command category (rename)."""
+        try:
+            # Load config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            if not wingman_config.command_categories:
+                raise HTTPException(status_code=404, detail="Category not found.")
+
+            found = False
+            for c in wingman_config.command_categories:
+                if c.id == category.id:
+                    c.name = category.name
+                    found = True
+                    break
+
+            if not found:
+                raise HTTPException(status_code=404, detail="Category not found.")
+
+            # Save
+            await self.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+                wingman_config=wingman_config,
+                silent=True,
+            )
+            self.printr.print(
+                f"Updated category '{category.name}' in {wingman_file.name}",
+                server_only=True,
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # DELETE /config/wingman/command-category
+    async def delete_command_category(
+        self,
+        config_dir: ConfigDirInfo,
+        wingman_file: WingmanConfigFileInfo,
+        category_id: str,
+    ):
+        """Delete a command category and un-assign commands."""
+        try:
+            # Load config
+            wingman_config = self.config_manager.load_wingman_config(
+                config_dir=config_dir, wingman_file=wingman_file
+            )
+
+            if not wingman_config.command_categories:
+                raise HTTPException(status_code=404, detail="Category not found.")
+
+            # Remove category
+            original_len = len(wingman_config.command_categories)
+            wingman_config.command_categories = [
+                c for c in wingman_config.command_categories if c.id != category_id
+            ]
+
+            if len(wingman_config.command_categories) == original_len:
+                raise HTTPException(status_code=404, detail="Category not found.")
+
+            # Un-assign commands
+            if wingman_config.commands:
+                for cmd in wingman_config.commands:
+                    if cmd.category_id == category_id:
+                        cmd.category_id = None
+
+            # Save
+            await self.save_wingman_config(
+                config_dir=config_dir,
+                wingman_file=wingman_file,
+                wingman_config=wingman_config,
+                silent=True,
+            )
+            self.printr.print(
+                f"Deleted category {category_id} from {wingman_file.name}",
+                server_only=True,
+            )
+
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            raise HTTPException(status_code=500, detail=str(e))
 
     # POST config/wingman/default
     async def set_default_wingman(

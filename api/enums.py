@@ -84,6 +84,7 @@ class CustomPropertyType(Enum):
     SLIDER = "slider"
     AUDIO_FILES = "audio_files"
     AUDIO_DEVICE = "audio_device"
+    COLOR = "color"
 
 
 class AzureApiVersion(Enum):
@@ -134,6 +135,7 @@ class TtsProvider(Enum):
     OPENAI_COMPATIBLE = "openai_compatible"
     HUME = "hume"
     INWORLD = "inworld"
+    POCKET_TTS = "pocket_tts"
 
 
 class SttProvider(Enum):

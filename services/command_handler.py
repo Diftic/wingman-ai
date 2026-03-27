@@ -1,8 +1,6 @@
 import json
 import asyncio
-import threading
 from fastapi import WebSocket
-import pygame
 import keyboard.keyboard as keyboard
 from api.commands import (
     ActionsRecordedCommand,
@@ -61,21 +59,13 @@ class CommandHandler:
                     RecordMouseActionsCommand(**command), websocket
                 )
             elif command_name == "record_joystick_actions":
-
-                def run_async_joystick_recording():
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
-                    try:
-                        loop.run_until_complete(
-                            self.handle_record_joystick_actions(
-                                RecordJoystickActionsCommand(**command), websocket
-                            )
-                        )
-                    finally:
-                        loop.close()
-
-                play_thread = threading.Thread(target=run_async_joystick_recording)
-                play_thread.start()
+                # Run as background task so the websocket loop stays responsive
+                # and can still process stop_recording commands.
+                asyncio.ensure_future(
+                    self.handle_record_joystick_actions(
+                        RecordJoystickActionsCommand(**command), websocket
+                    )
+                )
             elif command_name == "stop_recording":
                 await self.handle_stop_recording(
                     StopRecordingCommand(**command), websocket
@@ -168,40 +158,16 @@ class CommandHandler:
         )
 
         self.recorded_keys = []
-        was_init = pygame.get_init()
-        pygame.init()
-        joysticks = [
-            pygame.joystick.Joystick(x) for x in range(pygame.joystick.get_count())
-        ]
-
-        for joystick in joysticks:
-            joystick.init()
-
         self.is_joystick_recording = True
-        while self.is_joystick_recording and pygame.get_init():
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    self.is_joystick_recording = False
-                elif event.type == pygame.JOYBUTTONUP:
-                    # Get guid of joystick with instance id
-                    joystick_origin = pygame.joystick.Joystick(event.joy)
-                    self.recorded_keys.append(
-                        {
-                            "button": event.button,
-                            "guid": joystick_origin.get_guid(),
-                            "name": joystick_origin.get_name(),
-                        }
-                    )
-                    self.is_joystick_recording = False
+        result = await self.core.record_joystick_action()
+        if result and self.is_joystick_recording:
+            self.recorded_keys.append(result)
 
         stop_command = StopRecordingCommand(
             command="stop_recording", recording_device=RecordingDevice.JOYSTICK
         )
 
         await self.handle_stop_recording(stop_command, None)
-
-        if not was_init:
-            pygame.quit()
 
     async def handle_record_keyboard_actions(
         self, command: RecordKeyboardActionsCommand, websocket: WebSocket
@@ -261,6 +227,7 @@ class CommandHandler:
             self.keyboard_hook_callback = None
         if command.recording_device == RecordingDevice.JOYSTICK:
             self.is_joystick_recording = False
+            self.core.cancel_joystick_recording()
         if command.recording_device == RecordingDevice.MOUSE:
             mouse.unhook(self.on_mouse)
 
@@ -354,7 +321,7 @@ class CommandHandler:
         await asyncio.sleep(timeout)
         await self.handle_stop_recording(None, None)
 
-    def _get_actions_from_recorded_keys(self, recorded):
+    def _get_actions_from_recorded_keys(self, recorded, compressed=False):
         actions: list[CommandActionConfig] = []
 
         def add_action(name, code, extended, press, release, hold):
@@ -425,7 +392,7 @@ class CommandHandler:
             # check if last key was down event
             if last_key_data and last_key_data[3] == "down":
                 # same key?
-                if key_data[1] == last_key_data[1] and key_data[2] == last_key_data[2]:
+                if compressed and key_data[1] == last_key_data[1] and key_data[2] == last_key_data[2]:
                     # write as compressed action
                     add_wait(last_key_data[5])
                     add_action(
@@ -446,8 +413,13 @@ class CommandHandler:
             if last_key_data and last_key_data[3] == "up":
                 if (
                     last_last_key_data
-                    and last_last_key_data[1] != last_key_data[1]
-                    or last_last_key_data[2] != last_key_data[2]
+                    and (
+                        not compressed
+                        or (
+                            last_last_key_data[1] != last_key_data[1]
+                            or last_last_key_data[2] != last_key_data[2]
+                        )
+                    )
                 ):
                     add_wait(last_key_data[5])
                     add_action(
@@ -472,8 +444,11 @@ class CommandHandler:
             and last_last_key_data
             and key_data[3] == "up"
             and (
-                last_last_key_data[1] != last_key_data[1]
-                or last_last_key_data[2] != last_key_data[2]
+                not compressed
+                or (
+                    last_last_key_data[1] != last_key_data[1]
+                    or last_last_key_data[2] != last_key_data[2]
+                )
             )
         ):
             add_wait(key_data[5])
@@ -503,7 +478,7 @@ class CommandHandler:
                 extended = key_extended
             elif extended != key_extended:
                 # fallback to advanced mode, if mixed extended flags are detected
-                return self._get_actions_from_recorded_keys(recorded)
+                return self._get_actions_from_recorded_keys(recorded, True)
             if key.event_type == "down":
                 # Ignore further processing if 'esc' was pressed
                 if key_name == "esc":

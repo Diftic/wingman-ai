@@ -9,8 +9,18 @@ jobs:
   build-windows:
     name: Build Windows Executable
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Extract version from system_manager.py
+        id: version
+        shell: bash
+        run: |
+          version=$(grep -oE 'LOCAL_VERSION\s*=\s*"[^"]+"' services/system_manager.py | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $version"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -36,8 +46,9 @@ jobs:
       - name: Upload Windows Exe Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WingmanAiCore-Windows-Build # Unique name for the build artifact
+          name: unsigned-build
           path: dist/WingmanAiCore/
+          retention-days: 1
 
   sign-windows-executable:
     needs: build-windows
@@ -46,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4 # for the action
       - uses: actions/download-artifact@v4
         with:
-          name: WingmanAiCore-Windows-Build
+          name: unsigned-build
           path: WingmanAiCore
 
       - name: Sign
@@ -60,19 +71,24 @@ jobs:
         with:
           path-to-binary: 'WingmanAiCore/WingmanAiCore.exe'
 
-      - name: Upload Windows Artifact
+      - name: Upload Signed Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: WingmanAiCore-Windows-Signed # Unique name for the signed artifact
+          name: WingmanAiCore-${{ needs.build-windows.outputs.version }}-x86_64-pc-windows
           path: WingmanAiCore
 
+      - name: Delete unsigned intermediate artifact
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: unsigned-build
+
   release:
-    needs: [sign-windows-executable]
+    needs: [build-windows, sign-windows-executable]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: WingmanAiCore-Windows-Signed # Ensure this matches the unique signed artifact name
+          name: WingmanAiCore-${{ needs.build-windows.outputs.version }}-x86_64-pc-windows
           path: .
 
       - name: Create Release
