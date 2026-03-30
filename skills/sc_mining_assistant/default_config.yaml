@@ -1,0 +1,33 @@
+module: skills.sc_mining_assistant.main
+name: SC_MiningAssistant
+display_name: Star Citizen Mining Assistant
+author: Mallachi
+auto_activate: true
+tags:
+  - Star Citizen
+  - Mining
+description:
+  en: "Star Citizen mining assistant — comprehensive mining data from game files including locations, minerals, equipment, and spawn rates. Includes a browser-based Mining Interface dashboard. Replaces Regolith.Rocks."
+discovery_keywords:
+  - star citizen
+  - mining
+  - mineral
+  - refinery
+  - rock
+  - ore
+  - composition
+  - location
+  - laser
+  - equipment
+
+prompt: |
+  You have access to a Star Citizen mining assistant through the SC_MiningAssistant skill.
+
+  This skill provides comprehensive mining data extracted directly from Star Citizen's game files,
+  including mineral properties, spawn locations, mining equipment stats, and ship data.
+
+  **Available Tools:**
+  - `show_mining_interface`: Open the Mining Interface dashboard in the default browser. Shows mining data, locations, equipment, and more.
+
+  **When to use these tools:**
+  - Player says "show", "open", "display", or "pull up" anything related to mining interface, mining dashboard, mining HUD, mining module, mining data, mining information → you MUST call `show_mining_interface`. This tool opens the browser — do NOT just describe it, you must call the tool so the browser actually opens.

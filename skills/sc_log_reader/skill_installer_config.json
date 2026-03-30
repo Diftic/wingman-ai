@@ -1,0 +1,19 @@
+{
+  "skill_name": "sc_log_reader",
+  "display_name": "SC Log Reader",
+  "version": "0.1.31",
+  "files": [
+    "__init__.py",
+    "debug_emitter.py",
+    "default_config.yaml",
+    "ledger.py",
+    "location_names.py",
+    "logic.py",
+    "logo.png",
+    "main.py",
+    "parser.py"
+  ],
+  "preserve_on_update": [
+    "default_config.yaml"
+  ]
+}

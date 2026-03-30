@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy this file to your skill root as skill_installer_config.json and fill in the fields.",
+
+  "skill_name": "sc_my_skill",
+  "display_name": "SC My Skill",
+  "version": "1.0.0",
+
+  "files": [
+    "__init__.py",
+    "default_config.yaml",
+    "logo.png",
+    "main.py"
+  ],
+
+  "dirs": [],
+
+  "preserve_on_update": [
+    "default_config.yaml"
+  ]
+}

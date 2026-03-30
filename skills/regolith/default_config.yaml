@@ -1,0 +1,88 @@
+module: skills.regolith.main
+name: Regolith
+display_name: Regolith Mining
+author: Mallachi
+tags:
+  - Game
+  - Star Citizen
+  - Mining
+  - Internet
+description:
+  en: Uses the Regolith.Rocks API and UEX Corp for mining data, refinery locations, ore prices, and finding the most profitable mining locations in Star Citizen.
+  de: Nutzt die Regolith.Rocks API und UEX Corp für Bergbau-Daten, Raffinerie-Standorte, Erzpreise und die profitabelsten Bergbau-Standorte in Star Citizen.
+discovery_keywords:
+  - mining
+  - ore
+  - refinery
+  - quantanium
+  - gold
+  - agricium
+  - bexalite
+  - taranite
+  - laranite
+  - prospector
+  - mole
+  - ROC
+  - refine
+  - asteroids
+  - deposits
+  - yield
+  - bonus
+  - price
+  - profit
+  - valuable
+  - UEX
+  - refresh
+  - update
+  - clear
+  - cache
+discoverable_by_default: false
+prompt: |
+  ### REGOLITH MINING DATA ACCESS
+  You have access to the Regolith.Rocks API and UEX Corp prices for Star Citizen mining data.
+
+  #### RESPONSE FORMAT RULES - ALWAYS FOLLOW THESE EXACTLY
+
+  **RULE 1: Always present exactly 3 options/locations in your response**
+
+  **RULE 2: For "best mining place" or "best deposits" questions:**
+  Use find_most_valuable_locations and format each result as:
+  "[DEPOSIT_TYPE] deposit at [LOCATION], valued at [VALUE] aUEC, expected size [SIZE] SCU"
+  Example: "Quantanium_Vein deposit at Lyria, valued at 45,000 aUEC, expected size 32 SCU"
+
+  **RULE 3: For "where to find [MINERAL]" or specific mineral questions:**
+  Use find_best_mining_location_by_value and format each result as:
+  "[MINERAL], valued at [PRICE] aUEC per SCU, can be found in [DEPOSIT_TYPE] deposits, most often at [LOCATION]"
+  Example: "Gold, valued at 6,200 aUEC per SCU, can be found in C-Type deposits, most often at Yela"
+
+  **RULE 4: For refinery questions:**
+  Use find_best_refinery and present TOP 3 refineries with their bonuses
+
+  #### TOOL SELECTION
+  - **General mining location questions** ("where should I mine?", "best deposits", "profitable locations")
+    → Use find_most_valuable_locations (ranks by TOTAL value of ALL ores combined)
+
+  - **Specific mineral questions** ("where to find Gold", "Quantanium locations")
+    → Use find_best_mining_location_by_value
+
+  - **Refinery questions** ("where to refine", "best refinery for Gold")
+    → Use find_best_refinery
+
+  - **Price questions** ("how much is Gold worth", "mineral prices")
+    → Use get_ore_market_price or get_mineral_prices
+
+  #### RESPONSE STYLE
+  - Keep responses concise for voice synthesis
+  - Round percentages to one decimal place
+  - Format prices with thousands separators (45,000 aUEC not 45000)
+  - Always include the deposit type, location, and value in responses
+hint:
+  en: <ul class="list-disc"><li>Create an account at <a class="anchor" target="_blank" href="https://regolith.rocks">Regolith.Rocks</a>.</li><li>Go to your profile settings to find your API key.</li><li>Enter the API key below.</li></ul>
+  de: <ul class="list-disc"><li>Erstelle ein Konto auf <a class="anchor" target="_blank" href="https://regolith.rocks">Regolith.Rocks</a>.</li><li>Gehe zu deinen Profileinstellungen, um deinen API-Schlüssel zu finden.</li><li>Gib den API-Schlüssel unten ein.</li></ul>
+custom_properties:
+  - hint: Get your API key from your Regolith.Rocks profile at https://regolith.rocks
+    id: regolith_api_key
+    name: Regolith API Key
+    required: true
+    value: ""
+    property_type: string
