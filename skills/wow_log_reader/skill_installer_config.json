@@ -1,0 +1,17 @@
+{
+  "skill_name": "wow_log_reader",
+  "display_name": "WoW Log Reader",
+  "version": "12.0.5",
+  "wow_target_version": "12.0.5",
+  "files": [
+    "__init__.py",
+    "combat_log_parser.py",
+    "combat_log_watcher.py",
+    "default_config.yaml",
+    "main.py",
+    "session_state.py"
+  ],
+  "preserve_on_update": [
+    "default_config.yaml"
+  ]
+}

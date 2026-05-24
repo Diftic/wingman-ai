@@ -15,7 +15,7 @@ from api.enums import (
 from skills.skill_base import Skill
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 class VoiceChanger(Skill):
@@ -24,7 +24,7 @@ class VoiceChanger(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
@@ -46,8 +46,45 @@ class VoiceChanger(Skill):
         voices: list[VoiceSelection] = self.retrieve_custom_property_value(
             "voice_changer_voices", errors
         )
-        # Provider initialization is handled by ProviderFactory via
-        # switch_tts_provider() at voice-switch time. No pre-init needed.
+        if voices and len(voices) > 0:
+            # Initialize all providers
+            initiated_providers = []
+
+            for voice in voices:
+                voice_provider = voice.provider
+                if voice_provider not in initiated_providers:
+                    initiated_providers.append(voice_provider)
+
+                    # initiate provider
+                    if voice_provider == TtsProvider.OPENAI and not self.wingman.openai:
+                        await self.wingman.validate_and_set_openai(errors)
+                    elif (
+                        voice_provider == TtsProvider.AZURE
+                        and not self.wingman.openai_azure
+                    ):
+                        await self.wingman.validate_and_set_azure(errors)
+                    elif (
+                        voice_provider == TtsProvider.ELEVENLABS
+                        and not self.wingman.elevenlabs
+                    ):
+                        await self.wingman.validate_and_set_elevenlabs(errors)
+                    elif (
+                        voice_provider == TtsProvider.WINGMAN_PRO
+                        and not self.wingman.wingman_pro
+                    ):
+                        await self.wingman.validate_and_set_wingman_pro()
+                    elif (
+                        voice_provider == TtsProvider.INWORLD
+                        and not self.wingman.inworld
+                    ):
+                        await self.wingman.validate_and_set_inworld(errors)
+                    elif (
+                        voice_provider == TtsProvider.OPENAI_COMPATIBLE
+                        and not self.wingman.openai_compatible_tts
+                    ):
+                        await self.wingman.validate_and_set_openai_compatible_tts(
+                            errors
+                        )
 
         return errors
 
@@ -118,7 +155,7 @@ class VoiceChanger(Skill):
         if self._get_context_prompt():
             messages.append(self._switch_personality())
         if self._get_clear_history():
-            await self.wingman.reset_conversation_history()
+            self.wingman.reset_conversation_history()
 
         # sort out empty messages
         messages = [await message for message in messages if message]
@@ -219,7 +256,7 @@ class VoiceChanger(Skill):
             )
             return f"Voice switching failed due to an unknown voice provider/subprovider. Provider: {voice_provider.value}"
 
-        await self.wingman.switch_tts_provider(voice_provider)
+        self.wingman.config.features.tts_provider = voice_provider
         if not provider_name:
             provider_name = voice_provider.value
 

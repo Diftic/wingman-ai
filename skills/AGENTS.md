@@ -118,10 +118,10 @@ from api.interface import SettingsConfig, SkillConfig, WingmanInitializationErro
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 class YourSkillName(Skill):
-    def __init__(self, config: SkillConfig, settings: SettingsConfig, wingman: "WingmanContext") -> None:
+    def __init__(self, config: SkillConfig, settings: SettingsConfig, wingman: "OpenAiWingman") -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
     async def validate(self) -> list[WingmanInitializationError]:
@@ -189,10 +189,6 @@ self.wingman.audio_player                                  # Audio player
 self.printr.print() / await self.printr.print_async()      # Logging
 self.get_generated_files_dir()                             # Persistent storage directory
 ```
-
-## Local Support Model — Sampling Parameters
-
-Global defaults are tuned for summarization (low temperature). **Override for creative tasks.** Use `SamplingPreset` from `services/skill_local_ai.py` or pass `temperature` / `top_p` directly to `support()`, `support_sync()`, and `summarize()`. Manual values override presets. See `SamplingPreset` docstring for available presets and values.
 
 ## Example Skills
 

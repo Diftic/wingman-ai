@@ -13,7 +13,7 @@ from services.benchmark import Benchmark
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 class ActualTimer:
@@ -123,7 +123,7 @@ class Timer(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 

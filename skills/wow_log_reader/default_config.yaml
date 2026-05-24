@@ -1,0 +1,117 @@
+module: skills.wow_log_reader.main
+name: WoW_LogReader
+display_name: WoW Log Reader
+author: Mallachi
+auto_activate: true
+tags:
+  - World of Warcraft
+  - Game Integration
+description:
+  en: Monitors the World of Warcraft combat log for encounters, zone changes, and player deaths. Provides real-time game state awareness to your Wingman, plus optional proactive notifications when interesting things happen in-game.
+discovery_keywords:
+  - world of warcraft
+  - wow
+  - combat log
+  - encounter
+  - boss
+  - zone
+  - dungeon
+  - raid
+
+prompt: |
+  You have access to real-time World of Warcraft session data through the WoW_LogReader skill.
+
+  **Available Tools:**
+  - `get_current_wow_state`: Current zone, map, build version, in-progress encounter, and session activity counts
+  - `get_recent_encounters`: List recent boss kills and wipes with names, durations, and outcomes
+  - `get_recent_player_deaths`: List recent player deaths
+
+  **When to use these tools:**
+  - Player asks where they are or what zone they're in -> use `get_current_wow_state`
+  - Player asks about a boss fight, dungeon run, or recent kills -> use `get_recent_encounters`
+  - Player asks about deaths or wipes -> use `get_recent_player_deaths` and `get_recent_encounters`
+
+  **Important:** WoW only writes the combat log when the player has enabled it via `/combatlog` (or `LoggingCombat(true)`). If the tools return empty data, the most likely cause is that combat logging is not enabled in-game.
+
+  **Proactive Notifications:**
+  When proactive notifications are enabled, the skill pushes `[Game Event] X` messages to you as in-game events occur (zone entries, boss pulls, kills, wipes, deaths). React briefly in character. Do not summarize the event - the player saw it. One or two short sentences is enough. On `Pull:` events (encounter starts), a quick "good luck" or terse acknowledgement fits; otherwise stay quiet during the fight unless asked. After a kill, acknowledge it; after a wipe, sympathy without lecture.
+
+custom_properties:
+  - id: wow_install_path
+    name: WoW Install Path
+    hint: "Path to the World of Warcraft install root (e.g., D:/Games/World of Warcraft). Leave empty to auto-detect common locations. Restart the skill after changing this setting."
+    value: ""
+    property_type: string
+    required: false
+
+  # Master switch - must be ON for any event notifications to fire.
+  - id: proactive_notifications
+    name: Enable Proactive Notifications
+    hint: "Master switch for all proactive game event notifications. Must be enabled for any individual events below to fire."
+    value: true
+    property_type: boolean
+    required: false
+
+  # Per-event toggles (alphabetised within their group).
+  - id: notify_session_started
+    name: Combat Log Started
+    hint: "Notify when WoW starts writing the combat log (once per logging session)."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_zone_entered
+    name: Zone Entered
+    hint: "Notify when entering a non-instanced zone."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_instance_entered
+    name: Instance Entered
+    hint: "Notify when stepping into a dungeon, raid, or other instanced zone."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_instance_exited
+    name: Instance Exited
+    hint: "Notify when leaving an instanced zone."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_encounter_started
+    name: Boss Pull Started
+    hint: "Notify when a boss encounter begins (a pull). Lets the AI wish good luck or acknowledge the pull briefly."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_encounter_ended_kill
+    name: Boss Killed
+    hint: "Notify when a boss encounter ends in a kill, with name and duration."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_encounter_ended_wipe
+    name: Boss Wipe
+    hint: "Notify when a boss encounter ends in a wipe, with name and duration."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_player_died
+    name: Player Died
+    hint: "Notify when the player dies (in or out of combat)."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: notify_map_changed
+    name: Subzone Changed
+    hint: "Notify on subzone transitions (often noisy: cities and dungeons subdivide into many small subzones). Default off."
+    value: false
+    property_type: boolean
+    required: false

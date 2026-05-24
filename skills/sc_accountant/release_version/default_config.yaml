@@ -1,0 +1,237 @@
+module: skills.sc_accountant.main
+name: SC_Accountant
+display_name: Star Citizen Accountant
+author: Mallachi
+auto_activate: true
+tags:
+  - Star Citizen
+  - Finance
+  - Trading
+description:
+  en: >
+    Corporate accounting system for Star Citizen. Three-statement financial model
+    (Income Statement, Balance Sheet, Cash Flow) with per-activity margins,
+    asset registry for fleet/equipment P&L, trade position management,
+    planning & forecasting tools, and a standalone accounting dashboard.
+    All sibling skills (SC_LogReader, UEXCorp) are optional — everything
+    works via manual voice entry.
+discovery_keywords:
+  - accounting
+  - accountant
+  - finance
+  - profit
+  - loss
+  - budget
+  - trade
+  - expense
+  - income
+  - balance
+  - ledger
+  - aUEC
+  - money
+  - spending
+  - revenue
+  - P&L
+  - opportunity
+  - futures
+  - position
+  - portfolio
+  - investment
+  - unrealized
+  - credit
+  - receivable
+  - payable
+  - debt
+  - owe
+  - haul
+  - hauling
+  - cargo
+  - transport
+  - inventory
+  - warehouse
+  - storage
+  - production
+  - manufacturing
+  - fleet
+  - ship
+  - asset
+  - break even
+  - ROI
+  - purchase order
+  - sales order
+  - planned order
+  - fulfillment
+  - spreadsheet
+  - income statement
+  - balance sheet
+  - cash flow
+
+prompt: |
+  You have access to a corporate accounting system for Star Citizen via the SC_Accountant skill.
+
+  **Available Voice Tools (20):**
+  Most features are managed through the accounting dashboard. These tools are for quick voice interactions:
+
+  *Financial Reports:*
+  - `get_income_statement`: Operations Report — Revenue, COGS, Gross Margin, OpEx, Net Profit
+  - `get_balance_sheet`: Assets, Liabilities, Equity overview
+
+  *Core Accounting:*
+  - `record_transaction`: Record expenses or income (fuel, repairs, missions, etc.)
+  - `record_commodity_purchase`: Buy a commodity — creates ledger entry + portfolio position
+  - `record_commodity_sale`: Sell a commodity — creates ledger entry + closes position (FIFO)
+  - `query_transactions`: Search and filter past transactions by date, category, tags
+  - `get_balance`: Current aUEC balance and lifetime totals
+  - `sync_trade_log`: Sync trades from game log (requires SC_LogReader)
+
+  *Assets:*
+  - `register_asset`: Register a ship, vehicle, component, or equipment
+  - `update_asset`: Update an asset's name, price, location, or other details
+  - `sell_asset`: Record asset sale with realized profit/loss
+  - `delete_asset`: Remove an asset record (no sale transaction created)
+
+  *Market Intelligence:*
+  - `get_best_trades`: Top profitable trade routes from UEX
+  - `get_commodity_prices`: Buy/sell prices for a commodity
+
+  *Planning:*
+  - `get_break_even`: Break-even analysis for a registered asset
+  - `get_activity_roi`: Compare profitability across gameplay activities
+  - `what_if`: Scenario modeling — upgrade payback, ship purchase projections
+
+  *Group Sessions:*
+  - `start_group_session`: Start a group play session for split tracking
+  - `stop_group_session`: Stop the active group session
+
+  *Planned Orders:*
+  - `create_planned_order`: Create a purchase or sales order with quantity tracking
+  - `list_planned_orders`: Show open orders with fulfillment progress (e.g. 3/4 delivered)
+
+  *Dashboard:*
+  - `open_accounting_window`: Open the standalone accounting dashboard
+  - `close_accounting_window`: Close the dashboard
+
+  All other features (trade orders, budgets, positions, credits, hauling, inventory, production, fleet management, opportunities) are available through the accounting dashboard web UI.
+
+  **Transaction Categories:**
+  Trading: commodity_purchase, commodity_sale, item_purchase, item_sale
+  P2P: player_trade_buy, player_trade_sell
+  Income: mission_reward, bounty_reward, salvage_income, other_income
+  Expenses: fuel, repairs, insurance, ammunition, medical, fines, hangar_fees, other_expense
+  Operating: crew_payment, org_contribution, rental
+  Capital: ship_purchase, component_purchase, capital_investment
+
+  **When to use these tools:**
+  - Player asks about profit, spending, income → `get_income_statement`
+  - Player asks "how's my balance sheet" or "what am I worth" → `get_balance_sheet`
+  - Player asks about their balance → `get_balance`
+  - Player wants to record spending → `record_transaction`
+  - Player asks about recent/last transactions, purchases, sales, or financial history → `query_transactions` (NOT SC_LogReader's get_trade_entries)
+  - Player says "I bought a Prospector" → `register_asset`
+  - Player says "update the price of my Prospector" or "rename my ship" → `update_asset`
+  - Player says "I sold my Avenger" → `sell_asset`
+  - Player asks "when will my ship pay for itself" → `get_break_even`
+  - Player asks "what's most profitable" or "which activity" → `get_activity_roi`
+  - Player asks "what if I buy..." or "what if I upgrade..." → `what_if`
+  - Player asks "what should I trade" → `get_best_trades`
+  - Player says "I want to buy 4 Prospectors" or "plan a purchase" → `create_planned_order`
+  - Player says "I plan to sell my Avenger" → `create_planned_order` (sale type)
+  - Player asks "what are my open orders" or "show purchase orders" → `list_planned_orders`
+  - Player says "open my accounting window" or "show finances" → `open_accounting_window`
+  - For anything else (fleet details, loans, hauling, inventory, etc.) → `open_accounting_window` and direct the player to the relevant tab
+  - Player reports stored items → `report_inventory`
+  - Player describes crafting → `log_production`
+
+  **Market Data:**
+  Commodity prices and trade routes are fetched from UEX (uexcorp.space) and cached locally.
+  Prices refresh automatically every 24 hours. Routes with out-of-stock or full-inventory
+  terminals are automatically excluded.
+
+hint:
+  en: >
+    <p>Corporate accounting for Star Citizen. Three-statement financial reports
+    (Income Statement, Balance Sheet, Cash Flow), fleet asset registry with per-ship P&L,
+    planning tools (break-even, ROI, what-if), and a standalone accounting dashboard.</p>
+    <p><strong>Optional:</strong> Install SC_LogReader for automatic trade capture.
+    Install UEXCorp for automatic ship price lookup.</p>
+
+examples:
+  - en: "How much profit did I make today?"
+  - en: "Show me the income statement"
+  - en: "What's my balance sheet?"
+  - en: "Show the cash flow this quarter"
+  - en: "What's my balance?"
+  - en: "Record 500 aUEC for fuel"
+  - en: "Register my Prospector, purchased for 2.1 million"
+  - en: "When will my Prospector break even?"
+  - en: "What's the most profitable activity?"
+  - en: "What if I buy a size 2 shield for 80,000?"
+  - en: "Open my accounting window"
+  - en: "Show me my fleet"
+  - en: "What are the best trade opportunities?"
+  - en: "Show me my portfolio"
+  - en: "I just hauled medical supplies from Orison to Lorville"
+  - en: "Who owes me money?"
+  - en: "Update the price of my Avenger Titan to 1.5 million"
+
+custom_properties:
+  - id: auto_sync_interval
+    name: Auto-Sync Interval (seconds)
+    hint: "How often to sync trades from the SC_LogReader game log. Only applies if SC_LogReader is installed. Set to 0 to disable."
+    value: 15
+    property_type: number
+    required: false
+
+  - id: default_currency_format
+    name: Currency Format
+    hint: "How to display aUEC amounts in reports."
+    property_type: single_select
+    value: "full"
+    required: false
+    options:
+      - label: "Full (1,234,567 aUEC)"
+        value: "full"
+      - label: "Short (1.2M aUEC)"
+        value: "short"
+
+  - id: complexity_layer
+    name: Complexity Tier
+    hint: "Controls which tools the AI suggests. Casual = basic income/expenses. Engaged = adds fleet, positions, planning. Industrial = full feature set including what-if scenarios."
+    property_type: single_select
+    value: "engaged"
+    required: false
+    options:
+      - label: "Casual"
+        value: "casual"
+      - label: "Engaged"
+        value: "engaged"
+      - label: "Industrial"
+        value: "industrial"
+
+  - id: announce_trade_opportunities
+    name: Announce Trade Opportunities
+    hint: "Announce top 5 trade opportunities when arriving at a location with commodity trading. Requires SC_LogReader."
+    value: false
+    property_type: boolean
+    required: false
+
+  - id: futures_auto_generate
+    name: Auto-Generate Opportunities
+    hint: "Automatically generate trade opportunities when market data refreshes."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: futures_min_profit
+    name: Minimum Profit per SCU (aUEC)
+    hint: "Minimum profit per SCU for an opportunity to be generated. Routes with a lower margin per SCU are excluded."
+    value: 0
+    property_type: number
+    required: false
+
+  - id: position_auto_track
+    name: Auto-Track Positions
+    hint: "Automatically open/close investment positions on commodity trades."
+    value: true
+    property_type: boolean
+    required: false

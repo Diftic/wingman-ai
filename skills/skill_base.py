@@ -25,8 +25,7 @@ from services.printr import Printr
 from services.secret_keeper import SecretKeeper
 
 if TYPE_CHECKING:
-    from services.skill_local_ai import SkillLocalAI
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 # Type mapping from Python types to JSON Schema types
@@ -296,7 +295,7 @@ class Skill:
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         self.config = config
         self.settings = settings
@@ -319,24 +318,9 @@ class Skill:
         self.is_unloaded: bool = False
         """Whether unload() has been called. Check this in __del__ before calling unload()."""
 
-        # Lazy facade for local AI capabilities (support model, embeddings, memory)
-        self._local_ai: "SkillLocalAI | None" = None
-
         # Collect @tool decorated methods
         self._decorated_tools: dict[str, ToolDefinition] = {}
         self._collect_decorated_tools()
-
-    @property
-    def local_ai(self) -> "SkillLocalAI":
-        """Stable facade for local AI capabilities (support model, embeddings, memory).
-
-        Lazily instantiated on first access. Zero cost for skills that don't use it.
-        """
-        if self._local_ai is None:
-            from services.skill_local_ai import SkillLocalAI
-
-            self._local_ai = SkillLocalAI(self.wingman)
-        return self._local_ai
 
     def needs_activation(self) -> bool:
         """Check if this skill still needs validation and preparation.

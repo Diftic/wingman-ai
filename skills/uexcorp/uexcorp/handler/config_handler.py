@@ -6,7 +6,7 @@ from api.interface import WingmanInitializationError
 from services.file import get_writable_dir
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
     from skills.uexcorp.uexcorp.helper import Helper
 
 
@@ -64,7 +64,7 @@ class ConfigHandler:
         helper: "Helper"
     ):
         self.__helper = helper
-        self.__wingman: "WingmanContext | None" = None
+        self.__wingman: "OpenAiWingman | None" = None
         self.__fine_config_path: str = get_writable_dir(os.path.join(self.__helper.get_data_path(), "config"))
         self.__api_url: str = "https://api.uexcorp.space/2.0"
         self.__api_use_key: bool = False
@@ -324,8 +324,8 @@ class ConfigHandler:
     def set_behavior_update_fasterwhisper_hotwords(self, update: bool):
         self.__behavior_use_fasterwhisper_hotwords = update
 
-    def set_wingman(self, wingman: "WingmanContext"):
+    def set_wingman(self, wingman: "OpenAiWingman"):
         self.__wingman = wingman
 
-    def get_wingman(self) -> "WingmanContext":
+    def get_wingman(self) -> "OpenAiWingman":
         return self.__wingman

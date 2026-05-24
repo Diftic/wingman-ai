@@ -12,7 +12,7 @@ from api.interface import SettingsConfig, SkillConfig, WingmanInitializationErro
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 DEFAULT_HEADERS = {
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
@@ -61,7 +61,7 @@ class APIRequest(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         self.default_headers = DEFAULT_HEADERS
 

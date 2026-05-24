@@ -14,7 +14,7 @@ from skills.skill_base import Skill
 from skills.uexcorp.uexcorp.helper import Helper
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 class UEXCorp(Skill):
@@ -24,7 +24,7 @@ class UEXCorp(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         self.random_seed = uuid.uuid4()
         super().__init__(config=config, settings=settings, wingman=wingman)

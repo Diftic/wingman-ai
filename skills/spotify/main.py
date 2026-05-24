@@ -8,7 +8,7 @@ from skills.skill_base import Skill, tool
 from services.file import get_generated_files_dir
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 class Spotify(Skill):
@@ -17,7 +17,7 @@ class Spotify(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 

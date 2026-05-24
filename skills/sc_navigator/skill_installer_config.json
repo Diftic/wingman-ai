@@ -1,0 +1,16 @@
+{
+  "skill_name": "sc_navigator",
+  "display_name": "SC Navigator",
+  "version": "1.0.0",
+  "files": [
+    "default_config.yaml",
+    "main.py",
+    "route_optimizer.py"
+  ],
+  "dirs": [
+    "data"
+  ],
+  "preserve_on_update": [
+    "default_config.yaml"
+  ]
+}

@@ -18,11 +18,10 @@ from api.enums import (
     WingmanProTtsProvider,
     SoundEffect,
 )
-from services.file import get_prompt
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.wingman_context import WingmanContext
+    from wingmen.open_ai_wingman import OpenAiWingman
 
 
 class RadioChatter(Skill):
@@ -31,7 +30,7 @@ class RadioChatter(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "WingmanContext",
+        wingman: "OpenAiWingman",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
@@ -53,41 +52,81 @@ class RadioChatter(Skill):
         self.retrieve_custom_property_value("radio_sounds", errors)
         self.retrieve_custom_property_value("use_beeps", errors)
 
-        # Validate range sliders
-        interval_range = self.retrieve_custom_property_value("interval_range", errors)
-        if interval_range and isinstance(interval_range, list) and len(interval_range) == 2:
-            if interval_range[0] < 1 or interval_range[1] < interval_range[0]:
-                errors.append(
-                    WingmanInitializationError(
-                        wingman_name=self.wingman.name,
-                        message="Invalid interval range. Min must be >= 1 and max must be >= min.",
-                        error_type=WingmanInitializationErrorType.INVALID_CONFIG,
-                    )
+        # Validate intervals
+        interval_min = self.retrieve_custom_property_value("interval_min", errors)
+        if interval_min is not None and interval_min < 1:
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'interval_min'. Expected a number of one or larger.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
                 )
+            )
+        interval_max = self.retrieve_custom_property_value("interval_max", errors)
+        if (
+            interval_max is not None
+            and interval_max < 1
+            or (interval_min is not None and interval_max < interval_min)
+        ):
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'interval_max'. Expected a number greater than or equal to 'interval_min'.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
+                )
+            )
 
-        messages_range = self.retrieve_custom_property_value("messages_range", errors)
-        if messages_range and isinstance(messages_range, list) and len(messages_range) == 2:
-            if messages_range[0] < 1 or messages_range[1] < messages_range[0]:
-                errors.append(
-                    WingmanInitializationError(
-                        wingman_name=self.wingman.name,
-                        message="Invalid messages range. Min must be >= 1 and max must be >= min.",
-                        error_type=WingmanInitializationErrorType.INVALID_CONFIG,
-                    )
+        # Validate messages
+        messages_min = self.retrieve_custom_property_value("messages_min", errors)
+        if messages_min is not None and messages_min < 1:
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'messages_min'. Expected a number of one or larger.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
                 )
+            )
+        messages_max = self.retrieve_custom_property_value("messages_max", errors)
+        if (
+            messages_max is not None
+            and messages_max < 1
+            or (messages_min is not None and messages_max < messages_min)
+        ):
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'messages_max'. Expected a number greater than or equal to 'messages_min'.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
+                )
+            )
 
-        participants_range = self.retrieve_custom_property_value("participants_range", errors)
-        participants_max = None
-        if participants_range and isinstance(participants_range, list) and len(participants_range) == 2:
-            participants_max = int(participants_range[1])
-            if participants_range[0] < 1 or participants_range[1] < participants_range[0]:
-                errors.append(
-                    WingmanInitializationError(
-                        wingman_name=self.wingman.name,
-                        message="Invalid participants range. Min must be >= 1 and max must be >= min.",
-                        error_type=WingmanInitializationErrorType.INVALID_CONFIG,
-                    )
+        # Validate participants
+        participants_min = self.retrieve_custom_property_value(
+            "participants_min", errors
+        )
+        if participants_min is not None and participants_min < 1:
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'participants_min'. Expected a number of one or larger.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
                 )
+            )
+        participants_max = self.retrieve_custom_property_value(
+            "participants_max", errors
+        )
+        if (
+            participants_max is not None
+            and participants_max < 1
+            or (participants_min is not None and participants_max < participants_min)
+        ):
+            errors.append(
+                WingmanInitializationError(
+                    wingman_name=self.wingman.name,
+                    message="Invalid value for 'participants_max'. Expected a number greater than or equal to 'participants_min'.",
+                    error_type=WingmanInitializationErrorType.INVALID_CONFIG,
+                )
+            )
 
         # Validate volume
         volume = self.retrieve_custom_property_value("volume", errors) or 0.5
@@ -115,8 +154,42 @@ class RadioChatter(Skill):
                     )
                 )
 
-            # Provider initialization is handled by ProviderFactory via
-            # switch_tts_provider() at voice-switch time. No pre-init needed.
+            # Initialize all providers
+            initiated_providers = []
+            for voice in voices:
+                voice_provider = voice.provider
+                if voice_provider not in initiated_providers:
+                    initiated_providers.append(voice_provider)
+
+                    if voice_provider == TtsProvider.OPENAI and not self.wingman.openai:
+                        await self.wingman.validate_and_set_openai(errors)
+                    elif (
+                        voice_provider == TtsProvider.AZURE
+                        and not self.wingman.openai_azure
+                    ):
+                        await self.wingman.validate_and_set_azure(errors)
+                    elif (
+                        voice_provider == TtsProvider.ELEVENLABS
+                        and not self.wingman.elevenlabs
+                    ):
+                        await self.wingman.validate_and_set_elevenlabs(errors)
+                    elif (
+                        voice_provider == TtsProvider.WINGMAN_PRO
+                        and not self.wingman.wingman_pro
+                    ):
+                        await self.wingman.validate_and_set_wingman_pro()
+                    elif (
+                        voice_provider == TtsProvider.INWORLD
+                        and not self.wingman.inworld
+                    ):
+                        await self.wingman.validate_and_set_inworld(errors)
+                    elif (
+                        voice_provider == TtsProvider.OPENAI_COMPATIBLE
+                        and not self.wingman.openai_compatible_tts
+                    ):
+                        await self.wingman.validate_and_set_openai_compatible_tts(
+                            errors
+                        )
 
         return errors
 
@@ -131,30 +204,41 @@ class RadioChatter(Skill):
         errors: list[WingmanInitializationError] = []
         return self.retrieve_custom_property_value("prompt", errors)
 
-    def _get_range(self, prop_id: str, defaults: tuple[int, int]) -> tuple[int, int]:
-        errors: list[WingmanInitializationError] = []
-        val = self.retrieve_custom_property_value(prop_id, errors)
-        if val and isinstance(val, list) and len(val) == 2:
-            return (int(val[0]), int(val[1]))
-        return defaults
-
     def _get_interval_min(self) -> int:
-        return self._get_range("interval_range", (60, 600))[0]
+        """Retrieve fresh interval_min at runtime."""
+        errors: list[WingmanInitializationError] = []
+        interval = self.retrieve_custom_property_value("interval_min", errors)
+        return interval if interval else 10
 
     def _get_interval_max(self) -> int:
-        return self._get_range("interval_range", (60, 600))[1]
+        """Retrieve fresh interval_max at runtime."""
+        errors: list[WingmanInitializationError] = []
+        interval = self.retrieve_custom_property_value("interval_max", errors)
+        return interval if interval else 30
 
     def _get_messages_min(self) -> int:
-        return self._get_range("messages_range", (1, 5))[0]
+        """Retrieve fresh messages_min at runtime."""
+        errors: list[WingmanInitializationError] = []
+        messages = self.retrieve_custom_property_value("messages_min", errors)
+        return messages if messages else 1
 
     def _get_messages_max(self) -> int:
-        return self._get_range("messages_range", (1, 5))[1]
+        """Retrieve fresh messages_max at runtime."""
+        errors: list[WingmanInitializationError] = []
+        messages = self.retrieve_custom_property_value("messages_max", errors)
+        return messages if messages else 3
 
     def _get_participants_min(self) -> int:
-        return self._get_range("participants_range", (2, 3))[0]
+        """Retrieve fresh participants_min at runtime."""
+        errors: list[WingmanInitializationError] = []
+        participants = self.retrieve_custom_property_value("participants_min", errors)
+        return participants if participants else 1
 
     def _get_participants_max(self) -> int:
-        return self._get_range("participants_range", (2, 3))[1]
+        """Retrieve fresh participants_max at runtime."""
+        errors: list[WingmanInitializationError] = []
+        participants = self.retrieve_custom_property_value("participants_max", errors)
+        return participants if participants else 2
 
     def _get_volume(self) -> float:
         """Retrieve fresh volume at runtime."""
@@ -283,10 +367,29 @@ class RadioChatter(Skill):
         messages = [
             {
                 "role": "system",
-                "content": get_prompt("radio-chatter").format(
-                    count_participants=count_participants,
-                    count_messages=count_message,
-                ),
+                "content": f"""
+                    ## Must follow these rules ##
+                    - There are {count_participants} participant(s) in the conversation/monolog
+                    - The conversation/monolog must contain exactly {count_message} messages between the participants or in the monolog
+                    - You may always and only return a valid json string without formatting in the following format:
+
+                    ## JSON format ##
+                    [
+                        {{
+                            "user": "Participant1 Name",
+                            "content": "Message Content"
+                        }},
+                        {{
+                            "user": "Participant2 Name",
+                            "content": "Message Content"
+                        }},
+                        {{
+                            "user": "Participant1 Name",
+                            "content": "Message Content"
+                        }},
+                        ...
+                    ]
+                """,
             },
             {
                 "role": "user",
@@ -520,7 +623,7 @@ class RadioChatter(Skill):
                 f"Switching voice to {voice_name} ({voice_provider.value})"
             )
 
-        await self.wingman.switch_tts_provider(voice_provider)
+        self.wingman.config.features.tts_provider = voice_provider
 
     async def _get_original_voice_setting(self) -> VoiceSelection:
         voice_provider = self.wingman.config.features.tts_provider
