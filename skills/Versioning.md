@@ -136,7 +136,7 @@ and dependent skills need: "this skill hasn't been requalified yet."
 ## Scope
 
 - Applies to all user-authored skills under `skills/` (sc_log_reader,
-  sc_accountant, sc_navigator, sc_navpoint, sc_mining_assistant, etc.).
+  sc_accountant, sc_navigator, sc_navpoint, etc.).
 - Bump skills one at a time as each is requalified — don't mass-rewrite
   versions on skills that haven't been retested against the current patch.
 - Third-party skills bundled with Wingman AI follow their own versioning.
