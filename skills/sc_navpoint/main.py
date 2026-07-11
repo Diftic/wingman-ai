@@ -1,7 +1,7 @@
 """
 main.py — SC NavPoint skill for Wingman AI
 Author: Mallachi
-Version: 1.0.0
+Version: 4.8.0.0 (qualified against Star Citizen 4.8.0)
 
 Mark and navigate to custom waypoints in Star Citizen using r_displayinfo 4 OCR.
 Voice commands to drop, list, and navigate to named positions in space.
@@ -33,10 +33,14 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-SKILL_VERSION = "1.0.0"
 
 
 class SC_NavPoint(Skill):
+    # Versions mirror the Star Citizen patch this skill is qualified against.
+    # Within-patch updates append a dotted suffix (4.8.0.1, 4.8.0.2, …).
+    # See skills/Versioning.md.
+    VERSION = "4.8.0.0"
+    SC_TARGET_VERSION = "4.8.0"
 
     def __init__(self, config, settings, wingman) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)

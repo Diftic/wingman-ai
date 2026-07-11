@@ -1,5 +1,66 @@
 # SC NavPoint — Devlog
 
+## Version: 4.8.0.0 (Star Citizen 4.8.0 live-test baseline, 2026-05-25)
+
+Adopted the SC-patch versioning convention from
+[`skills/Versioning.md`](../Versioning.md) and bumped to `4.8.0.0` for the
+cross-skill 4.8.0 live-test baseline. Populated `__init__.py` with
+`__version__` / `__sc_target_version__`; replaced the module-level
+`SKILL_VERSION` constant with `VERSION` / `SC_TARGET_VERSION` class attributes
+on `SC_NavPoint`; updated module docstring.
+
+**CAVEAT — the version bump does NOT mean the skill is requalified.** The
+OUTDATED status below still applies: Vision AI parsing of `r_displayinfo 4`
+and per-server storage have not been re-validated against the 4.7+ client.
+The version is being aligned now for SC-version-comparison consistency; an
+end-to-end revival pass is still required.
+
+## 2026-07-11 — Decision: INDEFINITE HOLD until planet-tech releases
+
+Same-day follow-up to the field test below. Decision by Lars: the surface-only
+pivot is shelved until CIG ships planet-tech (his estimate: late 2026 to early
+2027). Rationale: no point building against the current overlay and coordinate
+frames when planet-tech may rework them within 4-6 months; the Vision AI
+recalibration is the expensive part and would likely have to be redone.
+
+The field-test findings below remain the requalification baseline: on planet-tech
+release, re-run the stationary frame test first (stellar vs local, static vs
+dynamic), then resume the pivot checklist in TODO.md if local frames still hold.
+
+## 2026-07-11 — Field test: coordinate frames on SC 4.8.x live — verdict: pivot to surface-only
+
+In-game stationary test by Lars (stand still, watch `r_displayinfo` XYZ over time):
+
+- The overlay now shows **two coordinate sets**: stellar and local.
+- **Stellar coordinates are dynamic** even while standing still, because planets and
+  moons rotate on their axis. A stored stellar XYZ goes stale continuously.
+- **Local coordinates (on a planet or moon surface) are static.** A stored local XYZ
+  remains valid over time.
+- Forward-looking (CIG planet-tech, unreleased): moons will orbit planets and planets
+  their star, making stellar coordinates even more dynamic. Lars's estimate from current
+  dev speed (2026-07-11): initial release late 2026 to early 2027, with the actual
+  content of the first patches highly debatable. Local (body-fixed) frames should be
+  unaffected by orbital motion, so the surface-only pivot is expected to survive
+  planet-tech (assumption, re-verify on release).
+
+**Decision** (rule agreed 2026-07-11: dynamic frame → not viable, static frame →
+highly valuable): the skill pivots to **surface-only waypoints in the local frame**.
+Stellar-frame waypoints are permanently out of scope; locations in open space cannot
+be annotated. Within that scope the skill is considered highly valuable and moves
+from "on hold" to active requalification.
+
+**Proposed revival direction (not yet implemented):**
+- Rework the Vision AI extraction to target the LOCAL coordinate set only, and to
+  refuse capture when no local frame is present (open space).
+- Recalibrate scanner prompts against the 4.8 overlay layout (screenshots needed:
+  one on-surface, one in space, one in flight above a surface).
+- Verify heading semantics in the local frame before trusting the bearing/compass math.
+- Test whether local coordinates are identical across servers; if the local frame is
+  deterministic per body, per-server keying can likely be dropped (hypothesis, unverified).
+- Test whether local coordinates remain available while flying above a surface
+  (in the planet's physics grid); determines if in-flight guidance toward a surface
+  waypoint is possible or if guidance starts only after landing zone entry.
+
 ## Status: OUTDATED — pre-SC 4.7 (2026-04-25)
 
 This skill was built before Star Citizen patch 4.7, which delivered a major overhaul

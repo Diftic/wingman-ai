@@ -1,5 +1,29 @@
 # SC Navigator - Development Log
 
+## Version: 4.8.0.0 (Star Citizen 4.8.0 live-test baseline, 2026-05-25)
+
+Adopted the SC-patch versioning convention from
+[`skills/Versioning.md`](../Versioning.md) and bumped to `4.8.0.0` for the
+cross-skill 4.8.0 live-test baseline. Added `__init__.py` exposing
+`__version__` / `__sc_target_version__`; added `VERSION` / `SC_TARGET_VERSION`
+class attributes on `SC_Navigator`; updated `skill_installer_config.json`.
+
+**CAVEAT — the version bump does NOT mean the data is requalified.** The
+bundled `sc_distances.json` is still the pre-4.7 dataset (see status below).
+The version is being aligned now so dependent skills can compare SC patches
+uniformly; the data refresh is a separate, still-pending task.
+
+## 2026-07-11 — Decision: INDEFINITE HOLD until planet-tech releases
+
+Decision by Lars, same reasoning as `sc_navpoint` (see its Devlog, same date):
+CIG's planet-tech (his estimate: initial release late 2026 to early 2027) will
+put moons and planets in orbital motion, which invalidates any static distance
+matrix between locations. Regenerating `sc_distances.json` against the current
+4.8.x universe now would be wasted work if the layout goes dynamic within
+months. On planet-tech release: reassess whether a static distance dataset is
+still meaningful (possibly per-system or time-invariant subsets); until then,
+no data regeneration and no code work. The OUTDATED status below still applies.
+
 ## Status: OUTDATED — pre-SC 4.7 (2026-04-25)
 
 This skill was built before Star Citizen patch 4.7, which delivered a major overhaul

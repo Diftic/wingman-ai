@@ -1,12 +1,31 @@
 # SC NavPoint — TODO
 
 ## Status
-OUTDATED — pre-SC 4.7 (2026-04-25). Built before patch 4.7's navigation-point
-overhaul; not re-validated against the 4.7 client. `auto_activate` disabled. See
-`Devlog.md` for the revival checklist. Items below are frozen until the skill is
-verified against 4.7.
+ON INDEFINITE HOLD until planet-tech releases (decided 2026-07-11; release
+estimated late 2026 to early 2027). The 2026-07-11 field test on SC 4.8.x live
+confirmed the viable design: surface-only waypoints in the static local frame
+(stellar coordinates are dynamic and permanently out of scope). Building now is
+not worth it because planet-tech may rework the overlay and frames within
+months, forcing a redo of the Vision AI recalibration. On planet-tech release:
+re-run the stationary frame test, then work the Pivot Tasks below if local
+frames still hold. `auto_activate` stays disabled.
 
-v1.0.0 complete — awaiting in-game testing.
+v4.8.0.0 — version aligned to SC 4.8.0 live-test baseline (paperwork bump
+only; code is still the pre-4.7 implementation until the pivot lands).
+
+## Pivot Tasks (blockers first)
+- [ ] Collect 4.8 overlay screenshots: on-surface, in open space, in flight above
+      a surface (needed to recalibrate the Vision AI extraction prompts)
+- [ ] Rework scanner extraction to read the LOCAL coordinate set only; refuse
+      capture when no local frame is present (open space)
+- [ ] Verify heading semantics in the local frame; validate bearing/compass math
+      between two known surface points
+- [ ] Test cross-server stability of local coordinates (if identical, drop
+      per-server keying — hypothesis, unverified)
+- [ ] Test local-frame availability while flying above a surface (determines
+      whether in-flight guidance toward a surface waypoint is possible)
+- [ ] Update default_config.yaml description/tags and remove Outdated markers
+      only after end-to-end re-validation
 
 ## Verified Patterns
 - sys.path.insert pattern required for all sibling imports (confirmed working)

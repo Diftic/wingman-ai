@@ -1,8 +1,10 @@
 {
   "skill_name": "sc_navigator",
   "display_name": "SC Navigator",
-  "version": "1.0.0",
+  "version": "4.8.0.0",
+  "sc_target_version": "4.8.0",
   "files": [
+    "__init__.py",
     "default_config.yaml",
     "main.py",
     "route_optimizer.py"

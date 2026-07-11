@@ -23,6 +23,11 @@ if TYPE_CHECKING:
 
 
 class SC_Navigator(Skill):
+    # Versions mirror the Star Citizen patch this skill is qualified against.
+    # Within-patch updates append a dotted suffix (4.8.0.1, 4.8.0.2, …).
+    # See skills/Versioning.md.
+    VERSION = "4.8.0.0"
+    SC_TARGET_VERSION = "4.8.0"
 
     def __init__(
         self,

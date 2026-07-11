@@ -11,6 +11,7 @@ SKILL_DIR = Path(__file__).parent
 RELEASE_DIR = SKILL_DIR / "release_version"
 
 RELEASE_FILES = [
+    "__init__.py",
     "default_config.yaml",
     "main.py",
     "route_optimizer.py",
