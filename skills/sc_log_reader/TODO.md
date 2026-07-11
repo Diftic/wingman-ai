@@ -1,9 +1,10 @@
 # SC_LogReader TODO
 
-## Current Status: v4.8.0.2 - qualified against Star Citizen 4.8.0
+## Current Status: v4.8.3.4 - qualified against Star Citizen 4.8.3
 
 Versioning now mirrors the SC patch (was v1.0.0 under independent SemVer).
-Within-patch updates append a dotted suffix: `4.8.0.1`, `4.8.0.2`, ...
+Within-patch updates append a dotted suffix: `4.8.2.1`, `4.8.2.2`, ...
+Rebaselined to `4.8.2.0` for the live test pass against Star Citizen 4.8.2.
 
 499 automated tests across all layers.
 Reverted notification pipeline to `wingman.process()` for full personality reactions.
@@ -13,6 +14,15 @@ Phase 1 PASSED. Phase 2 in progress (live testing 2026-04-12).
 ---
 
 ## Completed
+
+### 2026-07-09 - Crash-safe atomic writes (audit finding NEW-A)
+- [x] New leaf module `atomic_io.py` (`atomic_write_text`): temp file in the
+  same directory, flush + `os.fsync`, then `os.replace`; temp cleaned up and
+  original preserved on failure
+- [x] Routed `EventLog.trim`, `_save_stack_state` (main.py), and the
+  `_flush_file_output` writers in logic.py and parser.py through it
+- [x] Added `tests/test_atomic_io.py`; suite green at 76 passed
+- [x] VERSION 4.8.3.2 -> 4.8.3.3; `atomic_io.py` added to installer manifest
 
 ### Layer 3 - parser.py
 - [x] Create `LogParser` class
@@ -74,15 +84,17 @@ Phase 1 PASSED. Phase 2 in progress (live testing 2026-04-12).
       verify the UI surfaces `result.top_level_error` cleanly
 - [ ] Add `donate_logs` to the skill prompt block so the LLM mentions it
       naturally when users ask about contributing / improving the skill
+- [x] (Polish) Silent retry exhaustion in `Uploader._put_file`: add a
+      final `logger.warning("gave up after N attempts")` and avoid the
+      "retrying" log on the last attempt -- done 2026-07-07 (v4.8.3.0)
+- [x] (Polish) `Uploader._put_file` reads whole file with `fh.read()`;
+      consider streaming for >50 MB log files (rare) -- done 2026-07-07,
+      now streams the open file object to httpx (v4.8.3.0)
+- [x] (Polish) Silent `continue` in `Uploader.upload` when Worker returns
+      an unknown sha256; add a `logger.debug` for observability -- done
+      2026-07-07 (v4.8.3.0)
 - [ ] (Polish) Drop the `rows.results ?? []` fallback in `src/db.ts` of
       `sc-log-donate` (D1 result type is never undefined)
-- [ ] (Polish) Silent retry exhaustion in `Uploader._put_file`: add a
-      final `logger.warning("gave up after N attempts")` and avoid the
-      "retrying" log on the last attempt
-- [ ] (Polish) `Uploader._put_file` reads whole file with `fh.read()`;
-      consider streaming for >50 MB log files (rare)
-- [ ] (Polish) Silent `continue` in `Uploader.upload` when Worker returns
-      an unknown sha256; add a `logger.debug` for observability
 - [ ] (Polish) `upload` method docstring undersells the caller contract
       (close client, progress_cb behavior on early returns)
 - [ ] (Polish) Worker `lookupExistingHashes` has no guard for D1's
@@ -91,6 +103,31 @@ Phase 1 PASSED. Phase 2 in progress (live testing 2026-04-12).
       `sc-log-donate/src/handlers/*.ts` into a shared `_response.ts`
 - [ ] (Polish) Em-dash audit across plan + DEVLOG: confirm no `--`
       sneaked in during manual edits (project hard rule)
+
+### Donor UI security hardening (2026-07-07, v4.8.3.0)
+- [x] Per-session token (X-Donor-Session) + Host-header check on the
+      local donor server
+- [x] Static file containment fix (resolved.parent check, blocks Windows
+      drive-relative traversal)
+- [x] Upload scoped to the previewed sha256 set, not a blind re-scan
+- [x] Dedup-store matching by sha256 only (dropped renamed fallback)
+- [x] Live-only scanning scope (`scanner._INSTALL_NAMES = ("Live",)`)
+- [x] Version-freshness check surfaces `LiveLogUnavailableError` as a
+      distinct preview error instead of "no logs found"
+- [x] Client-side 1 MB minimum / 50 MB maximum / 50-file caps mirroring the
+      Worker, surfaced in the preview JSON and UI (1 MB floor added same
+      day as an addendum, both bounds inclusive at the boundary)
+- [x] `already_uploaded_count` wired through from the scanner instead of
+      hardcoded 0
+- [x] Donor state DB relocated under the skill's own generated_files dir,
+      with one-time migration from the old AppData path
+- [x] Consent copy single-sourced from `ui_dialog.CONSENT_BODY`, served
+      via `/api/preview`, rendered client-side
+- [x] `tests/test_donor_server.py` added (FastAPI TestClient coverage)
+- [ ] Manually re-run TESTER.md Smoke 5/6 against the deployed Worker to
+      confirm the sha256-restricted upload and Live-only scope behave
+      correctly against real SC installs (automated tests only cover
+      synthetic fixtures)
 
 ### Notes / verified during 2026-05-14 live test
 - Wingman skill framework caches modules in `sys.modules`; the
@@ -173,6 +210,12 @@ Phase 1 PASSED. Phase 2 in progress (live testing 2026-04-12).
   - `_pending_hangar` changed from `bool` to `str | None` (`"hangar_access"` / `"takeoff_permit"` / `None`)
 
 ### Known Game.log Limitations
+- **Mission objective text missing or malformed (KNOWN GAME ISSUE, verified 2026-07-11)** — Two game-side defects in SC 4.8.x break objective-name capture; per user decision, NO parser changes until CIG stabilizes (see SC 4.8 holding pattern):
+  1. **Empty objective titles**: some missions emit `"New Objective: : "` with no title at all; the matching `CMissionLogEntry::UpdateActiveObjective` line shows `uiDisplay[Text=]` or `Text=<= UNINITIALIZED => <EM4>[BP]</EM4>`. The title never reaches Game.log, so no parser can recover it (observed on PTU, mission `NorthRock_SOO2`; LIVE 4.8.1 missions in the same session logged titles correctly).
+  2. **Multi-line "Objective Complete" notifications**: the game embeds a newline after the title, so the closing `: "` lands on the next log line. Our per-line regex (parser.py `_extract_event_data`, objective_complete) therefore never matches and `objective_complete` events carry empty data on ALL channels; the title itself IS present on the first line.
+  - **Expect this to vary mission-to-mission**: what appears in the logs is most likely directly linked to how "complete" each mission is in its design phase (localization/uiDisplay wired up or not). Active full-alpha game; per-mission log quality is not a stable contract. Re-verify per mission rather than assuming a global regression.
+  - Future fallback if we ever harden this: `<ObjectiveUpserted>` lines are single-line and reliable on both channels (mission_id, objective_id, state INPROGRESS/COMPLETED); titles, when the game has them, appear in `UpdateActiveObjective` uiDisplay Text (sometimes with unresolved `~mission(...)` placeholders).
+- ~~**`qt_arrived` / `fatal_collision` fire for other players' ships**~~ (Resolved v4.8.3.2). `OnQuantumDriveArrived` and `<FatalCollision>` are logged for every ship in replication range, and both own and foreign arrivals read `NOT AUTH`, so AUTH cannot discriminate. Now gated on the `ship` state (player must be aboard) plus a model-token match against the arriving/colliding entity class; `fatal_collision` also requires `PlayerPilot: 1`. Fails open when aboard but the entity class is underivable, so genuine own-ship events are never lost.
 - Hauling contract details (cargo type, quantity, SCU) are **not present** in Game.log — only the contract name and objective text appear in notification lines. Verified 2026-02-06.
 - **Hangar entry not distinguishable from open space** — Hangars are not armistice zones, so entering a hangar via elevator triggers "Left armistice zone" — same as flying into open space. No Game.log data currently differentiates hangar entry from true armistice exit. This also makes the landing/takeoff permit logic unreliable (requesting a ship at a terminal while on foot triggers "Landing permit granted"). Needs a future Game.log signal or heuristic (e.g., armistice exit shortly after hangar_ready without ship channel = hangar entry, not departure).
 - ~~**ATC communication fires on console use**~~ — Resolved v0.1.20. Controlled testing proved `AImodule_ATC` fires exclusively on ship departure from station airspace. The false positives were from `AImodule_Cargo` (terminal/console interactions), not `AImodule_ATC`. Now used as `station_departed` event.

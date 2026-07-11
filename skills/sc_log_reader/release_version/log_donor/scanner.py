@@ -9,17 +9,30 @@ from pathlib import Path
 
 from log_donor.dedup import DedupStore
 from log_donor.handle_extractor import extract_handle
-from log_donor.types import Candidate, InstallType
+from log_donor.types import Candidate, DiscoveryResult, InstallType
 
 
 logger = logging.getLogger(__name__)
 
-_INSTALL_NAMES: tuple[InstallType, ...] = ("Live", "PTU", "HOTFIX")
+# Donation is scoped to the Live install only. The InstallType literal keeps
+# "PTU" / "HOTFIX" so the dedup DB schema (which stores the install name as
+# free text) stays compatible with rows recorded before this restriction.
+_INSTALL_NAMES: tuple[InstallType, ...] = ("Live",)
 # Real SC Game.log header has `FileVersion: 4.8.180.28520` (and a duplicate
 # `ProductVersion:` line) within the first 40 lines. We use FileVersion as
 # the canonical per-build identifier. Earlier drafts looked for BranchName /
 # BuildId, but those fields do not exist in real SC Game.log output.
 _FILE_VERSION_RE = re.compile(r"FileVersion:\s*(?P<version>\S+)")
+
+# Client-side caps mirroring the Worker's own limits, applied before the
+# upload manifest is ever sent so the user sees the same numbers we act on.
+MIN_UPLOAD_FILE_BYTES = 1 * 1024 * 1024
+MAX_UPLOAD_FILE_BYTES = 50 * 1024 * 1024
+MAX_UPLOAD_BATCH_FILES = 50
+
+
+class LiveLogUnavailableError(Exception):
+    """Raised when the Live install is unavailable for donation scanning."""
 
 
 def discover_installs(sc_root: Path) -> dict[InstallType, Path]:
@@ -112,55 +125,154 @@ def _hash_file(path: Path, store: DedupStore | None) -> str:
     return digest
 
 
-def discover_candidates(
+def _discover_raw(
     sc_root: Path,
     store: DedupStore,
-) -> list[Candidate]:
-    """Walk SC installs, return all log files eligible for donation.
-
-    Filters out:
-      - installs that do not exist on disk
-      - the live Game.log of any install if StarCitizen.exe is running
-      - logbackups whose game version does not match the install's Game.log
-      - files whose SHA-256 is already in the dedup store
+) -> tuple[list[Candidate], int]:
+    """Scan the Live install for donation-eligible files, before client caps.
 
     Args:
         sc_root: The Star Citizen root dir (parent of Live / PTU / HOTFIX).
         store:   DedupStore for skipping already-uploaded files and caching hashes.
 
     Returns:
-        List of Candidate, sorted by (install, path).
+        Tuple of (candidates not yet uploaded, count of matching files that
+        were filtered out because they are already in the dedup store).
+
+    Raises:
+        LiveLogUnavailableError: If the Live install is missing.
     """
+    installs = discover_installs(sc_root)
+    if "Live" not in installs:
+        raise LiveLogUnavailableError(f"Live install not found under {sc_root}")
+
+    install_dir = installs["Live"]
+    game_log = install_dir / "Game.log"
+
     sc_running = is_sc_running()
     candidates: list[Candidate] = []
+    already_uploaded_count = 0
 
-    for install, install_dir in discover_installs(sc_root).items():
-        game_log = install_dir / "Game.log"
-        version = parse_game_version(game_log)
-        if version is None:
-            logger.warning("install %s has no parseable version, skipping", install)
-            continue
+    def _consider(path: Path, version: str) -> None:
+        nonlocal already_uploaded_count
+        cand = _build_candidate(path, "Live", version, store)
+        if cand is None:
+            return
+        if store.is_uploaded(cand.sha256):
+            already_uploaded_count += 1
+            return
+        candidates.append(cand)
 
-        # Live Game.log
-        if not sc_running and game_log.is_file():
-            cand = _build_candidate(game_log, install, version, store)
-            if cand is not None and not store.is_uploaded(cand.sha256):
-                candidates.append(cand)
+    # Live Game.log
+    if not sc_running and game_log.is_file():
+        current_version = parse_game_version(game_log)
+        if current_version is not None:
+            _consider(game_log, current_version)
 
-        # logbackups/*.log filtered by version
-        logbackups = install_dir / "logbackups"
-        if logbackups.is_dir():
-            for path in sorted(logbackups.iterdir()):
-                if not path.is_file() or path.suffix.lower() != ".log":
-                    continue
-                file_version = parse_game_version(path)
-                if file_version != version:
-                    continue
-                cand = _build_candidate(path, install, version, store)
-                if cand is not None and not store.is_uploaded(cand.sha256):
-                    candidates.append(cand)
+    # Each backup carries its own build identifier. Retention is a server-side
+    # policy, so the client offers every parseable version for donation.
+    logbackups = install_dir / "logbackups"
+    if logbackups.is_dir():
+        for path in sorted(logbackups.iterdir()):
+            if not path.is_file() or path.suffix.lower() != ".log":
+                continue
+            file_version = parse_game_version(path)
+            if file_version is None:
+                continue
+            _consider(path, file_version)
 
+    return candidates, already_uploaded_count
+
+
+def apply_client_caps(
+    candidates: list[Candidate],
+) -> tuple[list[Candidate], int, int, int]:
+    """Apply the size and batch-count caps to a candidate list.
+
+    Files under MIN_UPLOAD_FILE_BYTES (too small to carry a usable session --
+    mirrors the Worker's own floor) or over MAX_UPLOAD_FILE_BYTES are dropped
+    entirely. Both bounds are inclusive: a file of exactly MIN_UPLOAD_FILE_BYTES
+    or exactly MAX_UPLOAD_FILE_BYTES is kept. If more than MAX_UPLOAD_BATCH_FILES
+    remain, the newest files (by mtime) are kept and the rest trimmed.
+
+    Args:
+        candidates: Candidates to cap.
+
+    Returns:
+        Tuple of (kept candidates, count skipped for being undersize, count
+        skipped for being oversize, count trimmed for exceeding the batch cap).
+    """
+    kept = [
+        c for c in candidates
+        if MIN_UPLOAD_FILE_BYTES <= c.size_bytes <= MAX_UPLOAD_FILE_BYTES
+    ]
+    skipped_undersize_count = sum(1 for c in candidates if c.size_bytes < MIN_UPLOAD_FILE_BYTES)
+    skipped_oversize_count = sum(1 for c in candidates if c.size_bytes > MAX_UPLOAD_FILE_BYTES)
+
+    trimmed_count = 0
+    if len(kept) > MAX_UPLOAD_BATCH_FILES:
+        kept.sort(key=lambda c: c.path.stat().st_mtime, reverse=True)
+        trimmed_count = len(kept) - MAX_UPLOAD_BATCH_FILES
+        kept = kept[:MAX_UPLOAD_BATCH_FILES]
+
+    return kept, skipped_undersize_count, skipped_oversize_count, trimmed_count
+
+
+def discover_candidates(
+    sc_root: Path,
+    store: DedupStore,
+) -> list[Candidate]:
+    """Walk the Live install, return all log files eligible for donation.
+
+    Filters out:
+      - the Live Game.log if StarCitizen.exe is running
+      - files without a parseable FileVersion
+      - files whose SHA-256 is already in the dedup store
+
+    Does NOT apply the size/batch-count caps; use discover_candidates_with_caps
+    for the preview and upload flows, which need those numbers surfaced.
+
+    Args:
+        sc_root: The Star Citizen root dir (parent of Live / PTU / HOTFIX).
+        store:   DedupStore for skipping already-uploaded files and caching hashes.
+
+    Returns:
+        List of Candidate.
+
+    Raises:
+        LiveLogUnavailableError: If the Live install is missing.
+    """
+    candidates, _already_uploaded_count = _discover_raw(sc_root, store)
     return candidates
+
+
+def discover_candidates_with_caps(
+    sc_root: Path,
+    store: DedupStore,
+) -> DiscoveryResult:
+    """Full donation scan: discovery, dedup filtering, and client-side caps.
+
+    Args:
+        sc_root: The Star Citizen root dir (parent of Live / PTU / HOTFIX).
+        store:   DedupStore for skipping already-uploaded files and caching hashes.
+
+    Returns:
+        DiscoveryResult with the capped candidate list and filter counts.
+
+    Raises:
+        LiveLogUnavailableError: If the Live install is missing.
+    """
+    raw_candidates, already_uploaded_count = _discover_raw(sc_root, store)
+    kept, skipped_undersize_count, skipped_oversize_count, trimmed_count = apply_client_caps(
+        raw_candidates
+    )
+    return DiscoveryResult(
+        candidates=kept,
+        already_uploaded_count=already_uploaded_count,
+        skipped_undersize_count=skipped_undersize_count,
+        skipped_oversize_count=skipped_oversize_count,
+        trimmed_count=trimmed_count,
+    )
 
 
 def _build_candidate(

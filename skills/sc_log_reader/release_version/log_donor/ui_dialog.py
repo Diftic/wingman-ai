@@ -7,9 +7,12 @@ builds the data structures the framework consumes.
 
 from __future__ import annotations
 
-from log_donor.types import Candidate, PreviewSummary
+from log_donor.types import DiscoveryResult, PreviewSummary
 
 
+# Single source of truth for the consent copy shown in the donor UI. Served
+# to the frontend via GET /api/preview (see donor_ui/app.py) and rendered
+# client-side in app.js, instead of being hand-duplicated in the HTML.
 CONSENT_BODY = (
     "Donating your Star Citizen logs helps improve sc_log_reader's parsing.\n"
     "\n"
@@ -22,18 +25,16 @@ CONSENT_BODY = (
     "  - Kill events and error stacks\n"
     "\n"
     "Logs are sent to a private donation server (Cloudflare R2). They are not\n"
-    "made public and are used only to improve the skill.\n"
+    "made public.\n"
     "\n"
     "No background uploads happen. Donation only runs when you click the button.\n"
     "You can review what is about to be sent before confirming."
 )
 
 
-def build_preview(
-    candidates: list[Candidate],
-    already_uploaded_count: int,
-) -> PreviewSummary:
-    """Aggregate candidate stats for the preview dialog."""
+def build_preview(result: DiscoveryResult) -> PreviewSummary:
+    """Aggregate a DiscoveryResult into the stats the preview dialog shows."""
+    candidates = result.candidates
     per_install_counts: dict[str, int] = {}
     per_install_bytes: dict[str, int] = {}
     for c in candidates:
@@ -44,7 +45,10 @@ def build_preview(
         total_bytes=sum(c.size_bytes for c in candidates),
         per_install_counts=per_install_counts,
         per_install_bytes=per_install_bytes,
-        already_uploaded_count=already_uploaded_count,
+        already_uploaded_count=result.already_uploaded_count,
+        skipped_undersize_count=result.skipped_undersize_count,
+        skipped_oversize_count=result.skipped_oversize_count,
+        trimmed_count=result.trimmed_count,
     )
 
 
@@ -63,9 +67,3 @@ def format_summary_header(summary: PreviewSummary) -> str:
         f"Found {len(summary.candidates)} logs to donate ({total_mb:.1f} MB total). "
         f"Breakdown: {breakdown}."
     )
-
-
-def format_file_row(c: Candidate) -> str:
-    size_kb = c.size_bytes / 1024
-    handle = c.detected_handle or "unknown"
-    return f"  [{c.install}] {c.renamed} ({size_kb:.0f} KB, handle: {handle})"

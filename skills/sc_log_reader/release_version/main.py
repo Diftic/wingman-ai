@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import sys
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,6 +28,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
+from atomic_io import atomic_write_text  # noqa: E402
 from event_log import EventLog, EventLogEntry  # noqa: E402
 from logic import DerivedEvent, StateLogic  # noqa: E402
 from parser import LogEvent, LogParser  # noqa: E402
@@ -145,6 +147,10 @@ _HAS_DERIVED_EVENT: set[str] = {
 # Environments monitored within the StarCitizen base folder
 _SC_ENVIRONMENTS = ("LIVE", "PTU", "EPTU", "HOTFIX", "TECH-PREVIEW")
 
+# Pre-4.8.3 donor state DB location. Superseded by a path under this skill's
+# own generated_files dir; kept only to migrate existing installs forward.
+_LEGACY_DONOR_STATE_DB_PATH = "${APPDATA}/Wingman/sc_log_reader/donor_state.sqlite"
+
 
 @dataclass
 class _GameStack:
@@ -170,8 +176,8 @@ class SC_LogReader(Skill):
     - Layer 1 (this file): AI interface, tools, notifications
     """
 
-    VERSION = "4.8.0.2"
-    SC_TARGET_VERSION = "4.8.0"
+    VERSION = "4.8.3.4"
+    SC_TARGET_VERSION = "4.8.3"
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -262,17 +268,13 @@ class SC_LogReader(Skill):
 
         # Standalone donation UI (optional - requires fastapi)
         try:
-            from log_donor._build_config import (
-                DONOR_STATE_DB_PATH,
-                DONOR_WORKER_TOKEN,
-                DONOR_WORKER_URL,
-            )
+            from log_donor._build_config import DONOR_WORKER_TOKEN, DONOR_WORKER_URL
             from log_donor.dedup import DedupStore
             from log_donor.donor_ui.app import DonorServer
             from log_donor.donor_ui.window import DonorWindow
             from services.system_manager import LOCAL_VERSION as WINGMAN_VERSION
 
-            state_db_path = Path(os.path.expandvars(DONOR_STATE_DB_PATH))
+            state_db_path = self._migrate_donor_state_db()
             self._donor_dedup_store = DedupStore(db_path=state_db_path)
 
             self._donor_server = DonorServer(
@@ -289,8 +291,24 @@ class SC_LogReader(Skill):
             self.threaded_execution(self._announce_donor_ui_startup)
         except ImportError as e:
             logger.warning("Donor UI unavailable (missing fastapi/uvicorn?): %s", e)
-        except OSError as e:
+            if self.printr:
+                self.printr.print(
+                    "SC_LogReader: Donation UI unavailable (missing dependency). "
+                    "Log monitoring is unaffected.",
+                    color=LogType.WARNING,
+                )
+        except Exception as e:
+            # Broad on purpose: a corrupt/locked donor_state.sqlite (sqlite3
+            # errors), a port bind failure, or any other donor-only startup
+            # problem must degrade to "no donor UI", never abort prepare()
+            # and take the whole skill down with it.
             logger.warning("Donor UI failed to start: %s", e)
+            if self.printr:
+                self.printr.print(
+                    "SC_LogReader: Donation UI failed to start. "
+                    "Log monitoring is unaffected.",
+                    color=LogType.WARNING,
+                )
 
         found = self._sc_base_path and any(
             (self._sc_base_path / env / "Game.log").exists()
@@ -320,7 +338,8 @@ class SC_LogReader(Skill):
         if not url:
             return
 
-        msg = f"SC Log Reader donation dashboard is ready. Open:\n{url}"
+        display_url = url.replace("127.0.0.1", "localhost")
+        msg = f"SC Log Reader donation dashboard is ready. Open:\n{display_url}"
 
         await self.printr.print_async(
             msg,
@@ -521,8 +540,7 @@ class SC_LogReader(Skill):
             "logic_state": stack.logic.save_state(),
         }
         try:
-            with open(state_file, "w", encoding="utf-8") as f:
-                json.dump(state, f, indent=2, default=str)
+            atomic_write_text(state_file, json.dumps(state, indent=2, default=str))
             if self.printr:
                 self.printr.print(
                     f"SC_LogReader: {stack.env} state saved to {state_file}",
@@ -614,23 +632,26 @@ class SC_LogReader(Skill):
         self._stacks.clear()
         self._active_stack = None
 
+        # Best-effort on purpose: any donor teardown failure must not prevent
+        # super().unload() from running, so each step catches broadly rather
+        # than just the narrow error its happy path is expected to raise.
         if self._donor_window is not None:
             try:
                 self._donor_window.close()
-            except OSError:
-                logger.debug("Failed to close donor window")
+            except Exception:
+                logger.debug("Failed to close donor window", exc_info=True)
             self._donor_window = None
         if self._donor_server is not None:
             try:
                 self._donor_server.stop()
-            except OSError:
-                logger.debug("Failed to stop donor server")
+            except Exception:
+                logger.debug("Failed to stop donor server", exc_info=True)
             self._donor_server = None
         if self._donor_dedup_store is not None:
             try:
                 self._donor_dedup_store.close()
-            except OSError:
-                logger.debug("Failed to close donor dedup store")
+            except Exception:
+                logger.debug("Failed to close donor dedup store", exc_info=True)
             self._donor_dedup_store = None
 
         await super().unload()
@@ -708,16 +729,34 @@ class SC_LogReader(Skill):
             return default
         return prop.value if prop.value is not None else default
 
-    def _donor_config(self, property_id: str, default: str) -> str:
-        """Read a donor_* custom property; expand env vars if the value contains $."""
-        value = default
-        if self.config.custom_properties:
-            prop = next((p for p in self.config.custom_properties if p.id == property_id), None)
-            if prop is not None and prop.value is not None and str(prop.value).strip() != "":
-                value = str(prop.value)
-        if "$" in value:
-            value = os.path.expandvars(value)
-        return value
+    def _migrate_donor_state_db(self) -> Path:
+        """Return the donor dedup DB path, migrating it from the legacy location if needed.
+
+        Pre-4.8.3 builds wrote donor_state.sqlite to a stray AppData/Wingman
+        path outside this skill's own generated_files dir. If that file still
+        exists and nothing has been written to the new location yet, move it
+        so existing dedup state survives the upgrade.
+
+        Returns:
+            The donor dedup DB path under this skill's generated_files dir.
+        """
+        new_path = Path(self.get_generated_files_dir()) / "donor_state.sqlite"
+        legacy_path = Path(os.path.expandvars(_LEGACY_DONOR_STATE_DB_PATH))
+
+        if legacy_path.exists() and not new_path.exists():
+            try:
+                new_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(legacy_path), str(new_path))
+                logger.info(
+                    "Migrated donor state DB from %s to %s", legacy_path, new_path
+                )
+            except OSError as e:
+                logger.warning(
+                    "Failed to migrate donor state DB from %s to %s: %s",
+                    legacy_path, new_path, e,
+                )
+
+        return new_path
 
     def _donor_sc_root(self) -> "Path | None":
         """Return the skill's resolved SC root for the donor scanner.
@@ -808,13 +847,13 @@ class SC_LogReader(Skill):
 
         # Travel
         if et == "quantum_route_set":
-            return "Quantum jump target set, ready for jump calibration"
+            return "Quantum travel destination set"
         if et == "quantum_calibration_started":
             return "Quantum calibration started"
         if et == "quantum_calibration_complete":
             return "Quantum calibration complete"
         if et == "qt_calibration_complete_group":
-            return f"Quantum calibration ready: {d.get('player', 'Party member')}"
+            return f"Quantum calibration completed by {d.get('player', 'Party member')}"
         # Health
         if et == "injury":
             sev = d.get("severity", "")
@@ -989,9 +1028,15 @@ class SC_LogReader(Skill):
     def _format_batch_message(self, events: list[DerivedEvent]) -> str:
         """Format batch of events for AI notification."""
         if len(events) == 1:
-            return f"[Game Event] {events[0].message}"
+            return (
+                "[Game Event | log record, already happened; acknowledge "
+                f"briefly, no inference, no actions] {events[0].message}"
+            )
 
-        lines = ["[Game Events]"]
+        lines = [
+            "[Game Events | log records, already happened; acknowledge "
+            "briefly, no inference, no actions]"
+        ]
         for event in events:
             lines.append(f"- {event.message}")
         return "\n".join(lines)
@@ -1285,8 +1330,13 @@ class SC_LogReader(Skill):
 
     async def _tool_donate_logs(self, parameters: dict) -> tuple[str, str]:
         """Open the log donation UI in the user's default browser."""
-        if self._donor_window is None:
+        if self._donor_window is None or self._donor_server is None:
             return "Donation UI is unavailable. Check the skill logs for details.", ""
+        if not self._donor_server.is_running:
+            return (
+                "Donation UI server is not running. Check the skill logs for details.",
+                "",
+            )
         self._donor_window.open()
         return f"Opened the donation UI at {self._donor_server.url}.", ""
 

@@ -10,7 +10,11 @@ placeholder remains and any donation attempt will fail with 401 against the
 real Worker, which is the correct dev behavior.
 
 A self-hoster forking this skill can edit these constants in their installed
-copy to point at a different Worker / state location.
+copy to point at a different Worker.
+
+The donor state DB path is not build-injected; it lives under the skill's
+own generated-files directory (see main.py's use of get_generated_files_dir())
+alongside the rest of the skill's per-install state.
 """
 
 from __future__ import annotations
@@ -18,4 +22,3 @@ from __future__ import annotations
 
 DONOR_WORKER_URL = "https://sc-log-donate.lars-erik-vaagen.workers.dev"
 DONOR_WORKER_TOKEN = "c3a4219631628ee3a6022b7eb945afad"
-DONOR_STATE_DB_PATH = "${APPDATA}/Wingman/sc_log_reader/donor_state.sqlite"

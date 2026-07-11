@@ -1,5 +1,287 @@
 # SC_LogReader Development Log
 
+## Version: 4.8.3.4
+
+### Expanded donation success message (2026-07-11)
+
+Skill-iteration bump only (`4.8.3.3` -> `4.8.3.4`); no SC-target change, donor
+UX copy only.
+
+The donor UI's post-upload success state now shows an expanded message: a
+thank-you plus a line explaining the development value of a donated log (real
+`Game.log` samples drive the parser regression corpus). Previously it showed a
+bare confirmation. No change to the scanner, uploader, or the envelope schema.
+
+This is the first release to carry the 4.8.3.3 crash-safe atomic writes
+(`atomic_io.py`, audit finding NEW-A) into an install alongside the copy change,
+so both ship together.
+
+## Version: 4.8.3.3
+
+### Crash-safe atomic writes (audit finding NEW-A) (2026-07-09)
+
+Skill-iteration bump only (`4.8.3.2` -> `4.8.3.3`); no SC-target change,
+reliability fix only.
+
+Every rewrite of a persistent file used a truncating `open(path, "w")`: the
+`EventLog.trim` startup rewrite, `_save_stack_state` in `main.py`, and the
+`_flush_file_output` status writers in `logic.py` and `parser.py`. A crash
+between truncate and the final write left the file partial, and readers of the
+JSONL event log silently skip malformed lines, so a mid-write crash could
+truncate history or leave a half-written status file that a sibling skill
+reads.
+
+Fix: new leaf module `atomic_io.py` with `atomic_write_text(path, text)`
+(identical shape to SC_Accountant's; a separate copy avoids a cross-skill
+import dependency). It writes to a uniquely named temp file in the same
+directory, flushes and `os.fsync`es it, then `os.replace`s it over the target
+(atomic on Windows and POSIX on the same volume). On any failure the temp file
+is removed and the original is left intact. All four rewrite sites now route
+through it and keep their existing exception handlers.
+
+Added `tests/test_atomic_io.py` (3 tests): `EventLog.trim` leaves exactly the
+recent entries a reader expects with no temp file behind, the helper replaces
+content cleanly, and it preserves the original with no temp behind when
+`os.replace` fails mid-write. Full suite green at 76 passed. `atomic_io.py`
+added to the `files` manifest in `skill_installer_config.json` so releases
+ship it.
+
+### qt_arrived / fatal_collision gated on own-ship state (2026-07-08)
+
+Skill-iteration bump only (`4.8.3.1` -> `4.8.3.2`); no SC-target change, bugfix
+only.
+
+Star Citizen's `Game.log` writes a `CSCItemNavigation::OnQuantumDriveArrived`
+line for *every* ship in replication range, not just the player's, and
+`<FatalCollision>` behaves the same way. The parser classified any such line as
+`qt_arrived` / `fatal_collision` regardless of who it belonged to, so the
+wingman announced "Arrived at quantum destination" while the player stood on
+foot in a shop and a stranger's ship arrived nearby.
+
+Evidence (real logs): a foreign Avenger Titan arrival while the player was on
+foot, and the player's own Drake Clipper arrival, are byte-for-byte identical in
+their AUTH marking: both read `NOT AUTH`. The AUTH field is therefore useless
+as a discriminator. The reliable signal is the parser's existing `ship` state,
+set from ship voice-channel join/leave lines: the player is only aboard a ship
+when that state is populated.
+
+Fix in `parser.py` `_classify_event`: both event types now pass through a new
+`_event_belongs_to_player_ship` gate. It returns None when the player is not
+aboard any ship (the on-foot false trigger), and, when aboard, compares the
+arriving/colliding entity's model tokens against the current `ship` state via
+`_ship_model_tokens` (drops manufacturer prefix codes like `DRAK`, human names
+like `Drake`, the `@vehicle_Name` wrapper and numeric ids, so `DRAK_Clipper` and
+a channel-derived `Drake Clipper`/`Clipper` reduce to `{clipper}`). A confident
+mismatch (both sides derivable, model tokens disjoint) drops the event; anything
+underivable fails open so a genuine own-ship event is never lost to a parse gap.
+`fatal_collision` additionally requires `PlayerPilot: 1` in the line. New helpers
+`_extract_qt_arrival_class` and `_extract_collision_vehicle_class` pull the
+entity class (trailing numeric id stripped). Downstream consumers are unaffected:
+the gate only suppresses spurious classifications; the event data contract is
+unchanged. Covered by `tests/test_parser_ownership.py` (8 tests).
+
+Residual risks (accepted):
+- (a) A future ship whose channel display name shares no model token with its
+  entity class would have its own QT arrival silently dropped. Manufacturer
+  tokens are stripped before comparison, so if this ever bites, consider adding
+  manufacturer-fallback matching.
+- (b) An own QT arrival is dropped if the `ship` state is missing because the
+  boarding happened before the last login line (catch-up replays only from the
+  last login), so the channel-join that sets `ship` was never seen.
+- (c) A same-model foreign arrival while aboard, or a stale aboard state after
+  logging off inside a ship, still passes the gate. This is the narrow surviving
+  remnant of the original bug and is not fixable by model-token matching alone.
+
+### SC_TARGET_VERSION corrected 4.8.2 -> 4.8.3 (2026-07-07)
+
+Corrected `SC_TARGET_VERSION` from the stale `4.8.2` to `4.8.3` to match the
+current live Star Citizen patch and this skill's own `4.8.3.x` VERSION line
+(VERSION unchanged at `4.8.3.1`). Updated in `main.py`, `__init__.py`, and
+`skill_installer_config.json`. This clears the dependency-version mismatch
+warning SC_Accountant raised while the two skills disagreed on their SC target.
+
+### reward_earned entries now carry the resolved mission_id (2026-07-07)
+
+Skill-iteration bump only (`4.8.3.0` -> `4.8.3.1`); no SC-target change, data
+contract fix only.
+
+Adversarial review of SC_Accountant's mission-reward reconciliation (which
+supersedes a `reward_earned` component transaction once its canonical
+`mission_reward` bundle arrives) found that the two could disagree on
+`mission_id` in real logs. The bundle resolves the mission via
+`_reward_context_for_event` (embedded `MissionId`, else the most recently
+completed contract by time-proximity, else unresolved) and stamps that
+resolved id on the bundle. The persisted `reward_earned` event-log entry was
+written to disk *before* that resolution ran, so it kept whatever the raw log
+line carried, which in the common time-correlation case is the zero-sentinel
+`MissionId` (`00000000-0000-0000-0000-000000000000`), not the resolved one.
+Downstream, matching component to bundle by `mission_id` would fail even
+though they were the same reward, risking a double-counted payout.
+
+Fix in `logic.py`'s `_write_raw_to_event_log`: for `reward_earned`, resolve
+the reward context (`_reward_context_for_event`) once, *before* building the
+persisted entry, and stamp the entry's `data.mission_id` / `data.mission_name`
+with that resolved value. The same resolved context object is then passed
+into `_record_reward_component` (new optional `context` parameter) instead of
+letting it resolve its own copy, so the entry and the bundle it feeds can
+never diverge. `blueprint_received` (the other reward-component event type)
+is unaffected: it still resolves its own context on demand, since it has no
+mission_id field of its own to keep in sync.
+
+The `reward_earned` fingerprint is unchanged (still `notification_id` /
+timestamp / amount based); `mission_id` deliberately does not enter it.
+
+Also fixes a smaller latent issue as a side effect: the raw zero-sentinel
+`MissionId` no longer leaks into the entry's `data.mission_id` at all (it's
+normalized to `""` alongside every other unresolved case), where previously a
+downstream consumer checking "is this field non-empty" could have mistaken
+the sentinel for a real mission id.
+
+Tests added to `tests/test_movement_reconciliation.py`:
+`test_reward_earned_entry_inherits_recency_resolved_mission_id` (tier-2:
+reward_earned with the zero-sentinel MissionId, preceded by a
+`contract_complete` a few seconds earlier -- the written entry's
+`data.mission_id` equals the bundle's) and
+`test_reward_earned_entry_stays_mission_id_less_without_recent_contract`
+(tier-3: no recent contract to correlate against -- both entry and bundle
+stay mission_id-less).
+
+---
+
+### Donor UI security hardening, LIVE-only scope, upload caps (2026-07-07)
+
+Skill-iteration bump only (`4.8.2.0` -> `4.8.3.0`); no SC-target change and
+no parser pattern changes. Addresses code-review findings on the log
+donation feature plus user-directed scope changes.
+
+**Security (donor_ui/app.py)**
+- Per-run session token (`secrets.token_urlsafe(32)`) generated in
+  `DonorServer.__init__`, injected into the served `index.html` via a
+  `<meta name="donor-session">` tag (template substitution on a placeholder
+  comment, not a static-file mount). `app.js` reads the tag and sends it as
+  `X-Donor-Session` on `POST /api/upload` and `POST /api/reset`; both
+  routes 403 without a valid token (`secrets.compare_digest`).
+- `Host` header check as a FastAPI middleware applied to every request:
+  only `127.0.0.1:{port}` or `localhost:{port}` is accepted, else 403.
+  Defeats drive-by CSRF and DNS rebinding against the local server.
+- `/static/{filename}` now resolves the joined path and requires
+  `resolved.parent == static_dir.resolve()`, replacing the old ad hoc
+  `"/" in filename` guard. Blocks Windows drive-relative traversal
+  (`C:foo`) that the old guard missed.
+- Upload is now scoped to what the user actually saw: the preview response
+  includes each candidate's sha256; `app.js` sends the previewed sha256
+  list back on `POST /api/upload`; the server re-discovers (files may have
+  rotated) but only uploads candidates whose hash is in that list.
+- Dedup-store matching after upload is now sha256-only (dropped the
+  `c.renamed == f.renamed` fallback -- `renamed` is a display string and
+  collides across installs).
+
+**Scope changes (user-directed)**
+- Donation is now Live-install only (`scanner._INSTALL_NAMES = ("Live",)`).
+  `discover_installs` / `discover_candidates` no longer look at PTU or
+  HOTFIX at all.
+- Donation requires a parseable `FileVersion` from the current Live
+  `Game.log`; if the Live install or its version is missing, discovery
+  raises `LiveLogUnavailableError` instead of silently returning an empty
+  list, and the preview surfaces this as a distinct `error` field (not
+  "no logs found").
+- Client-side caps mirroring the Worker: files under 1 MB (`MIN_UPLOAD_FILE_BYTES`
+  -- too small to carry usable session data) or over 50 MB are skipped,
+  batches are capped at 50 files (newest-by-mtime kept when trimming). Both
+  size bounds are inclusive (exactly 1 MB / exactly 50 MB are accepted).
+  `scanner.apply_client_caps` / `discover_candidates_with_caps` surface
+  `skipped_undersize_count`, `skipped_oversize_count`, and `trimmed_count`
+  through the preview JSON and into the UI as separate, distinctly-worded
+  reasons (added 2026-07-07, addendum to the original caps work same day).
+
+**Other fixes**
+- `main.py` donor bootstrap now catches `Exception` (was `ImportError` /
+  `OSError` only) so a corrupt or locked `donor_state.sqlite` degrades to
+  "no donor UI" instead of aborting `prepare()`. Both the missing-dependency
+  and generic-failure paths now also emit a `printr` WARNING badge, matching
+  `validate()`'s convention, not just a `logger.warning`.
+- Donor state DB moved from a stray
+  `${APPDATA}/Wingman/sc_log_reader/donor_state.sqlite` to this skill's own
+  `get_generated_files_dir()/donor_state.sqlite`. `main.py` migrates the
+  file on first run if the old path exists and the new one does not.
+  `DONOR_STATE_DB_PATH` removed from `log_donor/_build_config.py`.
+- `already_uploaded_count` in the preview is no longer hardcoded to 0 --
+  `discover_candidates_with_caps` now counts files filtered out by the
+  dedup store and wires the count through to the UI's "already donated"
+  branches.
+- A scan exception in `/api/preview` now returns a distinct `error` field
+  instead of rendering as "no logs found"; `app.js` shows it in an
+  `.empty-state.error` block.
+- `uploader.Uploader._put_file` streams the file object to httpx instead of
+  reading it fully into memory per PUT attempt, skips the retry sleep after
+  the final attempt, and logs once when retries are exhausted. Candidates
+  the Worker's begin-response silently drops are now appended as failed
+  `FileUploadResult`s so upload progress always reaches the candidate
+  total, and an unknown sha256 in the Worker's response now logs at debug
+  level instead of silently continuing (both were open TODO polish items).
+- `ui_dialog.CONSENT_BODY` is now served through `/api/preview` as
+  `consent_text` and rendered client-side in `app.js`, replacing the
+  hand-duplicated consent HTML. `format_file_row` (unused) removed.
+- `main.py`: removed the dead `_donor_config` method; `unload()`'s donor
+  teardown now catches `Exception` broadly (was `OSError`) so a teardown
+  failure never blocks `super().unload()`; `_tool_donate_logs` now checks
+  `donor_server.is_running` before opening a browser tab to a dead URL.
+- Copied `assets/wingman-ai.ico` into `donor_ui/static/` -- `index.html`
+  referenced it but the file was never shipped in the skill.
+
+**Tests**
+- `tests/test_donor_server.py` (new): FastAPI `TestClient` coverage for
+  the preview JSON shape (including `error`, `already_uploaded_count`,
+  `skipped_undersize_count`, `skipped_oversize_count`, `trimmed_count`),
+  403 without/with-wrong session token, 403 on a forged `Host` header
+  across every route, static path-traversal containment, sha256-restricted
+  upload, and 409 on a concurrent upload/reset. The shared `fake_sc_install`
+  fixture (`tests/conftest.py`) now pads its synthetic Game.log content
+  past `MIN_UPLOAD_FILE_BYTES` so its candidates survive the new floor.
+- `tests/test_scanner.py` gained undersize-skip coverage for
+  `apply_client_caps`, including the exact-1-MB and exact-50-MB boundary
+  cases (both inclusive/accepted).
+- `tests/test_scanner.py` / `tests/test_log_donor_integration.py` updated
+  for the Live-only scope (candidate counts, `discover_installs` no longer
+  returning PTU) plus new tests for `LiveLogUnavailableError` and
+  `apply_client_caps`.
+
+## Version: 4.8.2.0
+
+### Star Citizen 4.8.2 target bump (2026-06-28)
+
+Rebaselined the skill metadata from `4.8.0.0` / SC target `4.8.0` to
+`4.8.2.0` / SC target `4.8.2` for the current live-test pass. No parser
+pattern changes in this bump.
+
+## Version: 4.8.0.0
+
+### Reward bundle reconciliation (2026-06-28)
+
+Added canonical `mission_reward` event-log rows that group nearby reward
+components into one mission-level reward bundle. `StateLogic` now keeps a
+short-lived reward evidence buffer, attaches zero-MissionId reward notifications
+to a recently completed contract when possible, preserves the existing
+`reward_earned` / `blueprint_received` component entries for compatibility,
+and flushes bundles before the next unrelated event so EventLog timestamp order
+continues to work with restart dedup watermarks.
+
+Parser reward cleanup: `blueprint_received` now extracts the shared
+notification context (`notification_id`, `mission_id`, `objective_id`), and
+legacy item rewards strip the trailing notification colon from item names.
+
+Tests added for blueprint context extraction and money + item + blueprint
+mission reward bundling. Verified with `python -m pytest
+skills\\sc_log_reader\\tests -q`, targeted `compileall`, and Ruff.
+
+
+### Live-test rebaseline (2026-05-25)
+
+Version rebaselined from 4.8.0.2 to 4.8.0.0 to align all SC skills at a common
+4.8.0.0 baseline for a coordinated local live-test pass against SC 4.8.0.
+No code change; version strings only. Within-patch increments resume from
+4.8.0.1 once test findings are incorporated.
+
 ## Version: 4.8.0.2
 
 ### Log donation feature live + post-launch fix cascade (2026-05-14)
@@ -722,3 +1004,11 @@ Cross-referenced with 164 historical log files (4,344 events): ATC and Cargo are
 - Migrated event patterns from SC_LiveLogManager
 - Added standalone entry points for Layer 2 and Layer 3
 - Added optional JSON file output for debugging
+
+### Movement ledger reconciliation pass (2026-06-27)
+
+Reviewed June 2026 PTU/LIVE logs against the movement-ledger mission and fixed the largest confirmed economy gap. The parser now recognizes both `CEntityComponentShopUIProvider` and `CEntityComponentShoppingProvider` shop flows. The logic layer resolves ShoppingProvider confirmations that only include `playerId`/`result`, writes one confirmed trade movement, and suppresses nearby HUD `Transaction Complete` rows when they only confirm that trade.
+
+`EventLogEntry` now carries movement metadata: `movement_category`, `movement_verb`, `confidence`, `fingerprint`, and `source_events`. Existing `event_type` values are preserved for compatibility.
+
+Current reward status: aUEC rewards, blueprint rewards, and known legacy item reward notifications are distinguishable as separate entries, but a single mission reward containing money + item + blueprint is not yet grouped into one canonical reward bundle. See `plans/2026-06-27-movement-ledger-reconciliation.md` for the detailed findings, verification, and next-step plan.

@@ -13,6 +13,7 @@ RELEASE_DIR = SKILL_DIR / "release_version"
 
 RELEASE_FILES = [
     "__init__.py",
+    "atomic_io.py",
     "debug_emitter.py",
     "default_config.yaml",
     "event_log.py",

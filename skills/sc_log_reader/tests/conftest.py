@@ -8,6 +8,8 @@ from textwrap import dedent
 
 import pytest
 
+from log_donor.scanner import MIN_UPLOAD_FILE_BYTES
+
 
 SAMPLE_GAMELOG_HEADER = dedent(
     """\
@@ -21,7 +23,7 @@ SAMPLE_GAMELOG_HEADER = dedent(
 
 
 def _gamelog_text(file_version: str = "4.8.180.28520") -> str:
-    return dedent(
+    header = dedent(
         f"""\
         <2026-05-14T13:41:52.133Z> Log started on Thu May 14 13:41:52 2026
         <2026-05-14T13:41:52.133Z> Built on May 12 2026 16:25:50
@@ -32,6 +34,12 @@ def _gamelog_text(file_version: str = "4.8.180.28520") -> str:
         <2026-05-14T13:42:05.956Z> Log started.
         """
     )
+    # Padded past MIN_UPLOAD_FILE_BYTES so fixture files survive the donor's
+    # client-side minimum-size cap (real Game.logs are never this small;
+    # parse_game_version only reads the first 40 lines, so this filler line
+    # never interferes with FileVersion detection).
+    padding = "X" * MIN_UPLOAD_FILE_BYTES + "\n"
+    return header + padding
 
 
 @pytest.fixture
@@ -42,12 +50,12 @@ def fake_sc_install(tmp_path: Path) -> Path:
       Live/
         Game.log         (FileVersion 4.8.180.28520)
         logbackups/
-          Game_match.log (FileVersion 4.8.180.28520 -- matches)
-          Game_old.log   (FileVersion 4.7.2.99999 -- does NOT match)
+          Game_match.log (FileVersion 4.8.180.28520, same build as Game.log)
+          Game_old.log   (FileVersion 4.7.2.99999, an older build)
       PTU/
         Game.log         (FileVersion 4.8.181.28600)
         logbackups/
-          Game_match.log (FileVersion 4.8.181.28600 -- matches)
+          Game_match.log (FileVersion 4.8.181.28600, same build as Game.log)
     """
     root = tmp_path / "StarCitizen"
 

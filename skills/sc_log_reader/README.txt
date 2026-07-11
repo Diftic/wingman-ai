@@ -1,5 +1,5 @@
 # SC_LogReader - Star Citizen Log Reader Skill
-# Version: 4.8.0.2 (qualified against Star Citizen 4.8.0)
+# Version: 4.8.3.4 (qualified against Star Citizen 4.8.3)
 # Author: Mallachi
 
 # =============================================================================

@@ -1,4 +1,4 @@
-# SC_LogReader v4.8.0.2 - Community Tester Guide
+# SC_LogReader v4.8.3.4 - Community Tester Guide
 
 Thanks for testing! This guide gets you installed and explains what to look
 for and how to report back.
@@ -12,7 +12,7 @@ in real time and feeds events to your Wingman - contracts, mission objectives,
 location changes, ship enter/exit, injuries, quantum jumps, refinery, trading,
 blueprints, mission rewards, and more.
 
-**This build is qualified against Star Citizen `4.8.0`.** If you're on a newer
+**This build is qualified against Star Citizen `4.8.3`.** If you're on a newer
 SC patch, expect possible breakage and please report it.
 
 ---
@@ -27,7 +27,7 @@ SC patch, expect possible breakage and please report it.
 ### Steps
 
 1. Unzip the package somewhere convenient (Desktop is fine).
-2. Open the unzipped `sc_log_reader_v4.8.0.2` folder.
+2. Open the unzipped `sc_log_reader_v4.8.3.4` folder.
 3. **Double-click `install.bat`.** It copies the skill into:
    ```
    %AppData%\ShipBit\WingmanAI\custom_skills\sc_log_reader\
@@ -40,10 +40,10 @@ SC patch, expect possible breakage and please report it.
 In your Wingman AI logs (or the console where Wingman runs), look for:
 
 ```
-SC_LogReader v4.8.0.2 initializing...
+SC_LogReader v4.8.3.4 initializing...
 ```
 
-If you see `v4.8.0.2`, you're on the right build. If you see a different version
+If you see `v4.8.3.4`, you're on the right build. If you see a different version
 or no banner at all, something went wrong with the install - please report it.
 
 In the Wingman AI UI, open your wingman's settings → Skills → confirm
@@ -133,7 +133,7 @@ For every issue, please include:
 ## Thanks!
 
 Feedback from this round goes directly into the regression test corpus and
-the next patch (likely `v4.8.0.2` if any critical/major issues land, or
+the next patch (likely `v4.8.2.1` if any critical/major issues land, or
 `v4.8.1` when CIG ships the next SC patch).
 
 - Mallachi

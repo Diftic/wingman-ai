@@ -25,6 +25,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from atomic_io import atomic_write_text
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,6 +41,11 @@ class EventLogEntry:
     data: dict = field(default_factory=dict)   # event-specific fields
     amount_auec: float | None = None  # +received / -spent; None if not financial
     item_name: str | None = None      # normalised item name; None if not applicable
+    movement_category: str | None = None  # area/economy/work/inventory/reputation
+    movement_verb: str | None = None      # bought/sold/entered/completed/etc.
+    confidence: str | None = None         # high/medium/low
+    fingerprint: str | None = None        # stable-ish dedupe/correlation key
+    source_events: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Convert to JSON-serialisable dictionary."""
@@ -216,9 +223,8 @@ class EventLog:
 
         if removed > 0:
             try:
-                with open(self._path, "w", encoding="utf-8") as f:
-                    for entry in entries:
-                        f.write(json.dumps(entry.to_dict()) + "\n")
+                text = "".join(json.dumps(e.to_dict()) + "\n" for e in entries)
+                atomic_write_text(self._path, text)
                 logger.info(
                     "EventLog: trimmed %d entries older than %d days", removed, days
                 )

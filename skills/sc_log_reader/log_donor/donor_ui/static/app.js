@@ -53,6 +53,14 @@
     return then.toLocaleTimeString();
   }
 
+  // The server mints a per-run session token and injects it into a <meta>
+  // tag on this page. Every state-changing request must echo it back so
+  // that only a page actually served by this server can trigger one.
+  function getSessionToken() {
+    var meta = document.querySelector('meta[name="donor-session"]');
+    return meta ? meta.getAttribute("content") || "" : "";
+  }
+
   // -----------------------------------------------------------------------
   // API calls
   // -----------------------------------------------------------------------
@@ -74,12 +82,24 @@
       });
   }
 
-  function startUpload() {
-    fetch("/api/upload", { method: "POST" })
+  function startUpload(sha256List) {
+    fetch("/api/upload", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Donor-Session": getSessionToken(),
+      },
+      body: JSON.stringify({ sha256: sha256List || [] }),
+    })
       .then(function (r) {
         if (r.status === 409) {
           return r.json().then(function (d) {
             throw new Error(d.error || "Upload already running");
+          });
+        }
+        if (r.status === 403) {
+          return r.json().then(function (d) {
+            throw new Error(d.error || "Session rejected");
           });
         }
         if (!r.ok) {
@@ -154,6 +174,10 @@
     var totalBytes = (data && data.total_bytes) || 0;
     var configured = data && data.sc_root_configured;
     var alreadyCount = (data && data.already_uploaded_count) || 0;
+    var skippedUndersize = (data && data.skipped_undersize_count) || 0;
+    var skippedOversize = (data && data.skipped_oversize_count) || 0;
+    var trimmedCount = (data && data.trimmed_count) || 0;
+    var scanError = data && data.error;
 
     var html = "";
 
@@ -162,24 +186,32 @@
       html += '<p class="subheader">' + esc(data.header) + "</p>";
     }
 
-    // Consent box
-    html += buildConsentBox();
+    // Consent box (text is server-sourced so it stays in sync with what
+    // the skill actually uploads)
+    html += buildConsentBox(data && data.consent_text);
 
-    // File list or empty state
+    // File list or empty/error state
     if (!configured) {
       html += buildEmptyState(
         "Star Citizen path is not configured in skill settings. Configure it, then refresh.",
-        true
+        true, false
       );
+    } else if (scanError) {
+      html += buildEmptyState(scanError, true, true);
     } else if (candidates.length === 0 && alreadyCount > 0) {
       html += buildEmptyState(
         "All eligible logs have already been donated. Thanks!",
-        true
+        true, false
       );
     } else if (candidates.length === 0) {
-      html += buildEmptyState("No Star Citizen logs found to donate.", false);
+      html += buildEmptyState("No Star Citizen logs found to donate.", false, false);
     } else {
       html += buildFileList(candidates);
+    }
+
+    // Filter note: what got left out and why
+    if (configured && !scanError) {
+      html += buildFilterNote(alreadyCount, skippedUndersize, skippedOversize, trimmedCount);
     }
 
     // Donate button
@@ -188,7 +220,7 @@
         ? "Donate " + candidates.length + " log" + (candidates.length !== 1 ? "s" : "") +
           " (" + formatBytes(totalBytes) + ")"
         : "Donate logs";
-    var disabled = candidates.length === 0 ? " disabled" : "";
+    var disabled = candidates.length === 0 || scanError ? " disabled" : "";
     html +=
       '<div class="action-row">' +
       '<button id="btn-donate" class="btn-primary"' + disabled + ">" + esc(btnLabel) + "</button>" +
@@ -198,30 +230,47 @@
 
     var btn = document.getElementById("btn-donate");
     if (btn && !btn.disabled) {
-      btn.addEventListener("click", startUpload);
+      btn.addEventListener("click", function () {
+        var sha256List = candidates.map(function (c) { return c.sha256; });
+        startUpload(sha256List);
+      });
     }
   }
 
-  function buildConsentBox() {
+  function buildConsentBox(consentText) {
     return (
       '<div class="consent-box">' +
       '<h2>What you are donating</h2>' +
-      '<div class="consent-body">' +
-      "<p>Donating your Star Citizen logs helps improve sc_log_reader's parsing.</p>" +
-      "<p>Logs contain in-game activity, including:</p>" +
-      "<ul>" +
-      "<li>In-game chat</li>" +
-      "<li>Player handle and character names</li>" +
-      "<li>Locations, missions, and deaths</li>" +
-      "<li>Hangar / loadout details and vehicle ownership</li>" +
-      "<li>In-game purchases and party / org membership</li>" +
-      "<li>Kill events and error stacks</li>" +
-      "</ul>" +
-      "<p>Logs are sent to a private donation server (Cloudflare R2). They are not made public and are used only to improve the skill.</p>" +
-      "<p>No background uploads happen. Donation only runs when you click the button. You can review what is about to be sent before confirming.</p>" +
-      "</div>" +
+      '<div class="consent-body">' + formatConsentText(consentText) + "</div>" +
       "</div>"
     );
+  }
+
+  // Server-sourced plain text: paragraphs separated by a blank line; a
+  // paragraph's bullet lines (prefixed "  - ") render as a <ul>, its other
+  // lines join into a single <p>.
+  function formatConsentText(consentText) {
+    var blocks = (consentText || "").split(/\n\s*\n/);
+    return blocks
+      .map(function (block) {
+        var lines = block.split("\n").filter(function (l) { return l.length > 0; });
+        var bulletLines = lines.filter(function (l) { return /^\s*-\s/.test(l); });
+        var textLines = lines.filter(function (l) { return !/^\s*-\s/.test(l); });
+        var out = "";
+        if (textLines.length > 0) {
+          out += "<p>" + esc(textLines.join(" ")) + "</p>";
+        }
+        if (bulletLines.length > 0) {
+          out +=
+            "<ul>" +
+            bulletLines
+              .map(function (l) { return "<li>" + esc(l.replace(/^\s*-\s*/, "")) + "</li>"; })
+              .join("") +
+            "</ul>";
+        }
+        return out;
+      })
+      .join("");
   }
 
   function buildFileList(candidates) {
@@ -244,13 +293,32 @@
     );
   }
 
-  function buildEmptyState(message, showRefresh) {
+  function buildEmptyState(message, showRefresh, isError) {
     var btn = showRefresh
       ? '<br><br><button class="btn-secondary" id="btn-refresh">Refresh</button>'
       : "";
+    var cls = "empty-state" + (isError ? " error" : "");
     return (
-      '<div class="empty-state">' + esc(message) + btn + "</div>"
+      '<div class="' + cls + '">' + esc(message) + btn + "</div>"
     );
+  }
+
+  function buildFilterNote(alreadyCount, skippedUndersize, skippedOversize, trimmedCount) {
+    var parts = [];
+    if (alreadyCount > 0) {
+      parts.push(alreadyCount + " already donated");
+    }
+    if (skippedUndersize > 0) {
+      parts.push(skippedUndersize + " skipped (under 1 MB, too small to be useful)");
+    }
+    if (skippedOversize > 0) {
+      parts.push(skippedOversize + " skipped (over 50 MB)");
+    }
+    if (trimmedCount > 0) {
+      parts.push(trimmedCount + " held back for this batch (50 file limit)");
+    }
+    if (parts.length === 0) return "";
+    return '<p class="subheader">' + esc(parts.join(", ") + ".") + "</p>";
   }
 
   // -----------------------------------------------------------------------
@@ -307,10 +375,11 @@
     } else {
       var mb = formatBytes(result.total_bytes_uploaded || 0);
       html +=
-        '<p class="result-header success">Thanks! Donated ' +
+        '<p class="result-header success">Thank you for donating ' +
         result.succeeded_count +
         " log" + (result.succeeded_count !== 1 ? "s" : "") +
-        " (" + mb + ").</p>";
+        " (" + mb + ").</p>" +
+        '<p class="result-subtext">These logs will be invaluable for our further development of the Wingman-AI skill.</p>';
     }
 
     // File-by-file result table
@@ -333,7 +402,10 @@
         // Reset server-side job state so the next preview re-runs discovery.
         // Without this the server still reports phase="done" and we land back
         // on this same screen after reload.
-        fetch("/api/reset", { method: "POST" })
+        fetch("/api/reset", {
+          method: "POST",
+          headers: { "X-Donor-Session": getSessionToken() },
+        })
           .finally(function () { window.location.reload(); });
       });
     }
@@ -381,7 +453,7 @@
   function renderError(msg) {
     var app = document.getElementById("app");
     app.innerHTML =
-      '<div class="empty-state">' +
+      '<div class="empty-state error">' +
       esc(msg) +
       '<br><br><button class="btn-secondary" id="btn-retry">Retry</button>' +
       "</div>";

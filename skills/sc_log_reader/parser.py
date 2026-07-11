@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
+from atomic_io import atomic_write_text
 from debug_emitter import emit as _debug_emit
 from location_names import get_location_name, get_location_system
 
@@ -66,6 +67,16 @@ SHIP_MANUFACTURER_NAMES = (
     "Tumbril",
     "Vanduul",
     "Aopoa",
+)
+
+# Lowercased manufacturer identifiers, log prefix codes (without the trailing
+# underscore) plus human-readable names, used to strip manufacturer tokens when
+# comparing a log entity class (e.g. "DRAK_Clipper") against a channel-derived
+# ship name (e.g. "Drake Clipper" or "Clipper") so both reduce to the same model
+# token set.
+_MANUFACTURER_TOKENS: frozenset[str] = frozenset(
+    {prefix.rstrip("_").lower() for prefix in SHIP_MANUFACTURER_PREFIXES}
+    | {name.lower() for name in SHIP_MANUFACTURER_NAMES}
 )
 
 
@@ -586,13 +597,28 @@ class LogParser:
         if "Injury Detected" in line and "SHUDEvent" in line:
             return "injury"
 
-        # Quantum travel arrival (internal log, not SHUDEvent)
+        # Quantum travel arrival (internal log, not SHUDEvent).
+        # SC logs OnQuantumDriveArrived for every ship in replication range,
+        # not just the player's, and the AUTH marker does not discriminate
+        # (own and foreign arrivals both read NOT AUTH). Only classify when the
+        # player is aboard their own ship.
         if "Quantum Drive has arrived at final destination" in line:
-            return "qt_arrived"
+            if self._event_belongs_to_player_ship(
+                self._extract_qt_arrival_class(line)
+            ):
+                return "qt_arrived"
+            return None
 
-        # Fatal collision (internal log, not SHUDEvent)
+        # Fatal collision (internal log, not SHUDEvent). Same replication-range
+        # blindness as qt_arrived; additionally require the player to be piloting.
         if "<FatalCollision>" in line:
-            return "fatal_collision"
+            if not re.search(r"PlayerPilot:\s*1\b", line):
+                return None
+            if self._event_belongs_to_player_ship(
+                self._extract_collision_vehicle_class(line)
+            ):
+                return "fatal_collision"
+            return None
 
         # Insurance (internal wallet logs, not SHUDEvent)
         if "CWallet::ProcessClaimToNextStep" in line and "New Insurance Claim Request" in line:
@@ -740,15 +766,15 @@ class LogParser:
             if port_match and port_match.group(1) not in _COSMETIC_PORTS:
                 return "attachment_received"
 
-        # Shop transactions (item shops)
-        if "ShopUIProvider" in line:
-            if "SendShopBuyRequest" in line:
+        # Shop transactions (item shops). June 2026 logs use both
+        # CEntityComponentShopUIProvider and CEntityComponentShoppingProvider.
+        if "ShopUIProvider" in line or "ShoppingProvider" in line:
+            if "SendShopBuyRequest" in line or "SendStandardItemBuyRequest" in line:
                 return "shop_buy"
-            if "SendShopSellRequest" in line:
+            if "SendShopSellRequest" in line or "SendStandardItemSellRequest" in line:
                 return "shop_sell"
             if "RmShopFlowResponse" in line:
                 return "shop_transaction_result"
-
         # Commodity transactions (cargo trading)
         if "CommodityUIProvider" in line:
             if "SendCommodityBuyRequest" in line:
@@ -986,18 +1012,23 @@ class LogParser:
         elif event_type == "reward_earned":
             # Current format: "Awarded 79250 aUEC: " (SHUDEvent_OnNotification)
             # Legacy format: "You've earned: 15,000" or "You've earned: Item Name"
+            self._extract_notification_context(line, data)
             amount_match = re.search(r"Awarded\s*([\d,]+)\s*aUEC", line)
             if not amount_match:
                 amount_match = re.search(r"You've earned:\s*([\d,]+)", line)
             if amount_match:
                 data["amount"] = amount_match.group(1).replace(",", "")
             else:
-                item_match = re.search(r'"You\'ve earned:\s*([^"]+)"', line)
+                item_match = re.search(r'"You\'ve earned:\s*(.+?)(?::\s*"|\s*")', line)
                 if item_match:
                     data["item_name"] = item_match.group(1).strip()
 
+        elif event_type == "transaction_complete":
+            self._extract_notification_context(line, data)
+
         elif event_type == "blueprint_received":
             # Format: "Received Blueprint: Citadel Core Base: "
+            self._extract_notification_context(line, data)
             bp_match = re.search(r'Received Blueprint:\s*([^":]+)', line)
             if bp_match:
                 data["blueprint_name"] = bp_match.group(1).strip()
@@ -1005,6 +1036,9 @@ class LogParser:
         # emergency_services has no additional data to extract
 
         elif event_type in ("shop_buy", "shop_sell"):
+            data["source_provider"] = (
+                "shopping" if "ShoppingProvider" in line else "shop_ui"
+            )
             self._extract_bracketed(
                 line,
                 data,
@@ -1014,6 +1048,7 @@ class LogParser:
                 ("kiosk_id", "kioskId"),
                 ("item_guid", "itemClassGUID"),
                 ("item_name", "itemName"),
+                ("currency_type", "currencyType"),
             )
             price_match = re.search(r"client_price\[([^\]]+)\]", line)
             if price_match:
@@ -1083,6 +1118,9 @@ class LogParser:
         # fuel_low, bleeding, crimestat_increased, party_left: no extractable data
 
         elif event_type == "shop_transaction_result":
+            data["source_provider"] = (
+                "shopping" if "ShoppingProvider" in line else "shop_ui"
+            )
             self._extract_bracketed(
                 line,
                 data,
@@ -1090,6 +1128,7 @@ class LogParser:
                 ("shop_id", "shopId"),
                 ("shop_name", "shopName"),
                 ("kiosk_id", "kioskId"),
+                ("kiosk_state", "kioskState"),
             )
             result_match = re.search(r"result\[([^\]]+)\]", line)
             if result_match:
@@ -1342,6 +1381,19 @@ class LogParser:
         )
 
     @staticmethod
+    def _extract_notification_context(line: str, data: dict[str, Any]) -> None:
+        """Extract common SHUDEvent notification fields when present."""
+        notification_match = re.search(r'Added notification ".*" \[(\d+)\]', line)
+        if notification_match:
+            data["notification_id"] = notification_match.group(1)
+        mission_id_match = re.search(r"MissionId:\s*\[([^\]]+)\]", line)
+        if mission_id_match:
+            data["mission_id"] = mission_id_match.group(1)
+        objective_id_match = re.search(r"ObjectiveId:\s*\[([^\]]*)\]", line)
+        if objective_id_match:
+            data["objective_id"] = objective_id_match.group(1)
+
+    @staticmethod
     def _extract_bracketed(
         line: str,
         data: dict[str, Any],
@@ -1385,6 +1437,87 @@ class LogParser:
 
         return raw_channel.strip()
 
+    def _event_belongs_to_player_ship(self, entity_class: str | None) -> bool:
+        """Decide if a ship-scoped log line refers to the player's own ship.
+
+        Star Citizen logs ``OnQuantumDriveArrived`` and ``<FatalCollision>`` for
+        every ship in replication range, not just the player's, and the AUTH
+        marker does not distinguish them. The player is only aboard a ship when
+        the parser has seen a ship voice-channel join (state key ``ship``); when
+        on foot these lines always describe someone else.
+
+        When aboard, the arriving/colliding entity's model tokens are compared
+        against the current ``ship`` state.
+
+        Args:
+            entity_class: Ship class parsed from the log line (e.g.
+                ``DRAK_Clipper``), or None when it could not be derived.
+
+        Returns:
+            False when the player is not aboard any ship, or on a confident
+            model mismatch (both sides derivable and their model tokens are
+            disjoint). True otherwise, including when either side cannot be
+            derived, so a genuine own-ship event is never lost to a parse gap.
+        """
+        ship = self._state_store.get("ship")
+        if not ship:
+            return False
+        ship_tokens = self._ship_model_tokens(ship)
+        entity_tokens = self._ship_model_tokens(entity_class or "")
+        if not ship_tokens or not entity_tokens:
+            return True  # cannot compare confidently, fail open while aboard
+        return bool(ship_tokens & entity_tokens)
+
+    @staticmethod
+    def _ship_model_tokens(name: str) -> set[str]:
+        """Reduce a ship class or channel name to its lowercase model tokens.
+
+        Drops the ``@vehicle_Name`` wrapper, manufacturer identifiers (both log
+        prefix codes like ``DRAK`` and human-readable names like ``Drake``) and
+        numeric entity ids, so a log entity class (``DRAK_Clipper``) and a
+        channel-derived ship name (``Drake Clipper`` or ``Clipper``) reduce to
+        the same token set.
+        """
+        cleaned = re.sub(r"@vehicle_Name", " ", name, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("_", " ").lower()
+        tokens = {token for token in re.split(r"\s+", cleaned) if token}
+        return {
+            token
+            for token in tokens
+            if token not in _MANUFACTURER_TOKENS and not token.isdigit()
+        }
+
+    @staticmethod
+    def _extract_qt_arrival_class(line: str) -> str | None:
+        """Extract the arriving ship's class from an OnQuantumDriveArrived line.
+
+        Example: ``AEGS_Avenger_Titan_587638492213[...]|CSCItemNavigation::
+        OnQuantumDriveArrived`` yields ``AEGS_Avenger_Titan`` (trailing numeric
+        entity id stripped). Returns None when no entity class is present.
+        """
+        match = re.search(
+            r"([A-Za-z0-9_]+)\[\d+\]\|CSCItemNavigation::OnQuantumDriveArrived",
+            line,
+        )
+        if not match:
+            return None
+        return re.sub(r"_\d+$", "", match.group(1))
+
+    @staticmethod
+    def _extract_collision_vehicle_class(line: str) -> str | None:
+        """Extract the colliding vehicle's class from a <FatalCollision> line.
+
+        Example: ``vehicle DRAK_Clipper_663913295369 [Part: ...`` yields
+        ``DRAK_Clipper`` (trailing numeric entity id stripped). Returns None
+        when no vehicle token is present.
+        """
+        match = re.search(
+            r"Fatal Collision occured for vehicle\s+(\S+)", line
+        )
+        if not match:
+            return None
+        return re.sub(r"_\d+$", "", match.group(1))
+
     # -------------------------------------------------------------------------
     # File Output
     # -------------------------------------------------------------------------
@@ -1401,8 +1534,9 @@ class LogParser:
         }
 
         try:
-            with open(self._file_output_path, "w", encoding="utf-8") as f:
-                json.dump(output, f, indent=2, default=str)
+            atomic_write_text(
+                self._file_output_path, json.dumps(output, indent=2, default=str)
+            )
         except Exception:
             logger.exception("Failed to write file output")
 

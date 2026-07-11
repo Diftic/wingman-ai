@@ -135,22 +135,27 @@ class Uploader:
             True if the file was successfully PUT (any 2xx). False on
             non-retryable HTTP errors or after exhausting retries.
         """
+        last_attempt = self.MAX_PUT_RETRIES - 1
         for attempt in range(self.MAX_PUT_RETRIES):
             try:
+                # Stream the file to httpx rather than reading it fully into
+                # memory; large Game.log files (backups can run tens of MB)
+                # would otherwise be buffered whole on every retry attempt.
                 with candidate.path.open("rb") as fh:
                     res = self._client.put(
                         put_url,
-                        content=fh.read(),
+                        content=fh,
                         timeout=self.PUT_TIMEOUT_S,
                     )
                 if 200 <= res.status_code < 300:
                     return True
                 if res.status_code in (408, 425, 429) or res.status_code >= 500:
-                    logger.info(
-                        "PUT %s got %s, retrying (attempt %d)",
-                        candidate.renamed, res.status_code, attempt + 1,
-                    )
-                    sleep(2 ** attempt)
+                    if attempt < last_attempt:
+                        logger.info(
+                            "PUT %s got %s, retrying (attempt %d)",
+                            candidate.renamed, res.status_code, attempt + 1,
+                        )
+                        sleep(2 ** attempt)
                     continue
                 # Non-retryable
                 logger.warning(
@@ -159,11 +164,15 @@ class Uploader:
                 )
                 return False
             except httpx.HTTPError as e:
-                logger.info(
-                    "PUT %s network error: %s, retrying (attempt %d)",
-                    candidate.renamed, e, attempt + 1,
-                )
-                sleep(2 ** attempt)
+                if attempt < last_attempt:
+                    logger.info(
+                        "PUT %s network error: %s, retrying (attempt %d)",
+                        candidate.renamed, e, attempt + 1,
+                    )
+                    sleep(2 ** attempt)
+        logger.warning(
+            "PUT %s gave up after %d attempts", candidate.renamed, self.MAX_PUT_RETRIES
+        )
         return False
 
     def upload(
@@ -196,6 +205,9 @@ class Uploader:
         for f in begin.files:
             cand = by_hash.get(f.sha256)
             if cand is None:
+                logger.debug(
+                    "Worker begin-response referenced unknown sha256 %s", f.sha256
+                )
                 continue
             if f.already_uploaded:
                 result.files.append(
@@ -232,6 +244,28 @@ class Uploader:
                     succeeded=ok,
                     already_uploaded=False,
                     error=None if ok else "PUT failed after retries",
+                )
+            )
+            done += 1
+            progress_cb(done)
+
+        # Candidates the Worker's begin-response silently dropped never get a
+        # PUT attempt above. Record them as failed so progress still reaches
+        # len(candidates) instead of stalling short of the total.
+        returned_hashes = {f.sha256 for f in begin.files}
+        for cand in candidates:
+            if cand.sha256 in returned_hashes:
+                continue
+            logger.warning(
+                "candidate %s missing from Worker begin-response", cand.renamed
+            )
+            result.files.append(
+                FileUploadResult(
+                    sha256=cand.sha256,
+                    renamed=cand.renamed,
+                    succeeded=False,
+                    already_uploaded=False,
+                    error="missing from Worker begin-response",
                 )
             )
             done += 1

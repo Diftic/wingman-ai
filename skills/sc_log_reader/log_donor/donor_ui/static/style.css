@@ -211,6 +211,10 @@ main {
   line-height: 1.6;
 }
 
+.empty-state.error {
+  color: var(--accent-red);
+}
+
 /* --- Progress area --- */
 
 .progress-section {

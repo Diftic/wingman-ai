@@ -19,11 +19,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from debug_emitter import emit as _debug_emit
+from atomic_io import atomic_write_text
 from event_log import EventLog, EventLogEntry
 from parser import LogEvent, LogParser
 
 
 logger = logging.getLogger(__name__)
+
+_ZERO_MISSION_ID = "00000000-0000-0000-0000-000000000000"
+_REWARD_COMPONENT_EVENTS = frozenset({"reward_earned", "blueprint_received"})
 
 
 @dataclass
@@ -143,6 +147,13 @@ class StateLogic:
 
         # Trade: pending item shop transactions awaiting confirmation
         self._pending_transactions: list[dict] = []
+        self._recent_trade_confirmations: list[datetime] = []
+        self._recent_reward_fingerprints: dict[str, datetime] = {}
+        self._pending_reward_bundles: dict[str, dict[str, Any]] = {}
+        self._reward_bundle_timer: threading.Timer | None = None
+        self._reward_bundle_window_seconds = 10.0
+        self._reward_context_window_seconds = 15.0
+        self._last_completed_mission: dict[str, Any] | None = None
         self._event_log: EventLog | None = None
         # Timestamp of the raw event currently being processed — used so that
         # derived events inherit the source log timestamp rather than local clock.
@@ -165,6 +176,7 @@ class StateLogic:
 
     def stop(self) -> None:
         """Stop and flush outputs."""
+        self._flush_reward_bundles()
         self._flush_file_output()
         logger.info("StateLogic stopped")
 
@@ -236,10 +248,15 @@ class StateLogic:
         (location, ship, etc.) is preserved since it persists in the game
         between sessions. The trade ledger is never cleared.
         """
+        self._flush_reward_bundles()
+
         with self._lock:
             self._active_missions.clear()
             self._derived_state["active_mission_count"] = 0
             self._pending_transactions.clear()
+            self._pending_reward_bundles.clear()
+            self._recent_reward_fingerprints.clear()
+            self._last_completed_mission = None
 
         # Clear mission-related parser states
         mission_state_keys = [
@@ -312,6 +329,11 @@ class StateLogic:
         """Handle raw events from Layer 3."""
         self._current_event_ts = event.timestamp
 
+        # Flush complete reward bundles before appending the next unrelated row.
+        # EventLog restart dedup assumes append order follows timestamp order.
+        if event.event_type not in _REWARD_COMPONENT_EVENTS:
+            self._flush_reward_bundles()
+
         # New session — clear mission tracking
         if event.event_type == "session_start":
             self.on_new_session()
@@ -377,6 +399,10 @@ class StateLogic:
 
     def _on_state_change(self, key: str, old_value: Any, new_value: Any) -> None:
         """Handle state changes from Layer 3 and evaluate rules."""
+        # Flush pending reward bundles before state-derived event-log rows.
+        if self._pending_reward_bundles:
+            self._flush_reward_bundles()
+
         # Injury reminder: fire whenever the player enters any armistice zone
         # (direct entry or returning from a hangar), so they don't forget to heal.
         if key == "in_armistice" and new_value is True:
@@ -537,6 +563,14 @@ class StateLogic:
                     self._derived_state["active_mission_count"] = len(
                         self._active_missions
                     )
+            if self._is_valid_mission_id(mission_id):
+                with self._lock:
+                    self._last_completed_mission = {
+                        "mission_id": mission_id,
+                        "mission_name": mission_name,
+                        "timestamp": event.timestamp,
+                    }
+
             # Generate derived event for notification
             self._emit_derived_event(
                 "mission_complete",
@@ -632,60 +666,89 @@ class StateLogic:
         tx_type = data.get("transaction_type", "")
         shop_id = data.get("shop_id", "")
         kiosk_id = data.get("kiosk_id", "")
+        player_id = data.get("player_id", "")
 
-        # Map confirmation type to request event type
         expected_type = {
             "Buying": "shop_buy",
             "Selling": "shop_sell",
         }.get(tx_type)
 
-        if not expected_type:
-            logger.warning(
-                "Trade: unknown transaction_type=%r in shop_transaction_result",
-                tx_type,
-            )
-            return
+        pending: dict | None = None
+        match_quality = ""
 
         with self._lock:
             self._cleanup_stale_pending()
             logger.info(
-                "Trade: resolving %s result=%s shop=%s kiosk=%s — %d pending",
-                tx_type,
+                "Trade: resolving %s result=%s shop=%s kiosk=%s player=%s - %d pending",
+                tx_type or data.get("source_provider", "unknown"),
                 result,
                 shop_id,
                 kiosk_id,
+                player_id,
                 len(self._pending_transactions),
             )
-            # Find matching pending transaction (most recent first)
-            for i in range(len(self._pending_transactions) - 1, -1, -1):
-                pending = self._pending_transactions[i]
-                p_data = pending["data"]
-                if (
-                    pending["event_type"] == expected_type
-                    and p_data.get("shop_id") == shop_id
-                    and p_data.get("kiosk_id") == kiosk_id
-                ):
-                    self._pending_transactions.pop(i)
-                    if result == "Success":
-                        logger.info("Trade: match found, writing to event log")
-                        self._write_trade_to_event_log(
-                            pending["event_type"],
-                            p_data,
-                            event.timestamp,
-                        )
-                    else:
-                        logger.info(
-                            "Trade: match found but result=%s, discarding", result
-                        )
-                    return
 
-            # No match found
+            # Old ShopUIProvider confirmations include type/shop/kiosk. Prefer
+            # that exact match whenever the log provides it.
+            if expected_type and shop_id and kiosk_id:
+                for i in range(len(self._pending_transactions) - 1, -1, -1):
+                    candidate = self._pending_transactions[i]
+                    p_data = candidate["data"]
+                    if (
+                        candidate["event_type"] == expected_type
+                        and p_data.get("shop_id") == shop_id
+                        and p_data.get("kiosk_id") == kiosk_id
+                    ):
+                        pending = self._pending_transactions.pop(i)
+                        match_quality = "shop_kiosk"
+                        break
+
+            # June 2026 ShoppingProvider confirmations often only carry
+            # playerId/result. In that dialect, match the most recent compatible
+            # pending request for the same player.
+            if pending is None:
+                for i in range(len(self._pending_transactions) - 1, -1, -1):
+                    candidate = self._pending_transactions[i]
+                    p_data = candidate["data"]
+                    if expected_type and candidate["event_type"] != expected_type:
+                        continue
+                    if candidate["event_type"] not in ("shop_buy", "shop_sell"):
+                        continue
+                    if player_id and p_data.get("player_id") != player_id:
+                        continue
+                    if shop_id and p_data.get("shop_id") != shop_id:
+                        continue
+                    if kiosk_id and p_data.get("kiosk_id") != kiosk_id:
+                        continue
+                    pending = self._pending_transactions.pop(i)
+                    match_quality = "player_recent"
+                    break
+
+        if pending is None:
             logger.warning(
-                "Trade: no matching pending for %s shop=%s kiosk=%s",
-                expected_type,
+                "Trade: no matching pending for tx_type=%r shop=%s kiosk=%s player=%s",
+                tx_type,
                 shop_id,
                 kiosk_id,
+                player_id,
             )
+            return
+
+        if result == "Success":
+            confirmed_data = pending["data"].copy()
+            confirmed_data["confirmation_result"] = result
+            confirmed_data["confirmation_source_provider"] = data.get(
+                "source_provider", ""
+            )
+            confirmed_data["confirmation_match"] = match_quality
+            logger.info("Trade: match found (%s), writing to event log", match_quality)
+            self._write_trade_to_event_log(
+                pending["event_type"],
+                confirmed_data,
+                event.timestamp,
+            )
+        else:
+            logger.info("Trade: match found but result=%s, discarding", result)
 
     def _write_trade_to_event_log(
         self,
@@ -693,7 +756,7 @@ class StateLogic:
         data: dict,
         timestamp: datetime,
     ) -> None:
-        """Write a confirmed trade event to the event log — single source of truth."""
+        """Write a confirmed trade event to the event log - single source of truth."""
         if not self._event_log:
             logger.warning("Trade: _write_trade_to_event_log called but event_log is None")
             return
@@ -703,32 +766,55 @@ class StateLogic:
 
         if event_type in ("shop_buy", "shop_sell"):
             transaction = "purchase" if event_type == "shop_buy" else "sale"
+            movement_verb = "bought" if event_type == "shop_buy" else "sold"
             category = "item"
             item_name = data.get("item_name")
             item_guid = data.get("item_guid", "")
             price = data.get("price", 0.0)
             quantity = data.get("quantity", 1)
             quantity_unit = "units"
+            confidence = "high" if data.get("confirmation_match") == "shop_kiosk" else "medium"
+            source_events = [event_type, "shop_transaction_result"]
         elif event_type == "commodity_buy":
             transaction = "purchase"
+            movement_verb = "bought"
             category = "commodity"
             item_name = None
             item_guid = data.get("resource_guid", "")
             price = data.get("price", 0.0)
             quantity = data.get("quantity_cscu", 0.0) / 100.0
             quantity_unit = "scu"
+            confidence = "medium"
+            source_events = [event_type]
         elif event_type == "commodity_sell":
             transaction = "sale"
+            movement_verb = "sold"
             category = "commodity"
             item_name = None
             item_guid = data.get("resource_guid", "")
             price = data.get("price", 0.0)
             quantity = data.get("quantity", 0)
             quantity_unit = "scu"
+            confidence = "medium"
+            source_events = [event_type]
         else:
             return
 
         amount_auec = -price if transaction == "purchase" else price
+        fingerprint = "|".join(
+            str(part)
+            for part in (
+                "trade",
+                event_type,
+                data.get("player_id", ""),
+                data.get("shop_id", ""),
+                data.get("kiosk_id", ""),
+                item_guid,
+                price,
+                quantity,
+                timestamp.isoformat(timespec="seconds"),
+            )
+        )
 
         entry = EventLogEntry(
             timestamp=timestamp.isoformat(),
@@ -747,24 +833,69 @@ class StateLogic:
                 "shop_id": data.get("shop_id", ""),
                 "kiosk_id": data.get("kiosk_id", ""),
                 "shop_name": data.get("shop_name", ""),
+                "source_provider": data.get("source_provider", ""),
+                "currency_type": data.get("currency_type", ""),
+                "confirmation_match": data.get("confirmation_match", ""),
+                "confirmation_result": data.get("confirmation_result", ""),
+                "confirmation_source_provider": data.get(
+                    "confirmation_source_provider", ""
+                ),
             },
             amount_auec=amount_auec,
             item_name=item_name,
+            movement_category="economy",
+            movement_verb=movement_verb,
+            confidence=confidence,
+            fingerprint=fingerprint,
+            source_events=source_events,
         )
         self._event_log.append(entry)
+        self._remember_trade_confirmation(timestamp)
         logger.info(
-            "Trade: event log entry written — %s %s %s at %s",
+            "Trade: event log entry written - %s %s %s at %s",
             transaction,
             category,
             item_name or item_guid,
             location,
         )
 
+    def _remember_trade_confirmation(self, timestamp: datetime) -> None:
+        self._recent_trade_confirmations.append(timestamp)
+        cutoff = timestamp - timedelta(seconds=3)
+        self._recent_trade_confirmations = [
+            ts for ts in self._recent_trade_confirmations if ts >= cutoff
+        ]
+
+    def _is_recent_trade_confirmation(self, timestamp: datetime) -> bool:
+        cutoff = timestamp - timedelta(seconds=3)
+        self._recent_trade_confirmations = [
+            ts for ts in self._recent_trade_confirmations if ts >= cutoff
+        ]
+        return any(
+            0 <= (timestamp - ts).total_seconds() <= 3
+            for ts in self._recent_trade_confirmations
+        )
+
     def _write_raw_to_event_log(self, event: LogEvent) -> None:
         """Write a raw (non-trade) event to the event log with normalised fields."""
         amount_auec: float | None = None
         item_name: str | None = None
+        movement_category: str | None = None
+        movement_verb: str | None = None
+        confidence: str | None = None
+        # Resolved once for reward_earned (see below) and reused for both the
+        # persisted entry and the reward-bundle accumulator, so the two can
+        # never disagree on mission_id.
+        reward_context: dict[str, Any] | None = None
         et = event.event_type
+
+        if et == "transaction_complete" and self._is_recent_trade_confirmation(
+            event.timestamp
+        ):
+            return
+
+        if et in _REWARD_COMPONENT_EVENTS:
+            self._flush_reward_bundles_if_incompatible(event)
 
         if et == "reward_earned":
             raw_amount = event.data.get("amount")
@@ -774,6 +905,19 @@ class StateLogic:
                 except (ValueError, TypeError):
                     pass
             item_name = event.data.get("item_name")
+            movement_category = "economy"
+            movement_verb = "rewarded"
+            confidence = "high" if amount_auec is not None or item_name else "medium"
+            # Resolve the mission context ONCE here (embedded mission_id, else
+            # recent contract_complete correlation, else unresolved) so the
+            # entry written below and the mission_reward bundle it feeds both
+            # see the identical resolved mission_id/mission_name.
+            reward_context = self._reward_context_for_event(event)
+
+        elif et == "transaction_complete":
+            movement_category = "economy"
+            movement_verb = "transaction_completed"
+            confidence = "low"
 
         elif et == "fined":
             raw_amount = event.data.get("amount")
@@ -782,6 +926,9 @@ class StateLogic:
                     amount_auec = -float(raw_amount)
                 except (ValueError, TypeError):
                     pass
+            movement_category = "reputation"
+            movement_verb = "fined"
+            confidence = "medium"
 
         elif et == "money_sent":
             raw_amount = event.data.get("amount")
@@ -790,34 +937,531 @@ class StateLogic:
                     amount_auec = -float(raw_amount)
                 except (ValueError, TypeError):
                     pass
+            movement_category = "economy"
+            movement_verb = "sent"
+            confidence = "medium"
 
         elif et == "attachment_received":
             item_name = event.data.get("item_short_name")
+            movement_category = "inventory"
+            movement_verb = "attached"
+            confidence = "medium"
+
+        elif et == "cargo_transfer":
+            movement_category = "inventory"
+            movement_verb = "transferred"
+            confidence = "medium"
 
         elif et == "blueprint_received":
             item_name = event.data.get("blueprint_name")
+            movement_category = "inventory"
+            movement_verb = "received"
+            confidence = "high"
+
+        elif et in {
+            "contract_accepted",
+            "contract_complete",
+            "contract_failed",
+            "objective_new",
+            "objective_complete",
+            "objective_withdrawn",
+        }:
+            movement_category = "work"
+            movement_verb = {
+                "contract_accepted": "accepted",
+                "contract_complete": "completed",
+                "contract_failed": "failed",
+                "objective_new": "objective_added",
+                "objective_complete": "objective_completed",
+                "objective_withdrawn": "objective_withdrawn",
+            }[et]
+            confidence = "high"
+
+        elif et in {
+            "location_change",
+            "armistice_zone",
+            "restricted_area",
+            "jurisdiction_change",
+            "entered_monitored_space",
+            "exited_monitored_space",
+            "quantum_route_set",
+            "qt_arrived",
+            "hangar_ready",
+            "hangar_queue",
+            "channel_change",
+        }:
+            movement_category = "area"
+            movement_verb = self._area_movement_verb(event)
+            confidence = "medium"
+
+        elif et == "crimestat_increased":
+            movement_category = "reputation"
+            movement_verb = "crimestat_increased"
+            confidence = "medium"
+
+        fingerprint = self._raw_event_fingerprint(event)
+        if et == "reward_earned" and self._is_duplicate_reward(
+            fingerprint,
+            event.timestamp,
+        ):
+            return
+
+        entry_data = event.data.copy()
+        if et == "reward_earned" and reward_context is not None:
+            # Stamp the SAME resolved mission_id/mission_name the bundle will
+            # carry (see reward_context resolution above), so a downstream
+            # consumer reconciling this component against its mission_reward
+            # bundle can match on mission_id instead of time alone.
+            entry_data["mission_id"] = reward_context.get("mission_id", "")
+            entry_data["mission_name"] = reward_context.get("mission_name", "")
 
         log_entry = EventLogEntry(
             timestamp=event.timestamp.isoformat(),
             event_type=et,
             location=self._parser.get_state("location_name") or "",
             player_name=self._parser.get_state("player_name") or "",
-            data=event.data.copy(),
+            data=entry_data,
             amount_auec=amount_auec,
             item_name=item_name,
+            movement_category=movement_category,
+            movement_verb=movement_verb,
+            confidence=confidence,
+            fingerprint=fingerprint,
+            source_events=[et],
         )
         self._event_log.append(log_entry)
+        if et in _REWARD_COMPONENT_EVENTS:
+            self._record_reward_component(event, log_entry, context=reward_context)
+
+
+    def _is_valid_mission_id(self, mission_id: Any) -> bool:
+        """Return True for usable CIG mission IDs."""
+        return bool(mission_id) and str(mission_id) != _ZERO_MISSION_ID
+
+    def _reward_context_for_event(self, event: LogEvent) -> dict[str, Any]:
+        """Find the best mission context for a reward component."""
+        mission_id = event.data.get("mission_id", "")
+        if self._is_valid_mission_id(mission_id):
+            return {
+                "mission_id": mission_id,
+                "mission_name": event.data.get("mission_name", ""),
+                "correlation": "mission_id",
+                "confidence": "high",
+            }
+
+        recent = self._last_completed_mission
+        if recent:
+            recent_ts = recent.get("timestamp")
+            if isinstance(recent_ts, datetime):
+                age = (event.timestamp - recent_ts).total_seconds()
+                if 0 <= age <= self._reward_context_window_seconds:
+                    return {
+                        "mission_id": recent.get("mission_id", ""),
+                        "mission_name": recent.get("mission_name", ""),
+                        "correlation": "recent_contract_complete",
+                        "confidence": "medium",
+                    }
+
+        return {
+            "mission_id": "",
+            "mission_name": "",
+            "correlation": "timestamp_window",
+            "confidence": "low",
+        }
+
+    def _flush_reward_bundles_if_incompatible(self, event: LogEvent) -> None:
+        """Flush open bundles before a reward that cannot join them is logged."""
+        context = self._reward_context_for_event(event)
+        with self._lock:
+            if not self._pending_reward_bundles:
+                return
+            compatible = self._find_compatible_reward_bundle_key_locked(
+                event,
+                context,
+            )
+        if compatible is None:
+            self._flush_reward_bundles()
+
+    def _record_reward_component(
+        self,
+        event: LogEvent,
+        entry: EventLogEntry,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        """Accumulate reward evidence into a short-lived mission bundle.
+
+        Args:
+            context: Reward context already resolved by the caller (see
+                `_write_raw_to_event_log`'s reward_earned handling), reused
+                here so the bundle's mission_id can never diverge from the one
+                stamped on the persisted event-log entry. Resolved fresh when
+                omitted (e.g. for blueprint_received, which has no entry-level
+                mission_id to keep in sync).
+        """
+        if event.event_type == "reward_earned" and (
+            entry.amount_auec is None and not entry.item_name
+        ):
+            return
+        if event.event_type == "blueprint_received" and not entry.item_name:
+            return
+
+        if context is None:
+            context = self._reward_context_for_event(event)
+        fingerprint = entry.fingerprint or self._raw_event_fingerprint(event)
+
+        with self._lock:
+            key = self._find_compatible_reward_bundle_key_locked(event, context)
+            if key is None:
+                key = self._new_reward_bundle_key(event, context)
+                self._pending_reward_bundles[key] = self._create_reward_bundle(
+                    event,
+                    context,
+                )
+            bundle = self._pending_reward_bundles[key]
+            self._merge_reward_context(bundle, context)
+
+            if fingerprint in bundle["source_fingerprints"]:
+                self._schedule_reward_bundle_flush_locked()
+                return
+            bundle["source_fingerprints"].append(fingerprint)
+
+            if event.event_type == "reward_earned":
+                if entry.amount_auec is not None:
+                    bundle["amount_auec"] += entry.amount_auec
+                if entry.item_name and entry.item_name not in bundle["items"]:
+                    bundle["items"].append(entry.item_name)
+            elif event.event_type == "blueprint_received":
+                if entry.item_name not in bundle["blueprints"]:
+                    bundle["blueprints"].append(entry.item_name)
+
+            self._append_unique(bundle["source_events"], event.event_type)
+            self._append_unique(
+                bundle["notification_ids"],
+                event.data.get("notification_id", ""),
+            )
+            self._append_unique(
+                bundle["objective_ids"],
+                event.data.get("objective_id", ""),
+            )
+            if event.timestamp > bundle["last_seen"]:
+                bundle["last_seen"] = event.timestamp
+            self._schedule_reward_bundle_flush_locked()
+
+    def _find_compatible_reward_bundle_key_locked(
+        self,
+        event: LogEvent,
+        context: dict[str, Any],
+    ) -> str | None:
+        """Find an open bundle that can absorb this reward component."""
+        mission_id = context.get("mission_id", "")
+        if mission_id:
+            mission_key = f"mission|{mission_id}"
+            if mission_key in self._pending_reward_bundles:
+                return mission_key
+
+        candidates: list[tuple[float, str]] = []
+        for key, bundle in self._pending_reward_bundles.items():
+            last_seen = bundle.get("last_seen")
+            if not isinstance(last_seen, datetime):
+                continue
+            delta = abs((event.timestamp - last_seen).total_seconds())
+            if delta > self._reward_bundle_window_seconds:
+                continue
+            bundle_mission = bundle.get("mission_id", "")
+            if mission_id and bundle_mission and bundle_mission != mission_id:
+                continue
+            candidates.append((delta, key))
+
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: item[0])
+        return candidates[0][1]
+
+    def _new_reward_bundle_key(
+        self,
+        event: LogEvent,
+        context: dict[str, Any],
+    ) -> str:
+        mission_id = context.get("mission_id", "")
+        if mission_id:
+            return f"mission|{mission_id}"
+        return "|".join(
+            str(part)
+            for part in (
+                "reward_window",
+                event.timestamp.isoformat(timespec="seconds"),
+                event.data.get("notification_id", ""),
+            )
+        )
+
+    def _create_reward_bundle(
+        self,
+        event: LogEvent,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        source_events: list[str] = []
+        if context.get("correlation") == "recent_contract_complete":
+            source_events.append("contract_complete")
+        return {
+            "first_seen": event.timestamp,
+            "last_seen": event.timestamp,
+            "location": self._parser.get_state("location_name") or "",
+            "player_name": self._parser.get_state("player_name") or "",
+            "mission_id": context.get("mission_id", ""),
+            "mission_name": context.get("mission_name", ""),
+            "amount_auec": 0.0,
+            "items": [],
+            "blueprints": [],
+            "notification_ids": [],
+            "objective_ids": [],
+            "source_events": source_events,
+            "source_fingerprints": [],
+            "correlation": context.get("correlation", "timestamp_window"),
+            "confidence": context.get("confidence", "low"),
+        }
+
+    def _merge_reward_context(
+        self,
+        bundle: dict[str, Any],
+        context: dict[str, Any],
+    ) -> None:
+        if context.get("mission_id") and not bundle.get("mission_id"):
+            bundle["mission_id"] = context["mission_id"]
+        if context.get("mission_name") and not bundle.get("mission_name"):
+            bundle["mission_name"] = context["mission_name"]
+        if context.get("correlation") == "recent_contract_complete":
+            self._append_unique(bundle["source_events"], "contract_complete")
+        if self._confidence_rank(context.get("confidence")) > self._confidence_rank(
+            bundle.get("confidence")
+        ):
+            bundle["confidence"] = context.get("confidence", "low")
+            bundle["correlation"] = context.get("correlation", "timestamp_window")
+
+    def _schedule_reward_bundle_flush_locked(self) -> None:
+        if self._reward_bundle_timer is not None:
+            self._reward_bundle_timer.cancel()
+        timer = threading.Timer(
+            self._reward_bundle_window_seconds,
+            self._flush_reward_bundles,
+        )
+        timer.daemon = True
+        self._reward_bundle_timer = timer
+        timer.start()
+
+    def _flush_reward_bundles(self) -> None:
+        """Write all pending canonical reward bundles and clear the buffer."""
+        with self._lock:
+            if self._reward_bundle_timer is not None:
+                self._reward_bundle_timer.cancel()
+                self._reward_bundle_timer = None
+            bundles = list(self._pending_reward_bundles.values())
+            self._pending_reward_bundles.clear()
+
+        if not self._event_log:
+            return
+
+        for bundle in bundles:
+            self._write_reward_bundle_to_event_log(bundle)
+
+    def _write_reward_bundle_to_event_log(self, bundle: dict[str, Any]) -> None:
+        amount = float(bundle.get("amount_auec", 0.0) or 0.0)
+        items = list(bundle.get("items", []))
+        blueprints = list(bundle.get("blueprints", []))
+        if not amount and not items and not blueprints:
+            return
+
+        data = {
+            "mission_id": bundle.get("mission_id", ""),
+            "mission_name": bundle.get("mission_name", ""),
+            "money": {"amount_auec": amount} if amount else {},
+            "items": items,
+            "blueprints": blueprints,
+            "notification_ids": list(bundle.get("notification_ids", [])),
+            "objective_ids": list(bundle.get("objective_ids", [])),
+            "correlation": bundle.get("correlation", "timestamp_window"),
+            "first_seen": bundle["first_seen"].isoformat(),
+            "last_seen": bundle["last_seen"].isoformat(),
+            "component_count": len(bundle.get("source_fingerprints", [])),
+        }
+        entry = EventLogEntry(
+            timestamp=bundle["last_seen"].isoformat(),
+            event_type="mission_reward",
+            location=bundle.get("location", ""),
+            player_name=bundle.get("player_name", ""),
+            data=data,
+            amount_auec=amount if amount else None,
+            movement_category="economy",
+            movement_verb="rewarded",
+            confidence=bundle.get("confidence", "low"),
+            fingerprint=self._reward_bundle_fingerprint(bundle),
+            source_events=list(bundle.get("source_events", [])),
+        )
+        self._event_log.append(entry)
+
+    def _reward_bundle_fingerprint(self, bundle: dict[str, Any]) -> str:
+        return "|".join(
+            str(part)
+            for part in (
+                "mission_reward",
+                bundle.get("mission_id", ""),
+                bundle["first_seen"].isoformat(timespec="seconds"),
+                bundle.get("amount_auec", 0.0),
+                ",".join(bundle.get("items", [])),
+                ",".join(bundle.get("blueprints", [])),
+            )
+        )
+
+    @staticmethod
+    def _append_unique(values: list[str], value: Any) -> None:
+        if value and value not in values:
+            values.append(str(value))
+
+    @staticmethod
+    def _confidence_rank(confidence: Any) -> int:
+        return {"low": 1, "medium": 2, "high": 3}.get(str(confidence), 0)
+
+    def _area_movement_verb(self, event: LogEvent) -> str:
+        et = event.event_type
+        if et == "armistice_zone":
+            return event.data.get("action", "crossed_boundary")
+        if et == "restricted_area":
+            return event.data.get("action", "crossed_boundary")
+        if et == "location_change":
+            return "arrived"
+        if et == "jurisdiction_change":
+            return "entered_jurisdiction"
+        if et == "entered_monitored_space":
+            return "entered_monitored_space"
+        if et == "exited_monitored_space":
+            return "exited_monitored_space"
+        if et == "quantum_route_set":
+            return "route_set"
+        if et == "qt_arrived":
+            return "arrived"
+        if et == "hangar_ready":
+            return "hangar_ready"
+        if et == "hangar_queue":
+            return "queued"
+        if et == "channel_change":
+            return event.data.get("action", "channel_changed")
+        return "changed"
+
+    def _raw_event_fingerprint(self, event: LogEvent) -> str:
+        data = event.data
+        if event.event_type == "reward_earned":
+            key = data.get("notification_id") or event.timestamp.isoformat(
+                timespec="seconds"
+            )
+            value = data.get("amount") or data.get("item_name", "")
+            return f"reward_earned|{key}|{value}"
+        if event.event_type == "blueprint_received":
+            key = data.get("notification_id") or event.timestamp.isoformat(
+                timespec="seconds"
+            )
+            value = data.get("blueprint_name", "")
+            return f"blueprint_received|{key}|{value}"
+        if event.event_type == "transaction_complete":
+            key = data.get("notification_id") or event.timestamp.isoformat(
+                timespec="seconds"
+            )
+            return f"transaction_complete|{key}"
+        if event.event_type.startswith("contract_"):
+            return "|".join(
+                str(part)
+                for part in (
+                    event.event_type,
+                    data.get("mission_id", ""),
+                    data.get("mission_name", ""),
+                )
+            )
+        if event.event_type.startswith("objective_"):
+            return "|".join(
+                str(part)
+                for part in (
+                    event.event_type,
+                    data.get("mission_id", ""),
+                    data.get("objective", ""),
+                )
+            )
+        return "|".join(
+            str(part)
+            for part in (
+                event.event_type,
+                event.timestamp.isoformat(timespec="seconds"),
+            )
+        )
+
+    def _is_duplicate_reward(self, fingerprint: str, timestamp: datetime) -> bool:
+        cutoff = timestamp - timedelta(seconds=30)
+        self._recent_reward_fingerprints = {
+            fp: ts
+            for fp, ts in self._recent_reward_fingerprints.items()
+            if ts >= cutoff
+        }
+        previous = self._recent_reward_fingerprints.get(fingerprint)
+        if previous is not None and 0 <= (timestamp - previous).total_seconds() <= 30:
+            return True
+        self._recent_reward_fingerprints[fingerprint] = timestamp
+        return False
 
     def _write_derived_to_event_log(self, event: DerivedEvent) -> None:
         """Write a derived event to the event log."""
+        movement_category, movement_verb = self._derived_movement_metadata(event)
         log_entry = EventLogEntry(
             timestamp=event.timestamp.isoformat(),
             event_type=event.event_type,
             location=self._parser.get_state("location_name") or "",
             player_name=self._parser.get_state("player_name") or "",
             data=event.source_states.copy(),
+            movement_category=movement_category,
+            movement_verb=movement_verb,
+            confidence="high" if movement_category else None,
+            fingerprint=self._derived_event_fingerprint(event),
+            source_events=[event.event_type],
         )
         self._event_log.append(log_entry)
+
+    def _derived_movement_metadata(
+        self,
+        event: DerivedEvent,
+    ) -> tuple[str | None, str | None]:
+        work_verbs = {
+            "mission_accepted": "accepted",
+            "mission_complete": "completed",
+            "mission_failed": "failed",
+            "mission_objective_new": "objective_added",
+        }
+        if event.event_type in work_verbs:
+            return "work", work_verbs[event.event_type]
+
+        area_verbs = {
+            "zone_entered_armistice": "entered",
+            "zone_left_armistice": "left",
+            "ship_entered": "ship_entered",
+            "ship_exited": "ship_exited",
+            "own_ship_entered": "own_ship_entered",
+            "location_arrived": "arrived",
+            "hangar_access": "hangar_access",
+        }
+        if event.event_type in area_verbs:
+            return "area", area_verbs[event.event_type]
+
+        return None, None
+
+    def _derived_event_fingerprint(self, event: DerivedEvent) -> str:
+        states = event.source_states
+        return "|".join(
+            str(part)
+            for part in (
+                "derived",
+                event.event_type,
+                states.get("mission_id", ""),
+                states.get("objective", ""),
+                states.get("mission_name", ""),
+                states.get("location_name", ""),
+                event.timestamp.isoformat(timespec="seconds"),
+            )
+        )
 
     def _cleanup_stale_pending(self) -> None:
         """Remove pending transactions older than the max age.
@@ -941,8 +1585,9 @@ class StateLogic:
         }
 
         try:
-            with open(self._file_output_path, "w", encoding="utf-8") as f:
-                json.dump(output, f, indent=2, default=str)
+            atomic_write_text(
+                self._file_output_path, json.dumps(output, indent=2, default=str)
+            )
         except Exception:
             logger.exception("Failed to write file output")
 

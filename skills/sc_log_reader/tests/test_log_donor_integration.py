@@ -16,7 +16,8 @@ def test_full_donation_cycle_records_dedup(
 ) -> None:
     store = DedupStore(db_path=tmp_path / "state.sqlite")
     cands = discover_candidates(fake_sc_install, store)
-    assert len(cands) == 4
+    # Live only: current Game.log plus both parseable backups.
+    assert len(cands) == 3
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/upload/begin":
@@ -51,7 +52,7 @@ def test_full_donation_cycle_records_dedup(
     result = up.upload(cands, progress_cb=lambda _: None)
 
     assert result.upload_id == "u-int"
-    assert result.succeeded_count == 4
+    assert result.succeeded_count == 3
     assert result.failed_count == 0
 
     # Record successes in dedup store, simulating what the skill will do
