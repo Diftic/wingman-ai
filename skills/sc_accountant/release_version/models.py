@@ -49,6 +49,7 @@ CATEGORY_MEDICAL = "medical"
 CATEGORY_FINES = "fines"
 CATEGORY_HANGAR_FEES = "hangar_fees"
 CATEGORY_OTHER_EXPENSE = "other_expense"
+CATEGORY_MONEY_SENT = "money_transfer_sent"
 
 # Operating
 CATEGORY_CREW_PAYMENT = "crew_payment"
@@ -79,6 +80,7 @@ ALL_CATEGORIES: set[str] = {
     CATEGORY_FINES,
     CATEGORY_HANGAR_FEES,
     CATEGORY_OTHER_EXPENSE,
+    CATEGORY_MONEY_SENT,
     CATEGORY_CREW_PAYMENT,
     CATEGORY_ORG_CONTRIBUTION,
     CATEGORY_RENTAL,
@@ -146,6 +148,7 @@ CATEGORY_CLASSIFICATION: dict[str, StatementClass] = {
     CATEGORY_FINES: StatementClass.OPEX,
     CATEGORY_HANGAR_FEES: StatementClass.OPEX,
     CATEGORY_OTHER_EXPENSE: StatementClass.OPEX,
+    CATEGORY_MONEY_SENT: StatementClass.OPEX,
     CATEGORY_CREW_PAYMENT: StatementClass.OPEX,
     CATEGORY_ORG_CONTRIBUTION: StatementClass.OPEX,
     CATEGORY_RENTAL: StatementClass.OPEX,
@@ -174,6 +177,7 @@ CATEGORY_ACTIVITY: dict[str, Activity] = {
     CATEGORY_FINES: Activity.GENERAL,
     CATEGORY_HANGAR_FEES: Activity.GENERAL,
     CATEGORY_OTHER_EXPENSE: Activity.GENERAL,
+    CATEGORY_MONEY_SENT: Activity.GENERAL,
     CATEGORY_OTHER_INCOME: Activity.GENERAL,
     CATEGORY_CREW_PAYMENT: Activity.GENERAL,
     CATEGORY_ORG_CONTRIBUTION: Activity.GENERAL,
@@ -203,6 +207,7 @@ CATEGORY_LABELS: dict[str, str] = {
     CATEGORY_FINES: "Fines",
     CATEGORY_HANGAR_FEES: "Hangar Fees",
     CATEGORY_OTHER_EXPENSE: "Other Expense",
+    CATEGORY_MONEY_SENT: "Money Sent",
     CATEGORY_CREW_PAYMENT: "Crew Payment",
     CATEGORY_ORG_CONTRIBUTION: "Org Contribution",
     CATEGORY_RENTAL: "Rental",
@@ -244,6 +249,12 @@ class Transaction:
     # Three-statement model fields
     linked_asset_id: str | None = None  # Links to Asset for per-ship P&L
     activity: str | None = None  # Activity enum value (auto-set from category)
+    # SC_LogReader event fingerprint, used for precise import dedup (falls
+    # back to timestamp:category:amount when absent, e.g. manual entries).
+    source_fingerprint: str | None = None
+    # SC_LogReader mission_id, when the event carried one. Used to scope
+    # reward-bundle supersession to the same mission; never a wildcard.
+    source_mission_id: str | None = None
 
     def to_dict(self) -> dict:
         """Convert to JSON-serializable dictionary."""
@@ -266,6 +277,8 @@ class Transaction:
         data.setdefault("player_id", None)
         data.setdefault("linked_asset_id", None)
         data.setdefault("activity", None)
+        data.setdefault("source_fingerprint", None)
+        data.setdefault("source_mission_id", None)
         data.pop("group_session_id", None)  # removed in v3.0
         return cls(**data)
 

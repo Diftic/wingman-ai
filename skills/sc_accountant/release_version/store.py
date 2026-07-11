@@ -1,11 +1,14 @@
 """
-SC_Accountant — Persistence Layer
+SC_Accountant - Persistence Layer
 
-JSONL append-only for transactions (immutable audit trail — no corruption risk
-from partial writes, and appending is atomic on most filesystems).
+Transactions use JSONL. New transactions are appended (atomic on most
+filesystems), while the rarer update/delete rewrites the whole file through
+an atomic temp-file replace, so a crash can never leave it truncated or
+partially written.
 
 JSON read-modify-write for mutable entities (trade orders, budgets, sessions,
-balance, opportunities, positions, hauls, assets).
+balance, opportunities, positions, hauls, assets). These rewrites go through
+the same atomic replace, so a reader never observes a half-written file.
 
 Author: Mallachi
 """
@@ -18,6 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TypeVar
 
+from atomic_io import atomic_write_text
 from models import (
     AccountBalance,
     Asset,
@@ -76,8 +80,9 @@ class AccountantStore:
     def _write_json_list(self, path: Path, items: list) -> None:
         """Serialize a list of model objects to a JSON array file."""
         try:
-            with open(path, "w", encoding="utf-8") as f:
-                json.dump([item.to_dict() for item in items], f, indent=2)
+            atomic_write_text(
+                path, json.dumps([item.to_dict() for item in items], indent=2)
+            )
         except OSError as exc:
             logger.exception("Failed to write %s: %s", path.name, exc)
 
@@ -160,9 +165,8 @@ class AccountantStore:
             return None
 
         try:
-            with open(self._transactions_path, "w", encoding="utf-8") as f:
-                for txn in entries:
-                    f.write(json.dumps(txn.to_dict()) + "\n")
+            text = "".join(json.dumps(txn.to_dict()) + "\n" for txn in entries)
+            atomic_write_text(self._transactions_path, text)
         except OSError as exc:
             logger.exception("Failed to rewrite transactions file: %s", exc)
 
@@ -187,9 +191,8 @@ class AccountantStore:
             return None
 
         try:
-            with open(self._transactions_path, "w", encoding="utf-8") as f:
-                for txn in remaining:
-                    f.write(json.dumps(txn.to_dict()) + "\n")
+            text = "".join(json.dumps(txn.to_dict()) + "\n" for txn in remaining)
+            atomic_write_text(self._transactions_path, text)
         except OSError as exc:
             logger.exception("Failed to rewrite transactions file: %s", exc)
 
@@ -348,8 +351,9 @@ class AccountantStore:
     def save_balance(self, balance: AccountBalance) -> None:
         """Write the current account balance."""
         try:
-            with open(self._balance_path, "w", encoding="utf-8") as f:
-                json.dump(balance.to_dict(), f, indent=2)
+            atomic_write_text(
+                self._balance_path, json.dumps(balance.to_dict(), indent=2)
+            )
         except OSError as exc:
             logger.exception("Failed to write balance: %s", exc)
 
@@ -383,8 +387,10 @@ class AccountantStore:
     def save_sync_cursor(self, last_ts: str, count_at_ts: int) -> None:
         """Save the sync watermark after a successful sync pass."""
         try:
-            with open(self._sync_cursor_path, "w", encoding="utf-8") as f:
-                json.dump({"last_ts": last_ts, "count_at_ts": count_at_ts}, f)
+            atomic_write_text(
+                self._sync_cursor_path,
+                json.dumps({"last_ts": last_ts, "count_at_ts": count_at_ts}),
+            )
         except OSError as exc:
             logger.exception("Failed to write sync cursor: %s", exc)
 

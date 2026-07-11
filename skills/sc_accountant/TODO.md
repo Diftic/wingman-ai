@@ -1,17 +1,27 @@
 # SC_Accountant — Task Tracking
 
 **Author:** Mallachi
-**Current Status:** v4.7.2 (qualified against Star Citizen 4.7.2)
+**Current Status:** v4.8.3.1 (qualified against Star Citizen 4.8.3)
 
 ---
 
 ## Pending
 
 ### Near-Term
-- [ ] Commodity GUID lookup table — pending SCBridge.app data access (call with friend arranged 2026-04-12)
+- [ ] Commodity GUID lookup table: local file + unknown-GUID logging landed
+  2026-07-07 (`data/commodity_guid_map.json`, currently empty); populating it
+  with real GUIDs is still pending SCBridge.app data access (call with friend
+  arranged 2026-04-12)
 - [ ] Update test_store.py — file is corrupted (null bytes), needs rewrite from scratch
 - [ ] Run full manual test after simplification (all remaining tabs)
 - [ ] Full manual test of v3.1.0 (mission rewards, blueprint assets, QR in chat)
+
+### SC_LogReader Data-Fit Evaluation (`plans/2026-06-28-sc-log-reader-data-fit-evaluation.md`)
+- [ ] Item 6: remove/disable market refresh, positions, opportunities, and
+  market-value reporting from the local skill (out of scope for the
+  2026-07-07 data-reception pass; deferred pending a scope decision)
+- [ ] Item 7: import audit view/report (imported-by-type, ignored events,
+  unknown GUIDs, low/medium confidence imports, active SC environment)
 
 ### Future (SCBridge.app Integration)
 - [ ] New `sc_scbridge` skill for full SCBridge.app integration
@@ -22,6 +32,31 @@
 ---
 
 ## Completed
+
+### 2026-07-09 - Crash-safe atomic writes (audit finding NEW-A)
+- [x] New leaf module `atomic_io.py` (`atomic_write_text`): temp file in the
+  same directory, flush + `os.fsync`, then `os.replace`; temp cleaned up and
+  original preserved on failure
+- [x] Routed all five `store.py` rewrite sites and the `guid_resolver.py`
+  cache write through it; corrected the `store.py` docstring's no-corruption
+  claim (append-only for inserts, atomic replace for rewrites)
+- [x] Added `tests/test_atomic_io.py`; suite green at 158 passed
+- [x] VERSION 4.8.3.0 -> 4.8.3.1; `atomic_io.py` added to installer manifest
+
+### 2026-07-07 - SC_LogReader Data-Fit Priority Fixes (Items 1, 3, 4, 5)
+- [x] Item 1: canonical `mission_reward` bundle import, preferred over the
+  legacy `reward_earned` component row; component suppressed regardless of
+  which one arrives first (same sync batch or a later one)
+- [x] Item 3: dedup imports by SC_LogReader event fingerprint when present,
+  falling back to the previous `timestamp:category:amount` key
+- [x] Item 4: import `fined` (existing `fines` category) and `money_sent`
+  (new `money_transfer_sent` category) as local expenses
+- [x] Item 5: local commodity GUID map file (`data/commodity_guid_map.json`),
+  independent of market data, with unknown-GUID logging
+- [x] 8 new tests in `test_logreader_sync.py`; full suite 150 passed
+- Item 2 (LIVE/HOTFIX environment separation) was already done 2026-06-28.
+  Items 6 (market/portfolio side-effect removal) and 7 (import audit view)
+  remain open; see Pending above.
 
 ### v3.1.0 patch — QR No-Dep Rework
 - [x] Replaced `segno` with vendored `qrcodegen.py` (Nayuki, MIT, zero pip deps)

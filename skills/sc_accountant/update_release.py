@@ -15,11 +15,13 @@ RELEASE_FILES = [
     "TESTER_README.txt",
     "__init__.py",
     "assets.py",
+    "atomic_io.py",
     "default_config.yaml",
     "futures.py",
     "guid_resolver.py",
     "hauling.py",
     "install.bat",
+    "logo.png",
     "main.py",
     "market_data.py",
     "models.py",
@@ -32,6 +34,7 @@ RELEASE_FILES = [
 
 RELEASE_DIRS = [
     "accountant_ui",
+    "data",
 ]
 
 

@@ -1,6 +1,6 @@
 SC ACCOUNTANT
 Personal Accounting for Star Citizen
-Version 4.7.2 (qualified against Star Citizen 4.7.2)
+Version 4.8.3.1 (qualified against Star Citizen 4.8.3)
 Author: Mallachi
 
 

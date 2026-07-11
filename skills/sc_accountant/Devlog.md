@@ -1,9 +1,154 @@
 # SC_Accountant — Development Log
 
 **Author:** Mallachi
-**Skill Version:** 4.7.2 (qualified against Star Citizen 4.7.2)
+**Skill Version:** 4.8.3.1 (qualified against Star Citizen 4.8.3)
 
 ---
+
+## 2026-07-11 - Version: 4.8.3.1
+
+Documentation and release-parity pass; no runtime behaviour change.
+
+- Crash-safe atomic writes via the `atomic_io.py` leaf module (audit finding
+  NEW-A, landed 2026-07-09) are the reliability change carried by this version.
+- Version fields aligned to the SC 4.8.3 family: skill iteration moved
+  `4.8.0.1` -> `4.8.3.0` on 2026-07-07 (requalified against Star Citizen 4.8.3),
+  then `4.8.3.0` -> `4.8.3.1` on 2026-07-09 for the atomic-write fix.
+- Current-status doc headers (README, TESTER_README, TODO) aligned to v4.8.3.1
+  and SC 4.8.3.
+
+## 2026-07-09 - Crash-safe atomic writes (audit finding NEW-A)
+
+Skill-iteration bump only (`4.8.3.0` -> `4.8.3.1`); no SC-target change,
+reliability fix only.
+
+Every rewrite of a source-of-truth data file used a truncating
+`open(path, "w")`. A crash between truncate and the final write left the file
+partial, and the readers silently skip malformed lines, so a mid-write crash
+could quietly drop transactions or balances. The `store.py` module docstring
+even claimed the persistence layer had "no corruption risk from partial
+writes", which the update/delete rewrite paths violated. Worse, the
+`delete_transaction` rewrite is reached automatically during background sync
+(`_supersede_component_reward_transactions`), so this was not a rare
+manual-edit path.
+
+Fix: new leaf module `atomic_io.py` with `atomic_write_text(path, text)`.
+It writes to a uniquely named temp file in the same directory, flushes and
+`os.fsync`es it, then `os.replace`s it over the target (atomic on Windows and
+POSIX when both are on the same volume). On any failure the temp file is
+removed and the original is left untouched. All five rewrite sites in
+`store.py` (`_write_json_list`, `update_transaction`, `delete_transaction`,
+`save_balance`, `save_sync_cursor`) and the GUID cache write in
+`guid_resolver.py` now route through it. Each site keeps its existing
+log-and-continue handler. The module docstring now states the real guarantee:
+append-only for inserts, atomic replace for rewrites.
+
+Added `tests/test_atomic_io.py` (4 tests): helper replaces content and cleans
+up its temp file, creates missing parents, preserves the original and leaves
+no temp behind when `os.replace` fails mid-write, and `delete_transaction`
+leaves the remaining transactions intact with no temp file behind. Full suite
+green at 158 passed. `atomic_io.py` added to the `files` manifest in
+`skill_installer_config.json` so releases ship it.
+
+## 2026-07-07 - Requalified against Star Citizen 4.8.3
+
+Requalified the skill against the live Star Citizen 4.8.3 patch. VERSION moved
+4.8.0.1 -> 4.8.3.0 (the within-patch counter resets on a new SC patch) and
+SC_TARGET_VERSION moved 4.8.0 -> 4.8.3, updated in `main.py`, `__init__.py`,
+and `skill_installer_config.json`. This realigns the SC-target with
+SC_LogReader (now also 4.8.3), clearing the dependency-version mismatch warning
+from `_check_dependency_versions`.
+
+## 2026-07-07 - SC_LogReader Data-Fit Priority Fixes (Items 1, 3, 4, 5)
+
+Implemented priority fixes 1, 3, 4, 5 from the 2026-06-28 SC_LogReader data-fit
+evaluation (`plans/2026-06-28-sc-log-reader-data-fit-evaluation.md`). Scope was
+data reception only: items 6 (market/portfolio side-effect removal) and 7
+(import audit view) remain open.
+
+### 1. Canonical `mission_reward` bundle import
+`_convert_event_log_entry` now imports the canonical `mission_reward` bundle as
+the accounting source of truth, using `data.money.amount_auec` (fallback to the
+top-level `amount_auec`) for the transaction and `data.blueprints` for bundled
+blueprint assets. `reward_earned` component rows are tagged `component_reward`
+on import. New `_reward_absorbed_by_bundle` / `_supersede_component_reward_transactions`
+helpers suppress the component row when a bundle covering its time window
+exists, handling the bundle arriving before or after its components, in
+the same sync batch or a later one, since SC_LogReader's append-only log can
+write them in either order.
+
+### 3. Fingerprint-based import dedup
+`Transaction` gained `source_fingerprint`. Auto-imports now carry
+SC_LogReader's `fingerprint` field. `_transaction_dedup_key` prefers
+`fp:{fingerprint}` when present, falling back to the previous
+`timestamp:category:amount` key for fingerprint-less imports (e.g. legacy
+transactions recorded before this change).
+
+### 4. Fines and money transfers
+`fined` events import as an expense in the existing `fines` category, using the
+log's signed `amount_auec`. `money_sent` events import as a new
+`money_transfer_sent` expense category, described with the recipient when
+known.
+
+### 5. Local commodity GUID map
+`guid_resolver.py` now loads its built-in table from
+`skills/sc_accountant/data/commodity_guid_map.json` instead of an inline Python
+dict, independent of the market feature. The file starts empty; the previous
+single stub entry was not a real GUID (it contained non-hex characters) and was
+dropped rather than migrated. Unknown GUIDs are now logged once per session
+(`GuidResolver.resolve`) and queryable via `get_unknown_guids()` for later
+mapping.
+
+### Tests
+Added 8 tests to `tests/test_logreader_sync.py`: canonical bundle import, both
+bundle/component arrival orders within one sync, cross-sync supersession,
+fingerprint dedup after a cursor reset, `fined`, `money_sent`, and
+unknown-GUID handling. Full suite: 150 passed.
+
+### Addendum (same day) - mission_id scoping after adversarial review
+The original version of `_reward_absorbed_by_bundle` /
+`_supersede_component_reward_transactions` matched purely by time window, with
+an empty `mission_id` treated as a wildcard on either side. Adversarial review
+found this could supersede (delete + reverse balance) a DIFFERENT mission's
+`reward_earned` component that merely landed inside a bundle's narrow flush
+window, e.g. bounty-stacking sessions, silently losing real money.
+
+Fix: `Transaction` gained `source_mission_id`, populated from the event's
+`mission_id` for both `mission_reward` and `reward_earned` imports. Both
+matching functions now require a non-empty `mission_id` on BOTH sides and
+require them to be equal; an empty/missing `mission_id` never matches, on
+either side. Design tradeoff, documented in the code: a genuinely
+mission-id-less reward can now under-suppress (both the component and a later
+bundle import as separate transactions, a rare possible double-count) rather
+than risk over-suppressing across missions (a silent, permanent loss of real
+money). Also fixed a hygiene gap: superseding a component now discards its
+dedup key from the in-memory `existing` set, not just from the store, so a
+stale key can't linger for the rest of that sync pass.
+
+Added 3 more tests: cross-mission non-supersession (mission A's bundle must
+not touch mission B's component), the mission-id-less double-import case
+(documents the tradeoff), and `self._assets is None` over `blueprint_received`
+and a `mission_reward` bundle with blueprints (no crash, watermark still
+saves). Full suite: 153 passed.
+
+---
+
+## 2026-06-28 — SC_LogReader Import Environment Policy
+
+Updated the SC_LogReader import filter so the local accountant only imports the
+persistent player economy logs:
+
+- Imports `sc_logreader_eventlog_LIVE.jsonl`.
+- Imports `sc_logreader_eventlog_HOTFIX.jsonl` as part of the same economy.
+- Ignores `PTU`, `EPTU`, `TECH-PREVIEW`, and other test environment logs.
+- Added sync tests proving a newer PTU transaction does not import or advance
+  the LIVE/HOTFIX sync cursor.
+
+## Version: 4.8.0.0 (Star Citizen 4.8.0 live-test baseline, 2026-05-25)
+
+Bumped to `4.8.0.0` to align with the cross-skill 4.8.0 live-test pass. This is
+the local-test baseline before public release; no code changes, version strings
+only. Within-patch findings will land as `4.8.0.1`, `4.8.0.2`, etc.
 
 ## Version: 4.7.2 (Star Citizen 4.7.2 alignment, 2026-04-25)
 

@@ -69,6 +69,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_LOGREADER_EVENT_LOG_PREFIX = "sc_logreader_eventlog_"
+_LIVE_ECONOMY_LOGREADER_ENVS = {"LIVE", "HOTFIX"}
+
+
+def _logreader_event_log_env(log_path: Path) -> str:
+    """Extract the SC environment suffix from an SC_LogReader event-log path."""
+    stem = log_path.stem
+    if not stem.startswith(_LOGREADER_EVENT_LOG_PREFIX):
+        return ""
+    return stem[len(_LOGREADER_EVENT_LOG_PREFIX) :].upper()
+
+
+def _is_live_economy_logreader_event_log(log_path: Path) -> bool:
+    """Return True for event logs that belong to the LIVE/HOTFIX economy."""
+    return _logreader_event_log_env(log_path) in _LIVE_ECONOMY_LOGREADER_ENVS
+
 
 def _normalize_quantity(
     quantity: float | None, quantity_unit: str | None
@@ -87,10 +103,10 @@ def _normalize_quantity(
 
 class SC_Accountant(Skill):
     # Versions mirror the Star Citizen patch this skill is qualified against.
-    # Within-patch updates append a dotted suffix (4.7.2.1, 4.7.2.2, …).
+    # Within-patch updates append a dotted suffix (4.8.0.1, 4.8.0.2, …).
     # See skills/Versioning.md.
-    VERSION = "4.7.2"
-    SC_TARGET_VERSION = "4.7.2"
+    VERSION = "4.8.3.1"
+    SC_TARGET_VERSION = "4.8.3"
 
     def __init__(
         self,
@@ -534,35 +550,43 @@ class SC_Accountant(Skill):
     # ------------------------------------------------------------------
     # SC_LogReader ledger sync
     #
-    # Sync imports from SC_LogReader's JSONL ledger using a line-number
-    # cursor. This avoids duplicate imports without requiring transaction
-    # ID dedup — the cursor just tracks "last processed line."
+    # Sync imports from SC_LogReader's JSONL ledger using a timestamp/count
+    # watermark. LIVE and HOTFIX are one persistent economy; PTU/test logs
+    # are intentionally ignored.
     # ------------------------------------------------------------------
 
     def _get_logreader_event_logs(self) -> list[Path]:
-        """Return all SC_LogReader event log files, sorted chronologically by env name.
+        """Return SC_LogReader event logs for the player's persistent economy.
 
-        Scans for sc_logreader_eventlog_*.jsonl in the SC_LogReader generated files
-        directory. Sorting is alphabetical (HOTFIX < LIVE < PTU) which matches the
-        rough release order CIG uses.
+        Star Citizen treats LIVE and HOTFIX as the same player economy. PTU,
+        EPTU, TECH-PREVIEW, and any other test environments are ignored so test
+        credits do not pollute the local accounting ledger.
         """
         try:
             from services.file import get_generated_files_dir
 
             logreader_dir = Path(get_generated_files_dir("SC_LogReader"))
-            files = sorted(logreader_dir.glob("sc_logreader_eventlog_*.jsonl"))
+            files = sorted(
+                log_path
+                for log_path in logreader_dir.glob("sc_logreader_eventlog_*.jsonl")
+                if _is_live_economy_logreader_event_log(log_path)
+            )
             return files
         except Exception:
             return []
 
     async def _sync_from_logreader(self) -> int:
-        """Sync new trade entries from all SC_LogReader event logs.
+        """Sync new trade entries from LIVE/HOTFIX SC_LogReader event logs.
 
-        Reads every sc_logreader_eventlog_*.jsonl file in the SC_LogReader
-        generated files directory. Deduplication is timestamp-based: events
-        with a timestamp older than the watermark are skipped; events at exactly
-        the watermark timestamp are skipped if we've already seen that many at
-        that second (handles multiple events sharing a timestamp).
+        Reads `sc_logreader_eventlog_LIVE.jsonl` and
+        `sc_logreader_eventlog_HOTFIX.jsonl` when present. PTU/EPTU/test
+        environments are ignored. Deduplication prefers the SC_LogReader event
+        fingerprint when present, falling back to timestamp:category:amount for
+        fingerprint-less imports (see `_transaction_dedup_key`). The sync cursor
+        is timestamp-based: events with a timestamp older than the watermark are
+        skipped; events at exactly the watermark timestamp are skipped if we've
+        already seen that many at that second (handles multiple events sharing a
+        timestamp).
 
         This means the full history is imported on first run (retroactive backfill),
         and only new events are imported on subsequent runs.
@@ -580,12 +604,15 @@ class SC_Accountant(Skill):
         watermark_ts = cursor["last_ts"]        # ISO string — "" means import everything
         watermark_count = cursor["count_at_ts"] # how many events at exactly watermark_ts already imported
 
-        # Build fingerprint set from existing auto_log transactions so reimports
-        # after a cursor reset don't create duplicates.
-        existing: set[str] = set()
-        for txn in self._store._read_all_transactions():
-            if txn.source == "auto_log":
-                existing.add(f"{txn.timestamp}:{txn.category}:{txn.amount}")
+        # Load existing auto_log transactions so reimports after a cursor reset
+        # don't create duplicates, and so a mission_reward bundle arriving after
+        # its reward_earned components can find and supersede them.
+        all_auto_txns = [
+            txn
+            for txn in self._store._read_all_transactions()
+            if txn.source == "auto_log"
+        ]
+        existing: set[str] = {self._transaction_dedup_key(txn) for txn in all_auto_txns}
 
         imported = 0
         new_last_ts = watermark_ts
@@ -639,6 +666,19 @@ class SC_Accountant(Skill):
                         mission_names_by_ts[ts_key] = _deque()
                     mission_names_by_ts[ts_key].append(name)
 
+        # Pre-scan canonical mission_reward bundles in this batch so their
+        # reward_earned components can be suppressed regardless of which one
+        # appears first -- SC_LogReader can write the bundle before or after
+        # the components it summarizes.
+        bundle_windows: list[tuple[str, str, str]] = []  # (first_seen, last_seen, mission_id)
+        for _, ev in candidates:
+            if ev.get("event_type") != "mission_reward":
+                continue
+            inner = ev.get("data", {})
+            first_seen = inner.get("first_seen") or ev.get("timestamp", "")
+            last_seen = inner.get("last_seen") or ev.get("timestamp", "")
+            bundle_windows.append((first_seen, last_seen, inner.get("mission_id", "")))
+
         # Count how many events at exactly watermark_ts we've already processed
         seen_at_watermark = 0
 
@@ -648,48 +688,56 @@ class SC_Accountant(Skill):
                 if seen_at_watermark <= watermark_count:
                     continue  # already imported in a previous sync
 
+            event_type = data.get("event_type", "")
+
+            # A canonical mission_reward bundle supersedes any reward_earned
+            # component transactions already imported inside its time window
+            # (handles the bundle arriving after its components on a later sync).
+            if event_type == "mission_reward":
+                self._supersede_component_reward_transactions(data, all_auto_txns, existing)
+
             # For reward_earned, pop the first mission name at this timestamp (if any)
             mission_name = ""
-            if data.get("event_type") == "reward_earned":
+            if event_type == "reward_earned":
                 queue = mission_names_by_ts.get(ts)
                 if queue:
                     mission_name = queue.popleft()
 
-            txn = self._convert_event_log_entry(data, mission_name=mission_name)
-            if txn:
-                fp = f"{txn.timestamp}:{txn.category}:{txn.amount}"
-                if fp not in existing:
-                    self._store.append_transaction(txn)
-                    self._update_balance_for_transaction(txn)
-                    imported += 1
-                    existing.add(fp)
-                    self._refresh_commodity_on_trade(txn)
-                    self._handle_position_on_trade(txn)
-                    self._handle_opportunity_fulfillment(txn)
+            absorbed = event_type == "reward_earned" and self._reward_absorbed_by_bundle(
+                ts, data.get("data", {}).get("mission_id", ""), bundle_windows
+            )
+
+            if not absorbed:
+                txn = self._convert_event_log_entry(data, mission_name=mission_name)
+                if txn:
+                    key = self._transaction_dedup_key(txn)
+                    if key not in existing:
+                        self._store.append_transaction(txn)
+                        self._update_balance_for_transaction(txn)
+                        imported += 1
+                        existing.add(key)
+                        all_auto_txns.append(txn)
+                        self._refresh_commodity_on_trade(txn)
+                        self._handle_position_on_trade(txn)
+                        self._handle_opportunity_fulfillment(txn)
 
             # Blueprint received → register as asset with value 0
-            if data.get("event_type") == "blueprint_received":
+            if event_type == "blueprint_received":
                 event_inner = data.get("data", {})
                 bp_name = (
                     data.get("item_name")
                     or event_inner.get("blueprint_name", "")
                     or event_inner.get("name", "")  # legacy key from earlier log format
                 )
-                if bp_name:
-                    existing_bps = self._store.query_assets(
-                        asset_type="blueprint", status=None, limit=500
-                    )
-                    if not any(a.name == bp_name for a in existing_bps):
-                        self._assets.register_asset(
-                            asset_type="blueprint",
-                            name=bp_name,
-                            purchase_price=0.0,
-                            create_transaction=False,
-                        )
-                        logger.info("Registered blueprint asset: %s", bp_name)
+                self._register_blueprint_asset_if_new(bp_name)
+
+            # Mission reward bundle → register any bundled blueprints
+            if event_type == "mission_reward":
+                for bp_name in data.get("data", {}).get("blueprints", []):
+                    self._register_blueprint_asset_if_new(bp_name)
 
             # Own ship entered → register as fleet asset (deduped by name)
-            if data.get("event_type") == "own_ship_entered" and self._assets:
+            if event_type == "own_ship_entered" and self._assets:
                 ship_name = data.get("data", {}).get("ship", "")
                 if ship_name:
                     existing_ships = self._store.query_assets(
@@ -725,23 +773,174 @@ class SC_Accountant(Skill):
 
         return imported
 
+    @staticmethod
+    def _transaction_dedup_key(txn: Transaction) -> str:
+        """Return the dedup key for an auto-imported transaction.
+
+        Prefers the SC_LogReader event fingerprint when present; falls back to
+        timestamp:category:amount for fingerprint-less imports.
+        """
+        if txn.source_fingerprint:
+            return f"fp:{txn.source_fingerprint}"
+        return f"{txn.timestamp}:{txn.category}:{txn.amount}"
+
+    @staticmethod
+    def _reward_absorbed_by_bundle(
+        timestamp: str,
+        mission_id: str,
+        bundle_windows: list[tuple[str, str, str]],
+    ) -> bool:
+        """Return True if a reward_earned is covered by a bundle for the SAME mission.
+
+        Matching requires a non-empty mission_id on both the component and a
+        bundle in this batch, and they must be equal. An empty/missing
+        mission_id never matches (never a wildcard): two rewards from
+        different missions can legitimately land in the same narrow
+        reward-bundle flush window (e.g. bounty-stacking sessions), and
+        absorbing across missions on time alone would silently drop a real
+        reward. Under-suppressing a rare mission-id-less duplicate is the
+        safer failure mode than over-suppressing across missions.
+        """
+        if not mission_id:
+            return False
+        for first_seen, last_seen, bundle_mission_id in bundle_windows:
+            if not bundle_mission_id or bundle_mission_id != mission_id:
+                continue
+            if first_seen <= timestamp <= last_seen:
+                return True
+        return False
+
+    def _supersede_component_reward_transactions(
+        self,
+        bundle_data: dict,
+        all_auto_txns: list[Transaction],
+        existing: set[str],
+    ) -> None:
+        """Remove reward_earned component transactions a mission_reward bundle now covers.
+
+        SC_LogReader's append-only log can write a canonical mission_reward
+        bundle before or after the reward_earned components it summarizes. When
+        the bundle is imported after a component was already recorded as its
+        own transaction (in this sync or an earlier one), remove the component
+        so the bundle becomes the sole accounting record for that reward.
+
+        Matching requires a non-empty mission_id on both the bundle and the
+        stored component, and they must be equal. An empty/missing mission_id
+        never matches (never a wildcard): a time-window-only match risks
+        superseding a DIFFERENT mission's reward that merely lands in the
+        bundle's narrow flush window (e.g. bounty-stacking sessions), which
+        would silently delete real money. Under-suppressing a rare
+        mission-id-less duplicate is the safer failure mode than
+        over-suppressing across missions.
+        """
+        if not self._store:
+            return
+        inner = bundle_data.get("data", {})
+        bundle_mission_id = inner.get("mission_id") or None
+        if not bundle_mission_id:
+            return
+        first_seen = inner.get("first_seen") or bundle_data.get("timestamp", "")
+        last_seen = inner.get("last_seen") or bundle_data.get("timestamp", "")
+        if not first_seen or not last_seen:
+            return
+
+        superseded = [
+            txn
+            for txn in all_auto_txns
+            if "component_reward" in txn.tags
+            and txn.source_mission_id == bundle_mission_id
+            and first_seen <= txn.timestamp <= last_seen
+        ]
+        for txn in superseded:
+            self._store.delete_transaction(txn.id)
+            self._reverse_balance_for_transaction(txn)
+            all_auto_txns.remove(txn)
+            existing.discard(self._transaction_dedup_key(txn))
+            logger.info(
+                "Superseded component reward transaction %s with mission_reward bundle",
+                txn.id[:8],
+            )
+
+    def _reverse_balance_for_transaction(self, txn: Transaction) -> None:
+        """Undo a previously-applied balance update (used when superseding a transaction)."""
+        if not self._store:
+            return
+        balance = self._store.get_balance()
+        if txn.transaction_type == "income":
+            balance.current_balance -= txn.amount
+            balance.total_lifetime_income -= txn.amount
+        else:
+            balance.current_balance += txn.amount
+            balance.total_lifetime_expenses += txn.amount
+        balance.last_updated = self._now_iso()
+        self._store.save_balance(balance)
+
+    def _register_blueprint_asset_if_new(self, name: str) -> None:
+        """Register a blueprint asset by name if it is not already tracked."""
+        if not name or not self._assets:
+            return
+        existing_bps = self._store.query_assets(
+            asset_type="blueprint", status=None, limit=500
+        )
+        if any(a.name == name for a in existing_bps):
+            return
+        self._assets.register_asset(
+            asset_type="blueprint",
+            name=name,
+            purchase_price=0.0,
+            create_transaction=False,
+        )
+        logger.info("Registered blueprint asset: %s", name)
+
     def _convert_event_log_entry(self, data: dict, mission_name: str = "") -> Transaction | None:
         """Convert an SC_LogReader event log entry to a Transaction.
 
-        Handles: shop_buy, shop_sell, commodity_buy, commodity_sell, reward_earned.
+        Handles: mission_reward, reward_earned, shop_buy, shop_sell,
+        commodity_buy, commodity_sell, fined, money_sent.
         All other event types are ignored (returns None).
 
         Args:
             data: Raw event log entry dict.
             mission_name: Mission name to embed in description for reward_earned events.
                           Supplied by the caller from the mission_complete event at the
-                          same timestamp.
+                          same timestamp. Ignored for mission_reward, which carries its
+                          own mission name.
         """
         event_type = data.get("event_type", "")
         event_data = data.get("data", {})
         session = self._store.get_active_session()
+        fingerprint = data.get("fingerprint")
 
-        # --- Mission / activity rewards ---
+        # --- Canonical mission reward bundle (preferred over reward_earned) ---
+        if event_type == "mission_reward":
+            money = event_data.get("money") or {}
+            amount_auec = money.get("amount_auec")
+            if amount_auec is None:
+                amount_auec = data.get("amount_auec")
+            if not amount_auec:
+                return None
+            bundle_mission_name = event_data.get("mission_name", "")
+            description = (
+                f"Mission Reward: {bundle_mission_name}"
+                if bundle_mission_name
+                else "Mission Reward"
+            )
+            return Transaction(
+                id=str(uuid.uuid4()),
+                timestamp=data.get("timestamp", self._now_iso()),
+                category="mission_reward",
+                transaction_type="income",
+                amount=float(amount_auec),
+                description=description,
+                location=data.get("location", ""),
+                tags=["auto"],
+                source="auto_log",
+                source_fingerprint=fingerprint,
+                source_mission_id=event_data.get("mission_id") or None,
+                session_id=session.id if session else None,
+            )
+
+        # --- Mission / activity rewards (legacy component row) ---
         if event_type == "reward_earned":
             amount_auec = data.get("amount_auec")
             if amount_auec is None:
@@ -762,8 +961,46 @@ class SC_Accountant(Skill):
                 amount=float(amount_auec),
                 description=description,
                 location=data.get("location", ""),
+                tags=["auto", "component_reward"],
+                source="auto_log",
+                source_fingerprint=fingerprint,
+                source_mission_id=event_data.get("mission_id") or None,
+                session_id=session.id if session else None,
+            )
+
+        # --- Fines and player-to-player transfers ---
+        if event_type in ("fined", "money_sent"):
+            amount_auec = data.get("amount_auec")
+            if amount_auec is None:
+                raw_amount = event_data.get("amount")
+                if raw_amount is None:
+                    return None
+                try:
+                    amount_auec = -float(raw_amount)
+                except (TypeError, ValueError):
+                    return None
+            if not amount_auec:
+                return None
+
+            if event_type == "fined":
+                category = "fines"
+                description = "Fine"
+            else:
+                recipient = event_data.get("recipient", "")
+                category = "money_transfer_sent"
+                description = f"Sent to {recipient}" if recipient else "Money Sent"
+
+            return Transaction(
+                id=str(uuid.uuid4()),
+                timestamp=data.get("timestamp", self._now_iso()),
+                category=category,
+                transaction_type="expense",
+                amount=abs(float(amount_auec)),
+                description=description,
+                location=data.get("location", ""),
                 tags=["auto"],
                 source="auto_log",
+                source_fingerprint=fingerprint,
                 session_id=session.id if session else None,
             )
 
@@ -802,6 +1039,7 @@ class SC_Accountant(Skill):
             location=shop or data.get("location", ""),
             tags=["auto"],
             source="auto_log",
+            source_fingerprint=fingerprint,
             session_id=session.id if session else None,
             item_name=item_name,
             item_guid=item_guid,
@@ -844,7 +1082,11 @@ class SC_Accountant(Skill):
             return
 
         qr_b64 = _generate_qr_png_base64(lan_url)
-        msg = f"SC Accountant dashboard is ready. Scan the QR code or open:\n{lan_url}"
+        msg = (
+            "SC Accountant dashboard is ready. Scan the QR code with your phone, "
+            "or open on any device on your home network:\n"
+            f"{lan_url}"
+        )
 
         await self.printr.print_async(
             msg,

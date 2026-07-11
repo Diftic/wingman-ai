@@ -1,7 +1,7 @@
 # SC_Accountant — Corporate Accounting for Star Citizen
 
 **Author:** Mallachi
-**Version:** 4.7.2 (qualified against Star Citizen 4.7.2)
+**Version:** 4.8.3.1 (qualified against Star Citizen 4.8.3)
 **Platform:** Wingman AI
 
 A full business accounting system for Star Citizen, built as a Wingman AI skill.

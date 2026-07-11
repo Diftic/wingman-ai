@@ -1,4 +1,4 @@
-# SC_Accountant v4.7.2 — Community Tester Guide
+# SC_Accountant v4.8.3.1 — Community Tester Guide
 
 Thanks for testing! This guide gets you installed and explains what to look
 for and how to report back.
@@ -18,7 +18,7 @@ trade positions, and provides:
 - **Auto-sync from SC_LogReader** — buy/sell trades, mission rewards, and
   blueprint asset registrations are imported automatically.
 
-**This build is qualified against Star Citizen `4.7.2`.**
+**This build is qualified against Star Citizen `4.8.3`.**
 
 ---
 
@@ -26,11 +26,11 @@ trade positions, and provides:
 
 `sc_accountant` works standalone, but its **trade auto-import**, **mission
 reward import**, and **blueprint → asset registration** features need
-`SC_LogReader v4.7.2`. Install both for the full experience.
+`SC_LogReader v4.8.3.4`. Install both for the full experience.
 
 `SC_Accountant` will log a warning at startup if `SC_LogReader` is missing or
 on a mismatched SC patch — that warning is intentional, not a bug. Report it
-only if `SC_LogReader v4.7.2` is installed and the warning still fires.
+only if `SC_LogReader v4.8.3.4` is installed and the warning still fires.
 
 ---
 
@@ -39,12 +39,12 @@ only if `SC_LogReader v4.7.2` is installed and the warning still fires.
 ### Requirements
 - Wingman AI desktop app, already installed
 - Windows
-- (Optional but recommended) `SC_LogReader v4.7.2` already installed
+- (Optional but recommended) `SC_LogReader v4.8.3.4` already installed
 
 ### Steps
 
 1. Unzip the package somewhere convenient.
-2. Open the unzipped `sc_accountant_v4.7.2` folder.
+2. Open the unzipped `sc_accountant_v4.8.3.1` folder.
 3. **Double-click `install.bat`.** It copies the skill into:
    ```
    %AppData%\ShipBit\WingmanAI\custom_skills\sc_accountant\
@@ -57,12 +57,12 @@ only if `SC_LogReader v4.7.2` is installed and the warning still fires.
 In your Wingman AI logs (or the console where Wingman runs), look for:
 
 ```
-SC_Accountant v4.7.2 initializing...
+SC_Accountant v4.8.3.1 initializing...
 ```
 
 About 5 seconds later you should also see one of:
 
-- `SC_Accountant: SC_LogReader compatibility OK (v4.7.2)` — both skills are
+- `SC_Accountant: SC_LogReader compatibility OK (v4.8.3)` — both skills are
   on the same SC patch, you're good.
 - A warning if `SC_LogReader` is missing or on a different SC patch.
 
@@ -133,8 +133,8 @@ Play SC normally and confirm:
 
 For every issue, please include:
 
-1. **Skill versions** — confirm `SC_Accountant v4.7.2` from the banner. If
-   `SC_LogReader` is installed, confirm it's also `v4.7.2`.
+1. **Skill versions** — confirm `SC_Accountant v4.8.3.1` from the banner. If
+   `SC_LogReader` is installed, confirm it's also `v4.8.3.4`.
 2. **Star Citizen version** — LIVE / PTU / HOTFIX, and build number if known.
 3. **OS / hardware** — Windows version, GPU, RAM (rough is fine).
 4. **What you were doing** — "I had just sold 50 SCU of laranite", etc.
@@ -173,7 +173,7 @@ For every issue, please include:
 ## Thanks!
 
 Feedback from this round goes directly into the next patch — likely
-`v4.7.2.1` if any critical/major issues land, or `v4.7.3` when CIG ships
+`v4.8.0.1` if any critical/major issues land, or `v4.8.1` when CIG ships
 the next SC patch.
 
 — Mallachi
