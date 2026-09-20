@@ -869,6 +869,9 @@ class ConfigManager:
             if "base64," in wingman_file.avatar:
                 avatar = wingman_file.avatar.split("base64,", 1)[1]
                 image_data = base64.b64decode(avatar)
+                avatar_dir = path.dirname(avatar_path)
+                if not path.exists(avatar_dir):
+                    makedirs(avatar_dir)
                 with open(avatar_path, "wb") as file:
                     file.write(image_data)
 
