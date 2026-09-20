@@ -170,6 +170,8 @@ frontmatter.json
 
 # Wingman AI:
 skills/**/dependencies
+# Standalone dev test scripts (house convention: run locally with PYTHONPATH=. — not shipped/CI'd)
+/tests/
 whispercpp/
 whispercpp-cuda/
 whispercpp-models/
@@ -179,5 +181,14 @@ pocket-tts-voices/
 .superpowers/
 .worktrees/
 docs/superpowers/**/**
+docs/backend-migration/**/**
+# Internal engineering tooling: measured model costs, candidate models
+# and the reasoning behind the catalogue.
+evals/
+# Local Serena config and cache.
+.serena/
 
 .claude/settings.json
+
+.vscode/launch.json
+scripts/mic_check.wav

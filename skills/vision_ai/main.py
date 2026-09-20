@@ -8,7 +8,7 @@ from api.interface import SettingsConfig, SkillConfig, WingmanInitializationErro
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.open_ai_wingman import OpenAiWingman
+    from wingmen.wingman_context import WingmanContext
 
 
 class VisionAI(Skill):
@@ -17,7 +17,7 @@ class VisionAI(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "OpenAiWingman",
+        wingman: "WingmanContext",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
@@ -91,33 +91,12 @@ class VisionAI(Skill):
                     additional_data={"image_base64": png_base64},
                 )
 
-            messages = [
-                {
-                    "role": "system",
-                    "content": """
-                        You are a helpful ai assistant.
-                    """,
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/jpeg;base64,{png_base64}",
-                                "detail": "high",
-                            },
-                        },
-                    ],
-                },
-            ]
-            completion = await self.llm_call(messages)
-            function_response = (
-                completion.choices[0].message.content
-                if completion and completion.choices
-                else ""
+            response_text = await self.wingman.ai.generate(
+                prompt,
+                system="You are a helpful ai assistant.",
+                image=f"data:image/jpeg;base64,{png_base64}",
             )
+            function_response = response_text or ""
 
         return function_response
 

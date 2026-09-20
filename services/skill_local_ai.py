@@ -49,17 +49,20 @@ class SamplingPreset(Enum):
     """Named sampling presets for the Qwen3.5 local AI model.
 
     Based on Qwen3.5-2B HuggingFace recommended sampling parameters.
-    Use these when calling ``support()`` or ``support_sync()`` to get
+    Use these when calling ``generate()`` or ``generate_sync()`` to get
     sensible values without tuning them yourself.
     Manual arguments take precedence over any preset.
 
     Attributes (temperature, top_p, top_k, presence_penalty):
-        PRECISE:   (0.6, 0.95, 20, 0.5) — Extraction, structured data, JSON.
-        BALANCED:  (1.0, 0.95, 20, 1.5) — Summaries, memory extraction, paraphrasing.
+        PRECISE:   (0.1, 0.95, 20, 0.5) — Extraction, structured data, JSON. Near
+                   deterministic: at temp 0.6 the 2B drops/duplicates facts ~33%
+                   of the time; at 0.1 it is ~98% reliable (measured in the
+                   internal eval suite). Use for any parse/transform.
+        BALANCED:  (1.0, 0.95, 20, 1.5) — Summaries, condensation, paraphrasing.
         CREATIVE:  (1.0, 1.0, 20, 2.0) — Greetings, flavor text, roleplay, dialogue.
     """
 
-    PRECISE = (0.6, 0.95, 20, 0.5)
+    PRECISE = (0.1, 0.95, 20, 0.5)
     BALANCED = (1.0, 0.95, 20, 1.5)
     CREATIVE = (1.0, 1.0, 20, 2.0)
 
@@ -90,7 +93,8 @@ class MemoryType(str, Enum):
     """Type-safe enum for memory entry types."""
 
     FACT = "fact"
-    SESSION_SUMMARY = "session_summary"
+    EPISODE = "episode"
+    SESSION_SUMMARY = "session_summary"  # older databases
 
 
 # ── Facade ────────────────────────────────────────────────────────
@@ -116,17 +120,20 @@ class SkillLocalAI:
 
     @property
     def available(self) -> bool:
-        """Whether the local support model is loaded and ready."""
+        """Whether the support model can answer — locally or in the cloud."""
         svc = self._wingman.local_ai_service
         return svc is not None and svc.is_ready()
 
     @property
     def embed_available(self) -> bool:
-        """Whether the embedding model is loaded and ready."""
-        # Embed readiness is tied to the same is_ready() check — if the
-        # provider is ready, both support and embed models are loaded.
+        """Whether the embedding model is loaded and ready.
+
+        Its own check since the two models can now be in different places: in
+        cloud mode the support model answers over the network while embeddings
+        still run here, so one can be up while the other is not.
+        """
         svc = self._wingman.local_ai_service
-        return svc is not None and svc.is_ready()
+        return svc is not None and svc.embed_ready()
 
     @property
     def memory_available(self) -> bool:
@@ -179,7 +186,7 @@ class SkillLocalAI:
 
     # ── Support model ─────────────────────────────────────────────
 
-    async def support(
+    async def generate(
         self,
         text: str,
         system_prompt: str = "",
@@ -188,6 +195,7 @@ class SkillLocalAI:
         top_p: float | None = None,
         top_k: int | None = None,
         presence_penalty: float | None = None,
+        reasoning: bool | None = None,
     ) -> SupportResponse | None:
         """Run text through the local support model.
 
@@ -198,18 +206,21 @@ class SkillLocalAI:
         Manual values take precedence over preset values.
         Both are optional — omitting everything uses the Qwen3.5 defaults.
 
+        ``reasoning`` overrides the model's thinking mode for this call:
+        ``True``/``False`` force it on/off, ``None`` (default) uses the user's
+        global setting. Turn it on for background quality work and leave it off
+        on anything the user waits for — thinking adds latency.
+
         Example::
 
             # Use a preset
-            result = await self.local_ai.support(text, preset=SamplingPreset.CREATIVE)
+            result = await self.local_ai.generate(text, preset=SamplingPreset.CREATIVE)
 
             # Manual override
-            result = await self.local_ai.support(text, temperature=1.0, presence_penalty=2.0)
+            result = await self.local_ai.generate(text, temperature=1.0, presence_penalty=2.0)
 
-            # Preset + partial override
-            result = await self.local_ai.support(
-                text, preset=SamplingPreset.CREATIVE, temperature=0.8
-            )
+            # Force reasoning on for a background analysis task
+            result = await self.local_ai.generate(text, reasoning=True)
         """
         t, p, k, pp = self._resolve_sampling(preset, temperature, top_p, top_k, presence_penalty)
         if not self.available:
@@ -223,6 +234,7 @@ class SkillLocalAI:
                 top_p=p,
                 top_k=k,
                 presence_penalty=pp,
+                reasoning=reasoning,
             )
             if result is None:
                 return None
@@ -236,7 +248,7 @@ class SkillLocalAI:
             await self._log_error("support", e)
             return None
 
-    def support_sync(
+    def generate_sync(
         self,
         text: str,
         system_prompt: str = "",
@@ -245,6 +257,7 @@ class SkillLocalAI:
         top_p: float | None = None,
         top_k: int | None = None,
         presence_penalty: float | None = None,
+        reasoning: bool | None = None,
     ) -> SupportResponse | None:
         """Sync version of support(). See support() for parameter details."""
         t, p, k, pp = self._resolve_sampling(preset, temperature, top_p, top_k, presence_penalty)
@@ -258,6 +271,7 @@ class SkillLocalAI:
                 top_p=p,
                 top_k=k,
                 presence_penalty=pp,
+                reasoning=reasoning,
             )
             if result is None:
                 return None
@@ -280,14 +294,15 @@ class SkillLocalAI:
         preset: SamplingPreset | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        reasoning: bool | None = None,
     ) -> SupportResponse | None:
         """Summarize text, automatically chunking if it exceeds the context window.
 
         For small text: single support() call with instruction as system prompt.
         For large text: chunks, summarizes each via ToolResponseCompressor, merges.
 
-        Accepts the same ``preset`` / ``temperature`` / ``top_p`` overrides as
-        ``support()``.
+        Accepts the same ``preset`` / ``temperature`` / ``top_p`` / ``reasoning``
+        overrides as ``support()``.
         """
         if not self.available:
             return None
@@ -300,9 +315,10 @@ class SkillLocalAI:
 
             if text_tokens <= budget.max_input_tokens:
                 # Fits in one call
-                return await self.support(
+                return await self.generate(
                     text, system_prompt=instruction,
                     preset=preset, temperature=temperature, top_p=top_p,
+                    reasoning=reasoning,
                 )
 
             # Too large — compress first, then apply instruction in a final pass
@@ -317,22 +333,32 @@ class SkillLocalAI:
             )
             # The compressed text should now fit; run a final pass with the
             # caller's instruction so it's not silently dropped.
-            return await self.support(
+            return await self.generate(
                 compressed, system_prompt=instruction,
                 preset=preset, temperature=temperature, top_p=top_p,
+                reasoning=reasoning,
             )
         except Exception as e:
             await self._log_error("summarize", e)
             return None
 
     def summarize_sync(
-        self, text: str, instruction: str = ""
+        self,
+        text: str,
+        instruction: str = "",
+        preset: SamplingPreset | None = None,
+        temperature: float | None = None,
+        top_p: float | None = None,
+        reasoning: bool | None = None,
     ) -> SupportResponse | None:
         """Sync version of summarize().
 
         Sync version handles large text via truncation rather than chunked
         summarization (ToolResponseCompressor is async-only). Use async
         summarize() for full chunked summarization of large text.
+
+        Accepts the same ``preset`` / ``temperature`` / ``top_p`` / ``reasoning``
+        overrides as ``generate()``.
         """
         if not self.available:
             return None
@@ -344,11 +370,19 @@ class SkillLocalAI:
             text_tokens = count_tokens(text)
 
             if text_tokens <= budget.max_input_tokens:
-                return self.support_sync(text, system_prompt=instruction)
+                return self.generate_sync(
+                    text, system_prompt=instruction,
+                    preset=preset, temperature=temperature, top_p=top_p,
+                    reasoning=reasoning,
+                )
 
             # Too large for sync — truncate and mark as truncated
             truncated_text = truncate_to_tokens(text, budget.max_input_tokens)
-            result = self.support_sync(truncated_text, system_prompt=instruction)
+            result = self.generate_sync(
+                truncated_text, system_prompt=instruction,
+                preset=preset, temperature=temperature, top_p=top_p,
+                reasoning=reasoning,
+            )
             if result is None:
                 return None
             return SupportResponse(
@@ -494,7 +528,9 @@ class SkillLocalAI:
     # ── Memory: Context ───────────────────────────────────────────
 
     async def memory_context(self, query: str, max_tokens: int = 500) -> str:
-        """Get pre-formatted memory context for system prompt injection.
+        """The MEMORY block as it stands in the system prompt: every fact and
+        the recent episodes. ``query`` and ``max_tokens`` are accepted for
+        older skills and ignored; there is no per-query lookup any more.
 
         Returns empty string on failure — safe to concatenate directly.
         """
@@ -502,7 +538,7 @@ class SkillLocalAI:
         if mem is None:
             return ""
         try:
-            return await mem.build_memory_context(query, max_tokens)
+            return await asyncio.to_thread(mem.memory_block)
         except Exception as e:
             await self._log_error("memory_context", e)
             return ""
@@ -513,7 +549,7 @@ class SkillLocalAI:
         if mem is None:
             return ""
         try:
-            return mem.build_memory_context_sync(query, max_tokens)
+            return mem.memory_block()
         except Exception as e:
             self._log_error_sync("memory_context_sync", e)
             return ""

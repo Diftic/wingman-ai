@@ -3,7 +3,7 @@
 import asyncio
 from typing import TYPE_CHECKING
 
-from api.enums import LogType, LogSource
+from api.enums import LocalAiMode, LogType, LogSource
 from services.file import get_prompt
 from services.printr import Printr
 from services.token_utils import count_tokens, truncate_to_tokens
@@ -17,6 +17,126 @@ if TYPE_CHECKING:
 printr = Printr()
 
 _CONDENSE_TIMEOUT = 120.0
+
+# How much conversation is allowed to pile up before it gets summarised, in
+# tokens. The real limit is the smaller of this and what the support model can
+# take in one pass.
+#
+# It used to be only the model's capacity, which worked while that model always
+# had a 4096-token window. A cloud support model has a million: the trigger would
+# never fire, the history would never be condensed, and the *chat* model's
+# context would overflow instead — the opposite of what condensation is for.
+#
+# Local stays where it was: with n_ctx 4096 the capacity works out around 3000
+# tokens, so this ceiling never binds and behaviour is unchanged. Cloud gets the
+# larger number because there is no reason to throw detail away early when the
+# model can hold it — each summarisation round loses something.
+#
+# Cloud sat at 16,000 until 2026-09-14, which the trigger below turns into about
+# 8,300 real tokens: the first summary after roughly an hour of play, three or
+# four per session. That number is from the time when every turn paid full price
+# for the whole history.
+#
+# Since the memory block moved behind the history (see context_builder), the
+# history is a stable prefix and the provider caches it: measured 10 hits out of
+# 10 covering 98% of the tokens, so a tenth of the price for the repeated part.
+# 40,000 now costs about what 4,000 used to, and buys around two and a half
+# hours of conversation before anything gets summarised.
+#
+# Not higher, for three reasons: every turn pays for the whole history, cached
+# or not; the answer stops getting better past some point and only gets slower;
+# and the pathological case — a 78k-token table from a skill — has to stay
+# capped.
+_MAX_CONVERSATION_TOKENS = 6_000
+_MAX_CONVERSATION_TOKENS_CLOUD = 40_000
+
+# The text wrapped around the conversation before it goes to the support model.
+#
+# These are module constants because the internal eval suite imports them. The
+# system prompt and this framing are one unit — the model reads them together —
+# so measuring one without the other says nothing. They drifted apart once: the
+# system prompt was rewritten to ask for a short fact sheet while the suffix here
+# still said "list every fact ... include all names, preferences and creative
+# content", which is the instruction that produced summaries as long as their
+# source.
+CONDENSE_SUMMARY_HEADER = (
+    "EXISTING SUMMARY (incorporate and update — do not repeat verbatim):\n"
+)
+CONDENSE_CONVERSATION_HEADER = "CONVERSATION TO SUMMARIZE:\n"
+
+# The only rule that belongs here rather than in the prompt file: it is about
+# what must never leave the machine, and it has to hold for every prompt variant
+# anyone tries in the eval suite.
+CONDENSE_SUFFIX = (
+    "\n\n---\n"
+    "Never include secrets, API keys, credentials, passwords or tokens."
+)
+
+CONDENSE_MERGE_HEADER = "PARTIAL SUMMARIES TO MERGE:\n"
+CONDENSE_MERGE_SUFFIX = (
+    "\n\n---\n"
+    "Merge these into one bullet list in the same format. Drop duplicates."
+)
+
+
+def condense_chunk_header(part: int, total: int) -> str:
+    """Header for one chunk when the history does not fit in a single pass."""
+    return f"CONVERSATION TO SUMMARIZE (part {part}/{total}):\n"
+
+
+# A condensation that frees less than this is not worth its support call, and
+# it is the sign of a prompt whose bulk is not history at all: system prompt,
+# memory block, tool definitions. Those never shrink by summarising; the user
+# needs to hear that instead of watching the number twitch.
+_MIN_CONDENSE_GAIN = 4_000
+
+
+def find_cutoff(messages: list, keep_tokens: int, role_of, tokens_of) -> int:
+    """The index from which the history may be summarised.
+
+    Keeps the most recent turns that fit in ``keep_tokens`` — always at least
+    the latest one, however big it is. A turn starts at a user message, so the
+    cut lands on a user message, and a tool group — ``assistant`` with
+    ``tool_calls``, then the ``tool`` replies — always sits complete between two
+    user messages. It cannot be torn apart.
+
+    Tokens rather than a message count, because the two drift apart: with a
+    skill that answers every question through three tool calls, twelve turns
+    were 23,000 tokens and sat right under the trigger, so every condensation
+    freed a couple of thousand tokens and the next one came two turns later. A
+    token budget keeps the same amount of history whatever the play style, and
+    leaves real headroom after each pass.
+
+    The second loop: should the cut ever land on a ``tool`` reply, it walks
+    forward until the whole group is inside the kept part. An orphaned ``tool``
+    reply is not a cosmetic flaw but, depending on the model, a hard failure.
+    Measured 2026-09-14: ``google/gemini-2.5-flash`` answers normally,
+    ``openai/gpt-4.1-mini`` rejects the request with 400 ("No tool call found
+    for function call output"). A mistake here would therefore be invisible on
+    our default model and would only hit the users who picked another one.
+
+    Returns 0 when there is nothing to summarise.
+    """
+    cutoff = 0
+    kept_tokens = 0
+    latest_turn_kept = False
+    for i in range(len(messages) - 1, -1, -1):
+        kept_tokens += tokens_of(messages[i])
+        if role_of(messages[i]) != "user":
+            continue
+        if not latest_turn_kept or kept_tokens <= keep_tokens:
+            cutoff = i
+            latest_turn_kept = True
+            continue
+        break
+
+    if cutoff <= 0 or cutoff >= len(messages):
+        return 0
+
+    while cutoff < len(messages) and role_of(messages[cutoff]) == "tool":
+        cutoff += 1
+
+    return cutoff if cutoff < len(messages) else 0
 
 
 class ConversationCondenser:
@@ -32,6 +152,9 @@ class ConversationCondenser:
         self._is_condensing = False
         self._condense_task: asyncio.Task | None = None
         self._support_token_ratio: float = 1.35
+        self._reported_fixed_bulk = False
+        """Whether the user has been told that the prompt is big but the history
+        is not. Once per stretch — reset when a condensation actually runs."""
 
     @property
     def summary(self) -> str:
@@ -42,27 +165,55 @@ class ConversationCondenser:
         return self._is_condensing
 
     def get_support_capacity(self, local_ai_service: "LocalAiService") -> int:
-        """Get the effective input capacity of the support model for a single pass.
+        """How many conversation tokens one summarisation pass may cover.
 
-        Returns the number of conversation tokens that can fit in one summarization
-        pass, accounting for system prompt, framing text, and output budget.
+        The smaller of two numbers: what the support model can physically take
+        (system prompt and output budget already subtracted), and the ceiling we
+        set ourselves in ``_MAX_CONVERSATION_TOKENS``. Without the second, a
+        cloud model's million-token window would mean the history never gets
+        condensed at all.
         """
         system_prompt = get_prompt("condense-conversation")
         budget = local_ai_service.get_token_budget(system_prompt)
         # Subtract framing overhead (prefix/suffix around the conversation text)
         framing_overhead = 80
-        return max(0, budget.max_input_tokens - framing_overhead)
+        model_capacity = max(0, budget.max_input_tokens - framing_overhead)
 
-    async def maybe_condense(self, local_ai_service: "LocalAiService"):
+        cloud = local_ai_service.settings.mode == LocalAiMode.CLOUD
+        ceiling = _MAX_CONVERSATION_TOKENS_CLOUD if cloud else _MAX_CONVERSATION_TOKENS
+        return min(ceiling, model_capacity)
+
+    def keep_tokens(self, local_ai_service: "LocalAiService", force: bool = False) -> int:
+        """How much recent history a condensation leaves verbatim.
+
+        The configured budget, but never more than a third of what one pass can
+        cover: a local model with a 3,000-token capacity that kept 8,000 would
+        never condense anything. A manual run keeps only the latest turn — the
+        user asked for a clean slate.
+        """
+        if force:
+            return 0
+        capacity = self.get_support_capacity(local_ai_service)
+        return min(self._config.features.condense_keep_recent_tokens, capacity // 3)
+
+    def _tokens_of(self, msg) -> int:
+        return count_tokens(self._conversation._message_text_content(msg))
+
+    async def maybe_condense(
+        self, local_ai_service: "LocalAiService", last_prompt_tokens: int = 0
+    ):
         """Check if condensation should run and fire it as a background task.
 
-        Uses a token-based trigger: condenses when the conversation approaches
-        70% of what the support model can handle in a single pass, so we
-        avoid chunking. Also has a message count safety cap.
+        ``last_prompt_tokens`` is what the chat provider billed for the previous
+        call — the same number the client shows. On a cloud support model that
+        is the trigger: the ceiling is about what a turn may cost, and the
+        prompt is what costs. A local support model is bounded by what it can
+        summarise in one pass instead, so there the trigger stays on the
+        history estimate against that capacity. Also has a message count cap.
 
-        The cl100k_base token estimate is multiplied by _support_token_ratio
-        (calibrated from real support model usage) to account for tokenizer
-        differences between the estimation tokenizer and the actual model.
+        Fires only when there is enough to gain. A prompt that is big because
+        of tool definitions and memory, not history, would otherwise trigger
+        every turn and free next to nothing each time.
         """
         if not self._config.features.condense_conversation:
             return
@@ -73,14 +224,16 @@ class ConversationCondenser:
         if self._is_condensing:
             return
 
-        # Token-based trigger: condense when conversation reaches 70% of
-        # what the support model can handle in one pass.
-        # Apply _support_token_ratio to correct for tokenizer differences
-        # between cl100k_base (used for estimation) and the actual model.
         capacity = self.get_support_capacity(local_ai_service)
         cl100k_tokens = self._conversation.estimate_tokens()
-        conversation_tokens = int(cl100k_tokens * self._support_token_ratio)
-        token_trigger = conversation_tokens >= int(capacity * 0.7)
+        cloud = local_ai_service.settings.mode == LocalAiMode.CLOUD
+        if cloud and last_prompt_tokens > 0:
+            token_trigger = last_prompt_tokens >= _MAX_CONVERSATION_TOKENS_CLOUD
+        else:
+            # cl100k_base estimate corrected by the calibrated ratio to the
+            # support model's own tokenizer.
+            conversation_tokens = int(cl100k_tokens * self._support_token_ratio)
+            token_trigger = conversation_tokens >= int(capacity * 0.7)
 
         # Message count safety cap
         user_msg_count = sum(
@@ -93,6 +246,29 @@ class ConversationCondenser:
         )
 
         if not token_trigger and not message_trigger:
+            return
+
+        cutoff = find_cutoff(
+            self._conversation.messages,
+            self.keep_tokens(local_ai_service),
+            self._conversation.get_message_role,
+            self._tokens_of,
+        )
+        gain = sum(self._tokens_of(m) for m in self._conversation.messages[:cutoff])
+        if gain < _MIN_CONDENSE_GAIN and not message_trigger:
+            if token_trigger and last_prompt_tokens > 0 and not self._reported_fixed_bulk:
+                self._reported_fixed_bulk = True
+                fixed = max(0, last_prompt_tokens - cl100k_tokens)
+                await printr.print_async(
+                    f"The last request was ~{last_prompt_tokens:,} tokens, but only "
+                    f"~{cl100k_tokens:,} of that is conversation history. The other "
+                    f"~{fixed:,} are the system prompt, memory and tool definitions "
+                    f"(skills, MCP servers), which summarizing cannot shrink. "
+                    f"Disable tools you do not use to bring it down.",
+                    color=LogType.WARNING,
+                    source_name=self._wingman_name,
+                    source=LogSource.WINGMAN,
+                )
             return
 
         # Runs in background so user is never blocked.
@@ -119,11 +295,16 @@ class ConversationCondenser:
 
         Args:
             local_ai_service: The local AI service to use for summarization.
-            persistent_memory_service: Optional service for extracting memories.
-            background_tasks: Optional set to track background tasks for memory extraction.
+            persistent_memory_service: Unused; memory has its own checkpoints.
+            background_tasks: Unused.
             force: If True, skip the threshold check (used for manual trigger).
         """
+        # On the manual trigger (force), surface skips as self-vanishing toasts —
+        # otherwise it looks like the button did nothing. Automatic background
+        # runs stay server-only to avoid toast spam.
         if self._is_condensing:
+            if force:
+                printr.toast_info("Conversation summarization is already running.")
             await printr.print_async(
                 "Condensation skipped — already in progress.",
                 color=LogType.WARNING,
@@ -133,6 +314,10 @@ class ConversationCondenser:
             )
             return
         if not local_ai_service or not local_ai_service.is_ready():
+            if force:
+                printr.toast_warning(
+                    "Cannot summarize the conversation — local AI is not ready."
+                )
             await printr.print_async(
                 "Condensation skipped — local AI service not available.",
                 color=LogType.WARNING,
@@ -142,17 +327,17 @@ class ConversationCondenser:
             )
             return
 
-        keep_recent = (
-            self._config.features.condense_keep_recent
-            if not force
-            else min(self._config.features.condense_keep_recent, 2)
-        )
+        keep_tokens = self.keep_tokens(local_ai_service, force=force)
         total_msg_count = len(self._conversation.messages)
 
-        # Need at least something to condense beyond what we keep
-        if total_msg_count <= keep_recent:
+        # Need at least one finished turn beyond the one we keep
+        if total_msg_count < 2:
+            if force:
+                printr.toast_info(
+                    "Nothing to summarize yet — the conversation is still too short."
+                )
             await printr.print_async(
-                f"Condensation skipped — only {total_msg_count} messages, need more than {keep_recent} to condense.",
+                f"Condensation skipped — only {total_msg_count} messages.",
                 color=LogType.LOCALMODEL,
                 source_name=self._wingman_name,
                 source=LogSource.WINGMAN,
@@ -197,41 +382,21 @@ class ConversationCondenser:
                 )
                 return
 
-            # Find the cutoff: keep the most recent `keep_recent` user messages
-            kept_user_count = 0
-            cutoff_index = len(self._conversation.messages)
-            for i in range(len(self._conversation.messages) - 1, -1, -1):
-                if (
-                    self._conversation.get_message_role(
-                        self._conversation.messages[i]
+            cutoff_index = find_cutoff(
+                self._conversation.messages,
+                keep_tokens,
+                self._conversation.get_message_role,
+                self._tokens_of,
+            )
+
+            if cutoff_index <= 0:
+                if force:
+                    printr.toast_info(
+                        "Nothing to summarize yet — the conversation is still too short."
                     )
-                    == "user"
-                ):
-                    kept_user_count += 1
-                    if kept_user_count == keep_recent:
-                        cutoff_index = i
-                        break
-
-            if cutoff_index <= 0:
                 await printr.print_async(
-                    f"Condensation skipped — cutoff_index={cutoff_index}, nothing to condense (kept_user_count={kept_user_count}, keep_recent={keep_recent}, total={len(self._conversation.messages)}).",
-                    color=LogType.LOCALMODEL,
-                    source_name=self._wingman_name,
-                    source=LogSource.WINGMAN,
-                )
-                return
-
-            # Adjust cutoff forward to avoid orphaning tool responses
-            while cutoff_index < len(self._conversation.messages):
-                msg = self._conversation.messages[cutoff_index]
-                if self._conversation.get_message_role(msg) == "tool":
-                    cutoff_index += 1
-                else:
-                    break
-
-            if cutoff_index <= 0:
-                await printr.print_async(
-                    "Condensation skipped — no messages to condense after tool adjustment.",
+                    f"Condensation skipped — nothing older than the kept "
+                    f"~{keep_tokens:,} tokens (total={len(self._conversation.messages)} messages).",
                     color=LogType.LOCALMODEL,
                     source_name=self._wingman_name,
                     source=LogSource.WINGMAN,
@@ -239,20 +404,6 @@ class ConversationCondenser:
                 return
 
             to_condense = self._conversation.messages[:cutoff_index]
-
-            # Extract memories from messages about to be condensed (background, non-blocking)
-            if persistent_memory_service:
-                try:
-                    task = asyncio.create_task(
-                        persistent_memory_service.extract_memories(
-                            to_condense, generate_summary=True
-                        )
-                    )
-                    if background_tasks is not None:
-                        background_tasks.add(task)
-                        task.add_done_callback(background_tasks.discard)
-                except Exception:
-                    pass  # Don't let memory extraction block condensation
 
             condensed_text = self._conversation._messages_to_text(to_condense)
             if not condensed_text.strip():
@@ -274,7 +425,7 @@ class ConversationCondenser:
             existing_summary_section = ""
             if self._conversation.conversation_summary:
                 existing_summary_section = (
-                    "EXISTING SUMMARY (incorporate and update — do not repeat verbatim):\n"
+                    CONDENSE_SUMMARY_HEADER
                     + self._conversation.conversation_summary
                     + "\n\n"
                 )
@@ -283,13 +434,9 @@ class ConversationCondenser:
             budget = local_ai_service.get_token_budget(system_prompt)
 
             user_prompt_prefix = (
-                existing_summary_section + "CONVERSATION TO SUMMARIZE:\n"
+                existing_summary_section + CONDENSE_CONVERSATION_HEADER
             )
-            user_prompt_suffix = (
-                "\n\n---\n"
-                "Now list every fact from the conversation above as bullet points.\n"
-                "Start from the FIRST message, end at the LAST. Include all names, preferences, and creative content. Never include secrets, API keys, credentials, passwords, or tokens:"
-            )
+            user_prompt_suffix = CONDENSE_SUFFIX
             prefix_suffix_tokens = count_tokens(user_prompt_prefix) + count_tokens(
                 user_prompt_suffix
             )
@@ -390,16 +537,21 @@ class ConversationCondenser:
                 0, estimated_original_tokens - estimated_summary_tokens
             )
 
+            self._reported_fixed_bulk = False
+            remaining_tokens = self._conversation.estimate_tokens()
             await printr.print_async(
-                f"Condensed {cutoff_index} messages into summary "
-                f"({len(summary)} chars, ~{estimated_summary_tokens} tokens). "
-                f"{len(self._conversation.messages)} messages remaining. "
-                f"~{estimated_tokens_saved} tokens saved. "
-                f"Token ratio: {self._support_token_ratio:.2f}.",
-                color=LogType.INFO,
-                server_only=True,
+                f"Conversation condensed: {cutoff_index} older messages "
+                f"(~{estimated_original_tokens:,} tokens) became a summary of "
+                f"~{estimated_summary_tokens:,} tokens. {len(self._conversation.messages)} "
+                f"recent messages (~{remaining_tokens:,} tokens) kept verbatim.",
+                color=LogType.LOCALMODEL,
                 source_name=self._wingman_name,
                 source=LogSource.WINGMAN,
+            )
+            printr.print(
+                f"Condensation token ratio: {self._support_token_ratio:.2f}.",
+                color=LogType.INFO,
+                server_only=True,
             )
 
             # Record stats for the broadcast in finally
@@ -490,8 +642,8 @@ class ConversationCondenser:
         for i, chunk in enumerate(chunks):
             user_prompt = (
                 f"{existing_summary_section if i == 0 else ''}"
-                f"CONVERSATION TO SUMMARIZE (part {i + 1}/{len(chunks)}):\n{chunk}\n\n"
-                "---\nList every fact from the above as bullet points. Include all names, preferences, and creative content. Never include secrets, API keys, credentials, passwords, or tokens:"
+                f"{condense_chunk_header(i + 1, len(chunks))}{chunk}"
+                f"{CONDENSE_SUFFIX}"
             )
 
             # Safety: if chunk input exceeds budget, truncate chunk text
@@ -503,8 +655,8 @@ class ConversationCondenser:
                     chunk = truncate_to_tokens(chunk, safe_text_tokens)
                     user_prompt = (
                         f"{existing_summary_section if i == 0 else ''}"
-                        f"CONVERSATION TO SUMMARIZE (part {i + 1}/{len(chunks)}):\n{chunk}\n\n"
-                        "---\nList every fact from the above as bullet points. Include all names, preferences, and creative content. Never include secrets, API keys, credentials, passwords, or tokens:"
+                        f"{condense_chunk_header(i + 1, len(chunks))}{chunk}"
+                        f"{CONDENSE_SUFFIX}"
                     )
                 await printr.print_async(
                     f"Chunk {i + 1}/{len(chunks)} exceeded context budget, truncated to fit.",
@@ -552,8 +704,8 @@ class ConversationCondenser:
         )
         merge_prompt = (
             f"{existing_summary_section}"
-            f"PARTIAL SUMMARIES TO MERGE:\n{combined}\n\n"
-            "Merge these into a single coherent summary. Keep all key facts:"
+            f"{CONDENSE_MERGE_HEADER}{combined}"
+            f"{CONDENSE_MERGE_SUFFIX}"
         )
 
         # Safety: truncate combined summaries if they exceed budget
@@ -564,8 +716,8 @@ class ConversationCondenser:
                 combined = truncate_to_tokens(combined, safe_combined)
                 merge_prompt = (
                     f"{existing_summary_section}"
-                    f"PARTIAL SUMMARIES TO MERGE:\n{combined}\n\n"
-                    "Merge these into a single coherent summary. Keep all key facts:"
+                    f"{CONDENSE_MERGE_HEADER}{combined}"
+                    f"{CONDENSE_MERGE_SUFFIX}"
                 )
             await printr.print_async(
                 f"Merge input exceeded context budget, truncated to fit.",

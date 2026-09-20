@@ -1,12 +1,13 @@
 import platform
 import subprocess
 import shutil
+import sys
 from typing import Optional
 from fastapi import APIRouter
 from api.enums import LogType
 from api.interface import SystemCore, SystemInfo
 
-LOCAL_VERSION = "3.1.2"
+LOCAL_VERSION = "3.2.3"
 
 
 class SystemManager:
@@ -112,5 +113,6 @@ class SystemManager:
                 version=LOCAL_VERSION,
                 cuda_available=self.is_cuda_available(),
                 gpu_name=self.get_gpu_name(),
+                is_dev=not getattr(sys, "frozen", False),
             ),
         )

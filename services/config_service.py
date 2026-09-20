@@ -2,7 +2,7 @@ import asyncio
 import shutil
 from typing import Optional
 from fastapi import APIRouter, HTTPException
-from api.enums import LogSource, LogType
+from api.enums import LogSource, LogType, McpAuthType
 from api.interface import (
     ConfigDirInfo,
     ConfigWithDirInfo,
@@ -12,6 +12,8 @@ from api.interface import (
     DuplicateWingmanResult,
     McpConfig,
     McpConnectResult,
+    McpOAuthStartResult,
+    McpOAuthStatus,
     McpServerConfig,
     McpServerState,
     NestedConfig,
@@ -24,6 +26,7 @@ from api.interface import (
     WingmanSkillState,
 )
 from services.config_manager import ConfigManager
+from services.mcp_oauth import get_oauth_service
 from services.config_migration_service import ConfigMigrationService
 from services.file import get_custom_skills_dir
 from services.module_manager import ModuleManager
@@ -192,6 +195,12 @@ class ConfigService:
             tags=tags,
         )
         self.router.add_api_route(
+            methods=["GET"],
+            path="/wingman-command-actions",
+            endpoint=self.get_wingman_command_actions,
+            tags=tags,
+        )
+        self.router.add_api_route(
             methods=["DELETE"],
             path="/custom-skills",
             endpoint=self.uninstall_skill,
@@ -228,6 +237,32 @@ class ConfigService:
             methods=["DELETE"],
             path="/mcp-servers",
             endpoint=self.delete_mcp_server,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/mcp-servers/tools/toggle",
+            endpoint=self.toggle_mcp_server_tool,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/mcp-servers/oauth/authorize",
+            endpoint=self.authorize_mcp_server,
+            response_model=McpOAuthStartResult,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/mcp-servers/oauth/status",
+            endpoint=self.get_mcp_oauth_status,
+            response_model=McpOAuthStatus,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/mcp-servers/oauth",
+            endpoint=self.revoke_mcp_oauth,
             tags=tags,
         )
         self.router.add_api_route(
@@ -335,6 +370,29 @@ class ConfigService:
             self.printr.toast_error(str(e))
             raise e
 
+    # GET /wingman-command-actions
+    async def get_wingman_command_actions(
+        self, config_name: str, wingman_name: str
+    ) -> list[dict]:
+        """List available @command_action functions for skills enabled on a wingman.
+
+        Sourced from the live wingman's prepared skills (so only enabled + eligible skills
+        appear). Returns [] if the wingman isn't currently active.
+        """
+        try:
+            actions: list[dict] = []
+            wingman = (
+                self.tower.get_wingman_by_name(wingman_name) if self.tower else None
+            )
+            if not wingman:
+                return []
+            for skill in wingman.skill_manager.skills:
+                actions.extend(skill.list_command_actions())
+            return actions
+        except Exception as e:
+            self.printr.toast_error(str(e))
+            return []
+
     # POST /wingman-skills/toggle
     async def toggle_wingman_skill(
         self,
@@ -403,6 +461,64 @@ class ConfigService:
         except Exception as e:
             self.printr.toast_error(str(e))
             raise e
+
+    async def disable_ineligible_skills(self, ineligible_skill_names: set[str]) -> None:
+        """Remove legacy/incompatible skills from every Wingman's discoverable_skills and persist.
+
+        Called once at startup (after the SkillCatalog scan). The catalog already refuses to LOAD
+        these skills; this keeps the saved config honest so the UI shows them disabled. Skills that
+        are merely platform-incompatible are NOT in this set (the catalog marks them eligible), so
+        they are left untouched.
+        """
+        if not ineligible_skill_names or not self.current_config_dir:
+            return
+        config_dir = self.current_config_dir
+        try:
+            wingman_files = self.config_manager.get_wingmen_configs(config_dir)
+        except Exception as e:
+            self.printr.print(
+                f"disable_ineligible_skills: could not enumerate wingmen: {e}",
+                color=LogType.ERROR,
+                server_only=True,
+            )
+            return
+        for wingman_file in wingman_files:
+            try:
+                wingman_config = self.config_manager.load_wingman_config(
+                    config_dir=config_dir, wingman_file=wingman_file
+                )
+                if not wingman_config or not wingman_config.discoverable_skills:
+                    continue
+                to_remove = [
+                    name
+                    for name in wingman_config.discoverable_skills
+                    if name in ineligible_skill_names
+                ]
+                if not to_remove:
+                    continue
+                for name in to_remove:
+                    wingman_config.discoverable_skills.remove(name)
+                # Pure disk write (config_manager, not config_service): this runs during
+                # initialize_tower BEFORE the tower exists, so the tower-gated
+                # config_service.save_wingman_config would reject it. We only need to persist
+                # the discoverable_skills change; no live-wingman reinit is needed (the
+                # per-Wingman eligibility gate already prevents loading these skills).
+                self.config_manager.save_wingman_config(
+                    config_dir=config_dir,
+                    wingman_file=wingman_file,
+                    wingman_config=wingman_config,
+                )
+                self.printr.print(
+                    f"Auto-disabled incompatible skill(s) {to_remove} in wingman '{wingman_file.name}'.",
+                    color=LogType.WARNING,
+                    server_only=True,
+                )
+            except Exception as e:
+                self.printr.print(
+                    f"disable_ineligible_skills: failed for '{getattr(wingman_file, 'name', '?')}': {e}",
+                    color=LogType.ERROR,
+                    server_only=True,
+                )
 
     # DELETE /custom-skills
     async def uninstall_skill(self, skill_name: str):
@@ -477,14 +593,8 @@ class ConfigService:
 
             # 4. Remove skill from ALL wingman configs across ALL config dirs
             for config_dir in self.config_manager.get_config_dirs():
-                if config_dir.is_deleted:
-                    continue
-
                 wingman_files = self.config_manager.get_wingmen_configs(config_dir)
                 for wingman_file in wingman_files:
-                    if wingman_file.is_deleted:
-                        continue
-
                     try:
                         wingman_config = self.config_manager.load_wingman_config(
                             config_dir=config_dir, wingman_file=wingman_file
@@ -655,6 +765,12 @@ class ConfigService:
                     else:
                         error = registry.get_server_error(mcp_server.name)
 
+                # Only OAuth servers carry a status. For everything else it stays
+                # None, so the UI has nothing to render and nothing to explain.
+                oauth = None
+                if mcp_server.auth == McpAuthType.OAUTH:
+                    oauth = get_oauth_service().status(mcp_server)
+
                 result.append(
                     McpServerState(
                         config=mcp_server,
@@ -662,6 +778,7 @@ class ConfigService:
                         is_connected=is_connected,
                         tools=tools,
                         error=error,
+                        oauth=oauth,
                     )
                 )
 
@@ -836,6 +953,107 @@ class ConfigService:
             self.printr.toast_error(str(e))
             raise e
 
+    def _find_mcp_server(self, mcp_name: str) -> Optional[McpServerConfig]:
+        """The configured server by name, or None."""
+        mcp_config = self.config_manager.mcp_config
+        if not mcp_config or not mcp_config.servers:
+            return None
+        return next((s for s in mcp_config.servers if s.name == mcp_name), None)
+
+    # POST /mcp-servers/tools/toggle
+    async def toggle_mcp_server_tool(
+        self, mcp_name: str, tool_name: str, enabled: bool
+    ):
+        """Switch one of a server's tools on or off for the model.
+
+        The list lives on the server in mcp.yaml, so it applies to every wingman
+        using that server. Live connections are updated in place rather than
+        reconnected: one switch must not tear down every server of every wingman.
+        """
+        mcp_server = self._find_mcp_server(mcp_name)
+        if not mcp_server:
+            self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+            return
+
+        disabled = [t for t in (mcp_server.disabled_tools or []) if t != tool_name]
+        if not enabled:
+            disabled.append(tool_name)
+        mcp_server.disabled_tools = disabled or None
+        self.config_manager.save_mcp_config()
+
+        if self.tower:
+            for wingman in self.tower.wingmen:
+                registry = getattr(wingman, "mcp_registry", None)
+                if registry:
+                    await registry.set_disabled_tools(mcp_name, disabled)
+
+    # POST /mcp-servers/oauth/authorize
+    async def authorize_mcp_server(self, mcp_name: str) -> McpOAuthStartResult:
+        """Begin an OAuth flow and hand back the consent page to open.
+
+        This returns as soon as there is a URL to show. The flow itself keeps
+        running in Core, waiting for the browser to come back to
+        `/mcp/oauth/callback`, and announces its outcome with an
+        `mcp_oauth_state_changed` command.
+        """
+        mcp_server = self._find_mcp_server(mcp_name)
+        if not mcp_server:
+            return McpOAuthStartResult(
+                success=False,
+                server_name=mcp_name,
+                error=f"MCP server '{mcp_name}' not found.",
+            )
+
+        result = await get_oauth_service().start_authorization(mcp_server)
+        if not result.success and result.error:
+            self.printr.toast_error(result.error)
+        return result
+
+    # GET /mcp-servers/oauth/status
+    async def get_mcp_oauth_status(self, mcp_name: str) -> McpOAuthStatus:
+        """Whether Wingman holds a token for this server. Touches no network."""
+        mcp_server = self._find_mcp_server(mcp_name)
+        if not mcp_server:
+            return McpOAuthStatus(server_name=mcp_name, is_authorized=False)
+        return get_oauth_service().status(mcp_server)
+
+    # DELETE /mcp-servers/oauth
+    async def revoke_mcp_oauth(self, mcp_name: str):
+        """Forget the stored token and reconnect every wingman using this server.
+
+        Reconnecting matters: without it a wingman keeps a live connection built
+        on the token that was just discarded, and the server looks authorized
+        until the next restart.
+        """
+        mcp_server = self._find_mcp_server(mcp_name)
+        if not mcp_server:
+            self.printr.toast_error(f"MCP server '{mcp_name}' not found.")
+            return
+
+        await get_oauth_service().revoke(mcp_server)
+        await self.reconnect_wingmen_using_mcp(mcp_name)
+
+        self.printr.toast(
+            f"Signed out of '{mcp_server.display_name or mcp_server.name}'."
+        )
+
+    async def reconnect_wingmen_using_mcp(self, mcp_name: str) -> None:
+        """Rebuild the MCP connections of every wingman that has this server enabled.
+
+        Called after a token is stored or discarded. A wingman that failed to
+        connect at boot because the server was not yet authorized is not in the
+        registry at all, and one that connected on a token just revoked still
+        is; either way the state it shows is wrong until it connects again.
+        Wingmen that do not use the server are left alone, so their other
+        servers are not torn down for nothing.
+        """
+        if not self.tower:
+            return
+        for wingman in self.tower.wingmen:
+            discoverable = getattr(wingman.config, "discoverable_mcps", None) or []
+            if mcp_name in discoverable and hasattr(wingman, "init_mcps"):
+                await wingman.init_mcps()
+
     # POST /wingman-mcps/connect
     async def connect_wingman_mcp(
         self,
@@ -1009,9 +1227,12 @@ class ConfigService:
     async def create_config(
         self, config_name: str, template: Optional[ConfigDirInfo] = None
     ):
-        new_dir = self.config_manager.create_config(
-            config_name=config_name, template=template
-        )
+        try:
+            new_dir = self.config_manager.create_config(
+                config_name=config_name, template=template
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         await self.load_config(new_dir)
 
     # POST config/duplicate
@@ -1021,6 +1242,8 @@ class ConfigService:
                 source_config_dir=request.source_config_dir,
                 new_name=request.new_name,
             )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e)) from e
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e)) from e
         except FileExistsError as e:
@@ -1500,9 +1723,6 @@ class ConfigService:
         made_changes = False
 
         for wingman_config_file in wingman_config_files:
-            if wingman_config_file.is_deleted:
-                continue
-
             wingman_config = config.wingmen[wingman_config_file.name]
 
             if wingman_config_file.name == wingman_name:

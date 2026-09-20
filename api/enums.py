@@ -90,16 +90,6 @@ class CustomPropertyType(Enum):
     RANGE_SLIDER = "range_slider"
 
 
-class AzureApiVersion(Enum):
-    A2023_12_01_PREVIEW = "2023-12-01-preview"
-    A2024_02_15_PREVIEW = "2024-02-15-preview"
-
-
-class AzureRegion(Enum):
-    WESTEUROPE = "westeurope"
-    NORTHCENTRALUS = "northcentralus"
-
-
 class TtsVoiceGender(Enum):
     UNKNOWN = "Unknown"
     MALE = "Male"
@@ -132,7 +122,6 @@ class TtsProvider(Enum):
     OPENAI = "openai"
     ELEVENLABS = "elevenlabs"
     EDGE_TTS = "edge_tts"
-    AZURE = "azure"
     XVASYNTH = "xvasynth"
     WINGMAN_PRO = "wingman_pro"
     OPENAI_COMPATIBLE = "openai_compatible"
@@ -142,24 +131,30 @@ class TtsProvider(Enum):
 
 
 class SttProvider(Enum):
-    OPENAI = "openai"
-    AZURE = "azure"
-    AZURE_SPEECH = "azure_speech"
-    WHISPERCPP = "whispercpp"
-    FASTER_WHISPER = "fasterwhisper"
+    """Parakeet on this machine or on a server of the user's; the
+    subscription's cloud transcription otherwise."""
+
     PARAKEET = "parakeet"
     WINGMAN_PRO = "wingman_pro"
-    GROQ = "groq"
 
 
-class VoiceActivationSttProvider(Enum):
-    OPENAI = "openai"
-    AZURE = "azure"
-    WHISPERCPP = "whispercpp"
-    FASTER_WHISPER = "fasterwhisper"
-    PARAKEET = "parakeet"
-    WINGMAN_PRO = "wingman_pro"
-    GROQ = "groq"
+class LocalAiMode(Enum):
+    """Where the support model runs.
+
+    CLOUD is the default: the model behind memory, summarisation and tool-response
+    compression runs on our backend, which costs the user no RAM and no CPU while
+    a game is running. LOCAL is llama.cpp managed by Core on this machine. SERVER
+    is a llama-server the user runs somewhere else.
+
+    Embeddings follow: SERVER puts them on the remote llama-server, the other two
+    keep them on this machine. The vector database is local either way, and an
+    embedding computed by a different model would not be comparable to the ones
+    already stored.
+    """
+
+    CLOUD = "cloud"
+    LOCAL = "local"
+    SERVER = "server"
 
 
 class ConversationProvider(Enum):
@@ -168,7 +163,6 @@ class ConversationProvider(Enum):
     GROQ = "groq"
     OPENROUTER = "openrouter"
     LOCAL_LLM = "local_llm"
-    AZURE = "azure"
     WINGMAN_PRO = "wingman_pro"
     GOOGLE = "google"
     CEREBRAS = "cerebras"
@@ -193,13 +187,10 @@ class RecordingDevice(Enum):
     JOYSTICK = "joystick"
 
 
-class WingmanProSttProvider(Enum):
-    WHISPER = "whisper"
-    AZURE_SPEECH = "azure_speech"
-
-
 class WingmanProTtsProvider(Enum):
-    AZURE = "azure"
+    # One provider since 2026-09-11. OpenAI's voices cost 15 dollars per million
+    # characters against Inworld's 5, and the reason they were kept — Inworld
+    # having two poor German voices — went away when Inworld shipped 17.
     INWORLD = "inworld"
 
 
@@ -209,6 +200,20 @@ class McpTransportType(Enum):
     HTTP = "http"
     STDIO = "stdio"
     SSE = "sse"
+
+
+class McpAuthType(Enum):
+    """How Wingman authenticates against an MCP server.
+
+    NONE is the default and sends nothing. API_KEY is what Wingman did before
+    3.2.1: the secret `mcp_<name>` goes out as a bearer header. OAUTH runs an
+    authorization code grant with PKCE and sends the resulting access token,
+    refreshing it when it expires.
+    """
+
+    NONE = "none"
+    API_KEY = "api_key"
+    OAUTH = "oauth"
 
 
 # Pydantic models for enums
@@ -244,14 +249,6 @@ class CustomPropertyTypeEnumModel(BaseEnumModel):
     property_type: CustomPropertyType
 
 
-class AzureApiVersionEnumModel(BaseEnumModel):
-    api_version: AzureApiVersion
-
-
-class AzureRegionEnumModel(BaseEnumModel):
-    region: AzureRegion
-
-
 class TtsVoiceGenderEnumModel(BaseEnumModel):
     gender: TtsVoiceGender
 
@@ -272,10 +269,6 @@ class SttProviderEnumModel(BaseEnumModel):
     stt_provider: SttProvider
 
 
-class VoiceActivationSttProviderEnumModel(BaseEnumModel):
-    stt_provider: VoiceActivationSttProvider
-
-
 class ConversationProviderEnumModel(BaseEnumModel):
     conversation_provider: ConversationProvider
 
@@ -292,16 +285,16 @@ class RecordingDeviceModel(BaseEnumModel):
     recording_device: RecordingDevice
 
 
-class WingmanProSttProviderModel(BaseEnumModel):
-    stt_provider: WingmanProSttProvider
-
-
 class WingmanProTtsProviderModel(BaseEnumModel):
     tts_provider: WingmanProTtsProvider
 
 
 class CoreStateEnumModel(BaseEnumModel):
     core_state: CoreState
+
+
+class LocalAiModeEnumModel(BaseEnumModel):
+    local_ai_mode: LocalAiMode
 
 
 # Add all additional Pydantic models for enums as needed
@@ -315,20 +308,17 @@ ENUM_TYPES = {
     "WingmanInitializationErrorType": WingmanInitializationErrorTypeModel,
     "CommandTag": CommandTagEnumModel,
     "CustomPropertyType": CustomPropertyTypeEnumModel,
-    "AzureApiVersion": AzureApiVersionEnumModel,
-    "AzureRegion": AzureRegionEnumModel,
     "TtsVoiceGender": TtsVoiceGenderEnumModel,
     "SoundEffect": SoundEffectEnumModel,
     "TtsProvider": TtsProviderEnumModel,
     "SttProvider": SttProviderEnumModel,
-    "VoiceActivationSttProvider": VoiceActivationSttProviderEnumModel,
     "ConversationProvider": ConversationProviderEnumModel,
     "KeyboardRecordingType": KeyboardRecordingTypeModel,
-    "WingmanProSttProvider": WingmanProSttProviderModel,
     "WingmanProTtsProvider": WingmanProTtsProviderModel,
     "PerplexityModel": PerplexityModelEnumModel,
     "RecordingDevice": RecordingDeviceModel,
     "CoreState": CoreStateEnumModel,
+    "LocalAiMode": LocalAiModeEnumModel,
     # Add new enums here as key-value pairs
 }
 

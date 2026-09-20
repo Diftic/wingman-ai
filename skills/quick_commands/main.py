@@ -3,11 +3,10 @@ import json
 import datetime
 from typing import TYPE_CHECKING
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
-from api.enums import LogType
 from skills.skill_base import Skill
 
 if TYPE_CHECKING:
-    from wingmen.open_ai_wingman import OpenAiWingman
+    from wingmen.wingman_context import WingmanContext
 
 
 class QuickCommands(Skill):
@@ -16,7 +15,7 @@ class QuickCommands(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "OpenAiWingman",
+        wingman: "WingmanContext",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
@@ -36,7 +35,7 @@ class QuickCommands(Skill):
             "quick_commands_learning_rule_count", errors
         )
 
-        self.threaded_execution(self._init_skill)
+        self.wingman.run_in_thread(self._init_skill)
         return errors
 
     def _get_rule_count(self) -> int:
@@ -59,7 +58,7 @@ class QuickCommands(Skill):
             added = True
 
         if added:
-            await self.wingman.save_commands()
+            await self.wingman.commands.save()
 
     async def _add_instant_activation_phrase(
         self, phrase: str, commands: list[str], save_wingman: bool = True
@@ -69,7 +68,7 @@ class QuickCommands(Skill):
         phrase_lower = phrase.lower()
 
         for command in commands:
-            command = self.wingman.get_command(command)
+            command = self.wingman.commands.get(command)
             if not command.instant_activation:
                 command.instant_activation = []
 
@@ -79,13 +78,13 @@ class QuickCommands(Skill):
                 changed = True
 
         if changed and save_wingman:
-            await self.wingman.save_commands()
+            await self.wingman.commands.save()
 
     async def on_add_assistant_message(self, message: str, tool_calls: list) -> None:
         """Hook to start learning process."""
         if tool_calls:
-            self.threaded_execution(
-                self._process_messages, tool_calls, self.wingman.messages[-1]
+            self.wingman.run_in_thread(
+                self._process_messages, tool_calls, self.wingman.conversation.history()[-1]
             )
 
     async def _process_messages(self, tool_calls, last_message) -> None:
@@ -132,7 +131,7 @@ class QuickCommands(Skill):
         pops = []
         for phrase, commands in self.learning_learned.items():
             for command in commands:
-                if not self.wingman.get_command(command):
+                if not self.wingman.commands.get(command):
                     pops.append(phrase)
         if pops:
             for phrase in pops:
@@ -143,7 +142,7 @@ class QuickCommands(Skill):
         for phrase in self.learning_data.keys():
             commands = self.learning_data[phrase]["commands"]
             for command in commands:
-                if not self.wingman.get_command(command):
+                if not self.wingman.commands.get(command):
                     pops.append(phrase)
                 elif self.learning_data[phrase]["count"] >= self._get_rule_count():
                     finished.append(phrase)
@@ -168,7 +167,7 @@ class QuickCommands(Skill):
 
         # get and check the command
         for command_name in command_names:
-            command = self.wingman.get_command(command_name)
+            command = self.wingman.commands.get(command_name)
             if not command:
                 # AI probably hallucinated
                 return
@@ -208,10 +207,7 @@ class QuickCommands(Skill):
 
         commands = self.learning_data[phrase]["commands"]
 
-        messages = [
-            {
-                "role": "system",
-                "content": """
+        system = """
                     I'll give you one or multiple commands and a phrase. You have to decide, if the commands fit to the phrase or not.
                     Return 'yes' if the commands fit to the phrase and 'no' if they dont.
 
@@ -222,19 +218,15 @@ class QuickCommands(Skill):
                     - Phrase: "Yes, please." Command: "enableShields" -> no
                     - Phrase: "We are being attacked by rockets." Command: "throwCountermessures" -> yes
                     - Phrase: "Its way too dark in here." Command: "toggleLight" -> yes
-                """,
-            },
-            {
-                "role": "user",
-                "content": f"Phrase: '{phrase}' Commands: '{', '.join(commands)}'",
-            },
-        ]
-        completion = await self.llm_call(messages)
-        answer = completion.choices[0].message.content or ""
+                """
+        response = await self.wingman.ai.generate(
+            f"Phrase: '{phrase}' Commands: '{', '.join(commands)}'",
+            system=system,
+        )
+        answer = response or ""
         if answer.lower() == "yes":
-            await self.printr.print_async(
+            self.log.info(
                 f"Instant activation phrase for '{', '.join(commands)}' learned.",
-                color=LogType.INFO,
             )
             self.learning_learned[phrase] = commands
             self.learning_data.pop(phrase)
@@ -246,9 +238,8 @@ class QuickCommands(Skill):
 
     async def _add_to_blacklist(self, phrase: str) -> None:
         """Add a phrase to the blacklist."""
-        await self.printr.print_async(
+        self.log.info(
             f"Added phrase to blacklist: '{phrase if len(phrase) <= 25 else phrase[:25]+'...'}'",
-            color=LogType.INFO,
         )
         self.learning_blacklist.append(phrase)
         self.learning_data.pop(phrase)
@@ -272,9 +263,8 @@ class QuickCommands(Skill):
             try:
                 data = json.load(file)
             except json.JSONDecodeError:
-                await self.printr.print_async(
+                self.log.error(
                     "Could not read learning data file. Resetting learning data..",
-                    color=LogType.ERROR,
                 )
                 # if file wasnt empty, save it as backup
                 if file.read():

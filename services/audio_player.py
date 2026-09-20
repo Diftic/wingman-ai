@@ -10,12 +10,14 @@ import sounddevice as sd
 from scipy.signal import resample
 from api.enums import LogType, SoundEffect
 from api.interface import SoundConfig
+from services.audio.input import device_blocksize
+from services.audio.resample import RateConverter
 from services.file import get_writable_dir
 from services.printr import Printr
 from services.pub_sub import PubSub
 from services.sound_effects import (
     get_additional_layer_file,
-    get_azure_workaround_gain_boost,
+    get_streaming_gain_boost,
     get_sound_effects,
 )
 
@@ -38,6 +40,11 @@ class AudioPlayer:
         self.wingman_name = ""
         self.playback_events = PubSub()
         self.stream_event = PubSub()
+        # Mic / voice-activation state bus. Core is the sole writer.
+        self.voice_events = PubSub()
+        self.voice_state = None
+        # What is being spoken right now; set by Wingman.play_to_user.
+        self.speaking_text = ""
         self.on_playback_started = on_playback_started
         self.on_playback_finished = on_playback_finished
         self.sample_dir = path.join(
@@ -47,6 +54,18 @@ class AudioPlayer:
     def set_event_loop(self, loop: asyncio.AbstractEventLoop):
         self.event_loop = loop
 
+    @staticmethod
+    def output_rate(sample_rate: int) -> int:
+        """The rate the speakers are opened at: their own. Opening them at the
+        audio's rate switches the device, and on a duplex device (an EVO4, a
+        headset) that cuts the microphone off the moment a wingman starts to
+        speak. The audio is converted instead."""
+        try:
+            info = sd.query_devices(sd.default.device[1], kind="output")
+            return int(round(float(info["default_samplerate"]))) or int(sample_rate)
+        except Exception:
+            return int(sample_rate)
+
     def start_playback(
         self,
         audio,
@@ -55,6 +74,11 @@ class AudioPlayer:
         finished_callback,
         volume: list[float] | float,
     ):
+        device_rate = self.output_rate(sample_rate)
+        if device_rate != sample_rate:
+            audio = self._resample_audio(audio, sample_rate, device_rate)
+            sample_rate = device_rate
+
         def callback(outdata, frames, time, status):
             # this is a super hacky way to update volume while the playback is running
             local_volume = volume[0] if isinstance(volume, list) else volume
@@ -125,6 +149,7 @@ class AudioPlayer:
         self.stream = sd.OutputStream(
             samplerate=sample_rate,
             channels=channels,
+            blocksize=device_blocksize(sample_rate),
             callback=callback,
             finished_callback=finished_callback,
         )
@@ -413,7 +438,7 @@ class AudioPlayer:
                 mix_layer_file = get_additional_layer_file(effect)
                 # if we boost the actual audio, we need to boost the mixed layer as well
                 if use_gain_boost:
-                    mix_layer_gain_boost_db += get_azure_workaround_gain_boost(effect)
+                    mix_layer_gain_boost_db += get_streaming_gain_boost(effect)
 
         if mix_layer_file:
             noise_audio, noise_sample_rate = self.get_audio_from_file(
@@ -449,9 +474,13 @@ class AudioPlayer:
 
         def callback(outdata, frames, time, status):
             nonlocal buffer, stream_finished, data_received, mixed_pos
+            # Silence first, always. The stream starts before the voice
+            # provider has delivered its first chunk, and PortAudio hands
+            # the callback a buffer that still holds the previous playback:
+            # left as it is, that plays as a burst of noise.
+            outdata[:] = bytes(len(outdata))
             if data_received and len(buffer) == 0:
                 stream_finished = True
-                outdata[:] = bytes(len(outdata))  # Fill the buffer with zeros
                 return
 
             if len(buffer) > 0:
@@ -485,10 +514,23 @@ class AudioPlayer:
                 outdata[: len(data_chunk_bytes)] = data_chunk_bytes[: len(outdata)]
                 buffer = buffer[num_elements * byte_size :]
 
+        device_rate = self.output_rate(sample_rate)
+        converters = [RateConverter(sample_rate, device_rate) for _ in range(channels)]
+
+        def to_device_rate(chunk: np.ndarray) -> np.ndarray:
+            if device_rate == sample_rate:
+                return chunk
+            if channels == 1:
+                return converters[0].convert(chunk)
+            planes = chunk.reshape(-1, channels)
+            converted = [converters[c].convert(planes[:, c]) for c in range(channels)]
+            return np.stack(converted, axis=1).reshape(-1)
+
         with sd.RawOutputStream(
-            samplerate=sample_rate,
+            samplerate=device_rate,
             channels=channels,
             dtype=dtype,
+            blocksize=device_blocksize(device_rate),
             callback=callback,
         ) as stream:
             if self.is_playing:
@@ -496,6 +538,9 @@ class AudioPlayer:
 
             self.raw_stream = stream
             self.is_playing = True
+            # stop_playback() reports "finished" with self.wingman_name, so it
+            # must track the raw-stream playback too, not just start_playback().
+            self.wingman_name = wingman_name
             await self.notify_playback_started(wingman_name)
 
             if config.play_beep:
@@ -517,7 +562,7 @@ class AudioPlayer:
             )
             audio_buffer = bytearray(buffer_size)
             filled_size = buffer_callback(audio_buffer)
-            while filled_size > 0:
+            while filled_size > 0 and self.raw_stream is stream:
                 data_in_numpy = np.frombuffer(
                     audio_buffer[:filled_size], dtype=dtype
                 ).astype(np.float32)
@@ -539,8 +584,10 @@ class AudioPlayer:
                     preview_chunks.append(data_in_numpy)
 
                 data_in_numpy = data_in_numpy * config.volume
+                # Listeners on the event (the client, an ESP32) get the audio
+                # as the provider made it; the speakers get it at their rate.
                 processed_buffer = data_in_numpy.astype(dtype).tobytes()
-                buffer.extend(processed_buffer)
+                buffer.extend(to_device_rate(data_in_numpy).astype(dtype).tobytes())
                 await self.stream_event.publish("audio", processed_buffer)
                 filled_size = buffer_callback(audio_buffer)
 
@@ -559,8 +606,17 @@ class AudioPlayer:
                     self._save_preview_audio(full.astype(np.float32), sample_rate)
                 except Exception:
                     pass
-            while not stream_finished:
-                sd.sleep(100)
+            # stop_playback() detaches raw_stream and kills the audio callback,
+            # so stream_finished would never turn True — bail out then. Async
+            # sleep keeps the owning event loop responsive while draining.
+            while not stream_finished and self.raw_stream is stream:
+                await asyncio.sleep(0.1)
+
+            if self.raw_stream is not stream:
+                # Interrupted via stop_playback(), which already reset state
+                # and notified listeners. Skip the trailing beeps.
+                return
+            self.raw_stream = None
 
             contains_high_end_radio = SoundEffect.HIGH_END_RADIO in config.effects
             if contains_high_end_radio:
