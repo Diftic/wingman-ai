@@ -99,12 +99,38 @@ class VoiceActivationMutedCommand(WebSocketCommandModel):
     muted: bool
 
 
+class SttVocabularyChangedCommand(WebSocketCommandModel):
+    """Sent when the vocabulary changes outside the settings page: a wingman
+    tool taught a spelling, or the names were seeded after a login. The page
+    holds the block it loaded and would write the old list back without this."""
+
+    command: Literal["stt_vocabulary_changed"] = "stt_vocabulary_changed"
+    vocabulary: list[str]
+
+
 class McpStateChangedCommand(WebSocketCommandModel):
     """Sent when MCP server connection state changes (connected/disconnected)."""
 
     command: Literal["mcp_state_changed"] = "mcp_state_changed"
     wingman_name: str
     """The wingman whose MCP state changed."""
+
+
+class McpOAuthStateChangedCommand(WebSocketCommandModel):
+    """Sent when an MCP OAuth flow finishes, either way.
+
+    The client starts a flow and then has nothing to poll: the user is in a
+    browser, and the token arrives on a completely different route. This is how
+    the settings UI learns it can stop showing a spinner.
+    """
+
+    command: Literal["mcp_oauth_state_changed"] = "mcp_oauth_state_changed"
+    mcp_name: str
+    """The MCP server whose authorization state changed."""
+    is_authorized: bool
+    """True when a token was stored, False when the attempt failed."""
+    error: Optional[str] = None
+    """Why it failed, when it did."""
 
 
 class AudioLibraryPlaybackFinishedCommand(WebSocketCommandModel):
@@ -164,3 +190,27 @@ class ConversationTokenUsageCommand(WebSocketCommandModel):
     """Tokens in the LLM response."""
     is_local: bool = False
     """True for LOCAL_LLM provider (free, not billed)."""
+    history_tokens: int = 0
+    """Estimated tokens of the conversation history inside ``prompt_tokens`` — the
+    part condensation and trimming can shrink. The rest is system prompt, memory
+    and tool definitions."""
+    summary_tokens: int = 0
+    """Estimated tokens of the running conversation summary, if any."""
+
+
+class SkillRegisteredCommand(WebSocketCommandModel):
+    """Sent when a skill registers during Core startup."""
+
+    command: Literal["skill_registered"] = "skill_registered"
+    skill: str
+    """Name of the skill that registered."""
+    origin: str
+    """Where the skill came from: 'bundled' | 'custom'."""
+    outcome: str
+    """Registration outcome: 'ok' | 'failed' | 'quarantined' | 'legacy_v2'."""
+    id_hash: str
+    """Hash of the skill's identity."""
+    version: Optional[str] = None
+    """Skill version if available."""
+    api_version: Optional[int] = None
+    """Skill API version if available."""

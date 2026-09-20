@@ -4,7 +4,7 @@ PyInstaller spec file for WingmanAI Core
 
 This spec file bundles:
 - The WingmanAI Core Python application
-- NVIDIA CUDA libraries for GPU-accelerated speech recognition (FasterWhisper/ctranslate2)
+- NVIDIA CUDA libraries for GPU-accelerated speech recognition (Parakeet via onnxruntime-gpu)
 - All required data files and dependencies
 
 NVIDIA CUDA Libraries:
@@ -32,8 +32,12 @@ else:
 # ============================================================================
 # Format: (source, destination_folder)
 datas = [
-    # Azure Speech SDK
-    (f'{SITE_PACKAGES}/azure/cognitiveservices/speech', 'azure/cognitiveservices/speech'),
+    # The Azure Speech SDK used to be bundled here. It went out with the provider
+    # on 2026-09-11 and `azure-cognitiveservices-speech` is no longer in
+    # requirements.txt. Leaving the entry would have failed the first CI build:
+    # PyInstaller aborts on an --add-data source that does not exist, and CI
+    # installs the venv from requirements.txt, so the path is simply not there.
+    # It survived locally only because the old package is still in the dev venv.
 
     # Application assets and resources
     ('assets', 'assets'),
@@ -41,7 +45,11 @@ datas = [
     ('wingmen', 'wingmen'),
     ('skills', 'skills'),
     ('templates/configs', 'templates/configs'),
+    # Vocabulary presets for the speech correction, one text file per game.
+    ('templates/vocabulary', 'templates/vocabulary'),
     ('audio_samples', 'audio_samples'),
+    # Silero VAD, runs on the onnxruntime that Parakeet already needs.
+    ('audio_models', 'audio_models'),
     ('prompts', 'prompts'),
     ('LICENSE', '.'),
 ]
@@ -83,13 +91,6 @@ if sys.platform != 'darwin':
             print(f"Collected DLLs from {pkg}")
         except Exception as e:
             print(f"Warning: Could not collect {pkg} DLLs: {e}")
-
-# Collect ctranslate2 binaries
-try:
-    binaries += collect_dynamic_libs('ctranslate2')
-    print("Collected DLLs from ctranslate2")
-except Exception as e:
-    print(f"Warning: Could not collect ctranslate2 DLLs: {e}")
 
 # ============================================================================
 # HIDDEN IMPORTS
@@ -170,7 +171,7 @@ hiddenimports = [
     'truck_telemetry',
     'pyproj',
 
-    # FasterWhisper / STT dependencies
+    # STT dependencies
     'numba',
     'llvmlite',
     'tokenizers',
@@ -183,9 +184,6 @@ hiddenimports = [
     'nvidia.cuda_runtime',
     'nvidia.cudnn',
     'nvidia.cuda_nvrtc',
-
-    # ctranslate2 for FasterWhisper
-    'ctranslate2',
 
 	# for pocket-tts
 	'engineio.async_drivers.threading',
@@ -244,11 +242,38 @@ binaries += tiktoken_ext_binaries
 hiddenimports += tiktoken_ext_hidden
 hiddenimports += ['tiktoken_ext.openai_public']
 
+# rapidfuzz picks its compiled module (plain, AVX2) at import time inside a
+# try/except. The static analysis usually sees through that, but the wingman
+# name match in services/tower.py must not depend on "usually".
+rf_datas, rf_binaries, rf_hidden = collect_all('rapidfuzz')
+datas += rf_datas
+binaries += rf_binaries
+hiddenimports += rf_hidden
+
 # Collect all onnx-asr (Parakeet STT)
 onnx_asr_datas, onnx_asr_binaries, onnx_asr_hidden = collect_all('onnx_asr')
 datas += onnx_asr_datas
 binaries += onnx_asr_binaries
 hiddenimports += onnx_asr_hidden
+
+# Config migration modules (services/migrations/migration_*.py) are discovered
+# from the filesystem and imported via importlib at runtime, so static analysis
+# never traces them — or anything only they import. 3.1.5 shipped without the
+# stdlib module 'filecmp' (imported only by migration_313_to_314), which broke
+# the 3.1.3 -> 3.1.5 upgrade chain in every packaged build while working fine
+# from source. Feed every migration module to the analysis so its imports are
+# bundled like normal code.
+migration_hidden = sorted(
+    f"services.migrations.{mig_file[:-3]}"
+    for mig_file in os.listdir(os.path.join('services', 'migrations'))
+    if mig_file.startswith('migration_') and mig_file.endswith('.py')
+)
+if len(migration_hidden) < 14:
+    raise SystemExit(
+        f"Migration module enumeration looks incomplete ({len(migration_hidden)} found, "
+        "expected at least 14) — refusing to ship a bundle that cannot migrate user configs."
+    )
+hiddenimports += migration_hidden
 
 # ============================================================================
 # ANALYSIS
@@ -266,6 +291,20 @@ a = Analysis(
     noarchive=False,
     optimize=0,
 )
+
+# Verify the analyzed module graph contains every migration module and the one
+# dependency that has already bitten us. A module missing here means the frozen
+# build would fail to load a migration at runtime and break the upgrade chain.
+pure_names = {entry[0] for entry in a.pure}
+missing_migration_modules = [
+    mod for mod in migration_hidden + ['filecmp'] if mod not in pure_names
+]
+if missing_migration_modules:
+    raise SystemExit(
+        "Migration modules/dependencies missing from the analyzed bundle: "
+        f"{', '.join(missing_migration_modules)} — refusing to ship a build "
+        "that cannot migrate user configs."
+    )
 
 # ============================================================================
 # PACKAGING

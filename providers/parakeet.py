@@ -1,22 +1,18 @@
 import gc
 import platform
 import threading
-from typing import TYPE_CHECKING, Optional
+from typing import Optional
 
 import requests
 
-from api.enums import LogType, SttProvider
+from api.enums import LogType
 from api.interface import (
     ParakeetSettings,
     ParakeetSttConfig,
     ParakeetTranscript,
     WingmanInitializationError,
 )
-from providers.interfaces import SttInterface, Transcript, stt_provider
 from services.printr import Printr
-
-if TYPE_CHECKING:
-    from api.interface import WingmanConfig
 
 
 EXECUTION_PROVIDER_MAP = {
@@ -156,12 +152,9 @@ class Parakeet:
             return None
 
         try:
-            # Cascade: wingman override first, else global settings default.
             # Empty/None = auto-detect (only consumed by Whisper/Canary models;
             # Parakeet TDT silently ignores the kwarg).
-            effective_language = (config.language or "").strip() or (
-                (self.settings.language or "").strip() or None
-            )
+            effective_language = (self.settings.language or "").strip() or None
             if effective_language:
                 text = self.model.recognize(filename, language=effective_language)
             else:
@@ -183,7 +176,12 @@ class Parakeet:
 
     def _transcribe_remote(self, filename: str) -> Optional[ParakeetTranscript]:
         """POST audio file to remote Parakeet server for transcription."""
-        host = (self.settings.host or "localhost").strip().rstrip("/")
+        host = (self.settings.host or "").strip().rstrip("/")
+        if not host:
+            self.printr.toast_error(
+                "Parakeet runs on a server of yours, but no host is set. Enter it in Settings > Speech-to-text."
+            )
+            return None
         if not host.startswith(("http://", "https://")):
             host = f"http://{host}"
         url = f"{host}:{self.settings.port}/v1/audio/transcriptions"
@@ -225,21 +223,3 @@ class Parakeet:
 
     def validate(self, errors: list[WingmanInitializationError]):
         pass
-
-
-@stt_provider(SttProvider.PARAKEET)
-class ParakeetStt(SttInterface):
-    """Per-wingman adapter around the shared Parakeet singleton."""
-
-    def __init__(self, shared: "Parakeet", config: "WingmanConfig"):
-        self._shared = shared
-        self._config = config
-
-    async def transcribe(self, filename: str) -> Transcript | None:
-        result = self._shared.transcribe(
-            config=self._config.parakeet,
-            filename=filename,
-        )
-        if result is None:
-            return None
-        return Transcript(text=result.text)

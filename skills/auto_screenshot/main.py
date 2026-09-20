@@ -1,16 +1,20 @@
 import os
-import time
 from datetime import datetime
 from typing import TYPE_CHECKING
 from mss import mss
-import pygetwindow as gw
 from PIL import Image
+
+try:
+    import pygetwindow as gw
+except (ImportError, NotImplementedError):
+    gw = None
+
 from api.enums import LogType
 from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.open_ai_wingman import OpenAiWingman
+    from wingmen.wingman_context import WingmanContext
 
 
 class AutoScreenshot(Skill):
@@ -18,7 +22,7 @@ class AutoScreenshot(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "OpenAiWingman",
+        wingman: "WingmanContext",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
@@ -34,7 +38,6 @@ class AutoScreenshot(Skill):
         return self.get_generated_files_dir()
 
     def _get_default_directory(self) -> str:
-        """Get default_directory property value just-in-time."""
         errors = []
         default_directory = self.retrieve_custom_property_value(
             "default_directory", errors
@@ -48,7 +51,6 @@ class AutoScreenshot(Skill):
         return default_directory
 
     def _get_display(self) -> int:
-        """Get display property value just-in-time."""
         errors = []
         return self.retrieve_custom_property_value("display", errors)
 
@@ -74,7 +76,10 @@ class AutoScreenshot(Skill):
                 color=LogType.INFO,
             )
 
+        window_bbox = None
         try:
+            if gw is None:
+                raise RuntimeError("pygetwindow not available on this platform")
             focused_window = gw.getActiveWindow()
 
             if self.settings.debug_mode:
@@ -83,12 +88,13 @@ class AutoScreenshot(Skill):
                     color=LogType.INFO,
                 )
 
-            window_bbox = {
-                "top": focused_window.top,
-                "left": focused_window.left,
-                "width": focused_window.width,
-                "height": focused_window.height,
-            }
+            if focused_window:
+                window_bbox = {
+                    "top": focused_window.top,
+                    "left": focused_window.left,
+                    "width": focused_window.width,
+                    "height": focused_window.height,
+                }
 
             if self.settings.debug_mode:
                 await self.printr.print_async(
@@ -97,12 +103,11 @@ class AutoScreenshot(Skill):
                 )
 
         except Exception as e:
-            if self.settings.debug_mode:
-                await self.printr.print_async(
-                    f"Failed to get focused window or window bbox using pygetwindow: {e}. Defaulting to full screen capture.",
-                    color=LogType.ERROR,
-                )
-            window_bbox = None
+            await self.printr.print_async(
+                f"Window detection unavailable ({e}), using full screen capture.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
 
         with mss() as sct:
             if window_bbox:

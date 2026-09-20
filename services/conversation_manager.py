@@ -2,6 +2,7 @@
 
 import json
 import random
+import re
 import uuid
 from typing import TYPE_CHECKING, Callable, Mapping, Optional
 
@@ -19,6 +20,34 @@ if TYPE_CHECKING:
     from api.interface import CommandConfig, SettingsConfig, WingmanConfig
 
 printr = Printr()
+
+# The note appended to a trimmed tool response, and the pattern that reads it
+# back. Trimming parses its own note so it can tell two cases apart: this message
+# is already at or below the limit we want (skip it, rewriting it would only
+# break the cache), or it was trimmed to a larger limit and now has to come down
+# further. The recorded original size survives every later pass, so the note
+# keeps saying how big the response really was.
+_TRIM_NOTE = (
+    "\n\n[...trimmed from ~{original} to ~{limit} tokens for conversation "
+    "history. Full response was processed.]"
+)
+_TRIM_NOTE_RE = re.compile(
+    r"\n\n\[\.\.\.trimmed from ~(\d+) to ~(\d+) tokens for conversation "
+    r"history\. Full response was processed\.\]$"
+)
+
+# The third and last step: two turns on, the response is gone and only this
+# placeholder is left. The assistant's answer in the same turn already carries
+# what the pilot was told; the first 500 tokens of a price table added nothing
+# to that but cost, twelve turns deep, more than the whole rest of the history.
+_CLEARED_NOTE = (
+    "[Tool output removed from history (~{original} tokens{tool}). "
+    "Call the tool again if it is needed.]"
+)
+_CLEARED_NOTE_RE = re.compile(
+    r"^\[Tool output removed from history \(~(\d+) tokens[^)]*\)\. "
+    r"Call the tool again if it is needed\.\]$"
+)
 
 
 class ConversationManager:
@@ -171,41 +200,117 @@ class ConversationManager:
 
         return False
 
+    def _last_user_index(self) -> int:
+        """Index of the most recent user message, or -1 if there is none."""
+        for i in range(len(self.messages) - 1, -1, -1):
+            if self.get_message_role(self.messages[i]) == "user":
+                return i
+        return -1
+
+    def _user_index_before(self, index: int) -> int:
+        """Index of the last user message before ``index``, or -1."""
+        for i in range(index - 1, -1, -1):
+            if self.get_message_role(self.messages[i]) == "user":
+                return i
+        return -1
+
+    def _tool_call_names(self) -> dict[str, str]:
+        """``tool_call_id`` → function name, from the assistant messages."""
+        names: dict[str, str] = {}
+        for msg in self.messages:
+            calls = (
+                msg.get("tool_calls")
+                if isinstance(msg, Mapping)
+                else getattr(msg, "tool_calls", None)
+            )
+            for call in calls or []:
+                if isinstance(call, Mapping):
+                    call_id = call.get("id")
+                    name = (call.get("function") or {}).get("name")
+                else:
+                    call_id = getattr(call, "id", None)
+                    function = getattr(call, "function", None)
+                    name = getattr(function, "name", None)
+                if call_id and name:
+                    names[call_id] = name
+        return names
+
     async def trim_tool_responses(
         self,
         max_tokens: int = 500,
+        fresh_max_tokens: int = 4000,
         is_condensing: bool = False,
     ):
-        """Trim oversized tool responses in conversation history.
+        """Shrink bulk tool output that the conversation has moved past.
 
-        Called after the LLM has finished processing a turn with tool calls.
-        The LLM already had full access to the data; this just prevents stale
-        bulk data from inflating the context on subsequent turns.
+        A skill can hand back a 78,000-token table. The model needs it once, to
+        answer; after that it sits in the history and every later turn pays for
+        it again.
 
-        If significant trimming occurs, broadcasts a condensation notification
-        so the client UI can display a summary indicator.
+        Tool responses from the current turn keep up to ``fresh_max_tokens``.
+        They are the ones the pilot is still talking about: asked "what is at
+        Lorville?" and then "which of those is cheapest?", the follow-up needs
+        the table, not the first 500 tokens of it. Once the next user message
+        arrives the response drops to ``max_tokens``. One more user message and
+        it is replaced by a one-line placeholder that names the size and the
+        tool — the same thing coding agents do with old tool results before
+        they summarise anything.
+
+        The staged delay is nearly free for prompt caching. Rewriting a message
+        invalidates the provider's cache from that point on, so what it costs
+        is whatever comes *after* it — here, one or two turns. Trimming a
+        message near the front of the history would be the expensive case.
+
+        A response already trimmed to this limit or a smaller one is left alone.
+        Without that check every call re-trimmed it: the note adds about 20
+        tokens, which puts the message back over the limit, so it was truncated
+        and re-noted on each of the four calls per turn until it converged. Each
+        rewrite broke the cache prefix for no gain.
 
         Args:
-            max_tokens: Maximum token count per tool response before trimming.
+            max_tokens: Cap for tool responses older than the current turn.
+            fresh_max_tokens: Cap for tool responses from the current turn.
             is_condensing: Whether condensation is currently running (suppresses
                 broadcast to avoid interfering with its own cycle).
         """
         total_tokens_saved = 0
-        for msg in self.messages:
+        fresh_from = self._last_user_index()
+        previous_from = self._user_index_before(fresh_from)
+        tool_names = self._tool_call_names()
+
+        for index, msg in enumerate(self.messages):
             if self.get_message_role(msg) != "tool":
                 continue
             content = msg.get("content", "")
-            if not content:
+            if not content or not isinstance(content, str):
                 continue
+            if _CLEARED_NOTE_RE.match(content):
+                continue
+
+            note = _TRIM_NOTE_RE.search(content)
+            if previous_from >= 0 and index < previous_from:
+                # Two turns on: placeholder only.
+                token_count = count_tokens(content)
+                original = int(note.group(1)) if note else token_count
+                name = tool_names.get(msg.get("tool_call_id")) or msg.get("name")
+                msg["content"] = _CLEARED_NOTE.format(
+                    original=original, tool=f" from {name}" if name else ""
+                )
+                total_tokens_saved += max(0, token_count - count_tokens(msg["content"]))
+                continue
+
+            limit = fresh_max_tokens if index > fresh_from >= 0 else max_tokens
+            if note and int(note.group(2)) <= limit:
+                continue
+
             token_count = count_tokens(content)
-            if token_count <= max_tokens:
+            if token_count <= limit:
                 continue
-            total_tokens_saved += token_count - max_tokens
-            trimmed = truncate_to_tokens(content, max_tokens)
-            msg["content"] = (
-                f"{trimmed}\n\n[...trimmed from ~{token_count} to "
-                f"~{max_tokens} tokens for conversation history. "
-                f"Full response was processed.]"
+
+            total_tokens_saved += token_count - limit
+            original = int(note.group(1)) if note else token_count
+            msg["content"] = truncate_to_tokens(content, limit) + _TRIM_NOTE.format(
+                original=original, limit=limit
             )
 
         # Notify the client when significant trimming occurs so the UI can
@@ -278,7 +383,6 @@ class ConversationManager:
             msg = {"role": "user", "content": msg_content}
         else:
             msg = {"role": "user", "content": content}
-        await self.cleanup_history()
         if condense_fn:
             await condense_fn()
         self.messages.append(msg)
@@ -324,9 +428,12 @@ class ConversationManager:
                 self._config.features.conversation_provider
                 == ConversationProvider.OPENAI
             ) or (
+                # Wingman Pro serves OpenAI models through the gateway, so the
+                # tool call ids are OpenAI-shaped. This used to sniff the model
+                # name for "gpt", which stopped working when the config started
+                # holding an alias ("default", "fast") instead.
                 self._config.features.conversation_provider
                 == ConversationProvider.WINGMAN_PRO
-                and "gpt" in self._config.wingman_pro.conversation_deployment.lower()
             ):
                 tool_id = f"call_{str(uuid.uuid4()).replace('-', '')}"
             elif (
@@ -380,54 +487,6 @@ class ConversationManager:
     # ------------------------------------------------------------------
     # History cleanup and token estimation
     # ------------------------------------------------------------------
-
-    async def cleanup_history(self):
-        """Cleans up the conversation history by removing messages that are too old."""
-        remember_messages = self._config.features.remember_messages
-
-        if remember_messages is None or len(self.messages) == 0:
-            return 0  # Configuration not set, nothing to delete.
-
-        # Find the cutoff index where to end deletion, making sure to only count 'user' messages towards the limit starting with newest messages.
-        cutoff_index = len(self.messages)
-        user_message_count = 0
-        for message in reversed(self.messages):
-            if self.get_message_role(message) == "user":
-                user_message_count += 1
-                if user_message_count == remember_messages:
-                    break  # Found the cutoff point.
-            cutoff_index -= 1
-
-        # If messages below the keep limit, don't delete anything.
-        if user_message_count < remember_messages:
-            return 0
-
-        total_deleted_messages = cutoff_index  # Messages to delete.
-
-        # Remove the pending tool calls that are no longer needed.
-        for mesage in self.messages[:cutoff_index]:
-            if (
-                self.get_message_role(mesage) == "tool"
-                and mesage.get("tool_call_id") in self.pending_tool_calls
-            ):
-                self.pending_tool_calls.remove(mesage.get("tool_call_id"))
-                if self._settings.debug_mode:
-                    await printr.print_async(
-                        f"Removing pending tool call {mesage.get('tool_call_id')} due to message history clean up.",
-                        color=LogType.WARNING,
-                    )
-
-        # Remove the messages before the cutoff index, exclusive of the system message.
-        del self.messages[:cutoff_index]
-
-        # Optional debugging printout.
-        if self._settings.debug_mode and total_deleted_messages > 0:
-            await printr.print_async(
-                f"Deleted {total_deleted_messages} messages from the conversation history.",
-                color=LogType.WARNING,
-            )
-
-        return total_deleted_messages
 
     def estimate_tokens(self) -> int:
         """Estimate the total token count of the current conversation history."""

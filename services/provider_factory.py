@@ -11,18 +11,15 @@ from typing import TYPE_CHECKING
 from api.enums import (
     ConversationProvider,
     ImageGenerationProvider,
-    SttProvider,
     TtsProvider,
     WingmanInitializationErrorType,
 )
 from api.interface import WingmanInitializationError
 from providers.interfaces import (
     LlmInterface,
-    SttInterface,
     TtsInterface,
     Validatable,
     get_llm_class,
-    get_stt_class,
     get_tts_class,
 )
 from services.printr import Printr
@@ -36,9 +33,6 @@ printr = Printr()
 
 # Import all provider modules so their decorators run and populate the registries.
 # These imports have no other side effects.
-import providers.faster_whisper  # noqa: F401
-import providers.parakeet  # noqa: F401
-import providers.whispercpp  # noqa: F401
 import providers.open_ai  # noqa: F401
 import providers.google  # noqa: F401
 import providers.x_ai  # noqa: F401
@@ -52,7 +46,7 @@ import providers.wingman_subscription  # noqa: F401
 
 
 class ProviderFactory:
-    """Creates STT, TTS, and LLM provider instances from config."""
+    """Creates TTS and LLM provider instances from config."""
 
     def __init__(
         self,
@@ -87,76 +81,26 @@ class ProviderFactory:
             )
         return secret
 
-    async def create_stt(
-        self, errors: list[WingmanInitializationError]
-    ) -> SttInterface | None:
-        """Create the STT provider from config."""
-        stt_enum = self._config.features.stt_provider
-        # Shared singleton providers — wrap in adapter
-        if stt_enum == SttProvider.FASTER_WHISPER:
-            from providers.faster_whisper import FasterWhisperStt
+    async def _retrieve_optional_secret(self, requester: str) -> str:
+        """Read an API key that the endpoint may or may not want.
 
-            return FasterWhisperStt(
-                shared=self._shared["fasterwhisper"],
-                config=self._config,
-                wingman_name=self._wingman_name,
-            )
-        elif stt_enum == SttProvider.PARAKEET:
-            from providers.parakeet import ParakeetStt
-
-            return ParakeetStt(shared=self._shared["parakeet"], config=self._config)
-        elif stt_enum == SttProvider.WHISPERCPP:
-            from providers.whispercpp import WhispercppStt
-
-            return WhispercppStt(shared=self._shared["whispercpp"], config=self._config)
-        elif stt_enum == SttProvider.OPENAI:
-            api_key = await self._retrieve_secret("openai", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAi, OpenAiStt
-
-            openai = OpenAi(
-                api_key=api_key, organization=self._config.openai.organization
-            )
-            return OpenAiStt(openai_instance=openai)
-        elif stt_enum == SttProvider.GROQ:
-            api_key = await self._retrieve_secret("groq", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAi, GroqStt
-
-            groq = OpenAi(api_key=api_key, base_url=self._config.groq.endpoint)
-            return GroqStt(openai_instance=groq)
-        elif stt_enum == SttProvider.AZURE:
-            api_key = await self._retrieve_secret("azure", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAiAzure, AzureWhisperStt
-
-            return AzureWhisperStt(
-                azure_instance=OpenAiAzure(), api_key=api_key, config=self._config
-            )
-        elif stt_enum == SttProvider.AZURE_SPEECH:
-            api_key = await self._retrieve_secret("azure", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAiAzure, AzureSpeechStt
-
-            return AzureSpeechStt(
-                azure_instance=OpenAiAzure(), api_key=api_key, config=self._config
-            )
-        elif stt_enum == SttProvider.WINGMAN_PRO:
-            from providers.wingman_subscription import (
-                WingmanSubscription,
-                WingmanSubscriptionStt,
-            )
-
-            ws = WingmanSubscription(
-                wingman_name=self._wingman_name,
-                settings=self._settings.wingman_pro,
-            )
-            return WingmanSubscriptionStt(ws_instance=ws, config=self._config)
-        return None
+        Used for OpenAI-compatible endpoints the user points at themselves: a
+        llama.cpp server on localhost needs no key, Ollama Cloud or a hosted
+        gateway does. Never prompts and never fails - a missing key would
+        otherwise pop a dialog on every start for the people running keyless.
+        "not-set" is the placeholder the 1.8.2 -> 2.0.0 migration wrote into
+        secrets.yaml and means the same as empty. The OpenAI client rejects an
+        empty api_key, so keyless falls back to a dummy the server ignores.
+        """
+        secret = await self._secret_keeper.retrieve(
+            requester=requester,
+            key=requester,
+            prompt_if_missing=False,
+        )
+        secret = (secret or "").strip()
+        if not secret or secret == "not-set":
+            return "not-needed"
+        return secret
 
     async def create_tts(
         self, errors: list[WingmanInitializationError]
@@ -214,15 +158,6 @@ class ProviderFactory:
                 base_url=self._config.openai_compatible_tts.base_url,
             )
             return OpenAiCompatibleTtsAdapter(tts_instance=tts, config=self._config)
-        elif tts_enum == TtsProvider.AZURE:
-            api_key = await self._retrieve_secret("azure", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAiAzure, AzureTts
-
-            return AzureTts(
-                azure_instance=OpenAiAzure(), api_key=api_key, config=self._config
-            )
         elif tts_enum == TtsProvider.XVASYNTH:
             from providers.xvasynth import XVASynthTts
 
@@ -312,19 +247,10 @@ class ProviderFactory:
             local_llm = None
             if self._config.local_llm.endpoint:
                 local_llm = OpenAi(
-                    api_key="not-needed",
+                    api_key=await self._retrieve_optional_secret("local_llm"),
                     base_url=self._config.local_llm.endpoint,
                 )
             return LocalLlm(openai_instance=local_llm, config=self._config)
-        elif llm_enum == ConversationProvider.AZURE:
-            api_key = await self._retrieve_secret("azure", errors)
-            if not api_key:
-                return None
-            from providers.open_ai import OpenAiAzure, AzureLlm
-
-            return AzureLlm(
-                azure_instance=OpenAiAzure(), api_key=api_key, config=self._config
-            )
         elif llm_enum == ConversationProvider.WINGMAN_PRO:
             from providers.wingman_subscription import (
                 WingmanSubscription,

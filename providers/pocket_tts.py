@@ -10,6 +10,7 @@ import torch
 import torchaudio
 from pocket_tts import TTSModel
 from pocket_tts.models.tts_model import export_model_state
+from pocket_tts.utils.utils import get_predefined_voice
 from api.enums import LogType, TtsProvider
 from api.interface import (
     PocketTTSConfig,
@@ -19,6 +20,13 @@ from api.interface import (
     VoiceInfo,
 )
 from providers.interfaces import TtsInterface, tts_provider
+from providers.pocket_tts_r2 import (
+    build_r2_config,
+    download_url_to_path,
+    hf_uri_to_https_url,
+    prefetch_gated_weights,
+    use_r2_mirror,
+)
 from services.file import get_custom_voices_dir, get_pocket_tts_models_dir
 from services.audio_player import AudioPlayer
 from services.printr import Printr
@@ -105,11 +113,22 @@ class PocketTTS:
         self._loading = False
         self.on_model_reloaded: Optional[Callable[[], None]] = None
         # Two layers of serialization for v2's explicitly-non-thread-safe TTSModel:
-        # - _async_gen_lock: only one coroutine may synthesize at a time
+        # - _async_gen_lock: only one coroutine may synthesize at a time. This
+        #   singleton outlives any single event loop: push-to-talk interactions
+        #   each run on their own loop (see the asyncio.new_event_loop() handlers
+        #   in wingman_core). An asyncio.Lock binds to the loop it is first used
+        #   on and raises "bound to a different event loop" everywhere else, so
+        #   we keep one lock per loop, created on demand in _gen_lock(). This
+        #   only needs to prevent same-loop re-entrancy (which could deadlock on
+        #   _model_swap_lock); cross-thread model safety is _model_swap_lock's job.
         # - _model_swap_lock: reload (daemon thread) waits for in-flight
         #   generation (executor / audio callback threads) before unloading.
-        self._async_gen_lock = asyncio.Lock()
+        self._async_gen_lock: Optional[asyncio.Lock] = None
+        self._async_gen_lock_loop: Optional[asyncio.AbstractEventLoop] = None
         self._model_swap_lock = threading.Lock()
+        # Serializes built-in voice embedding downloads so concurrent
+        # get_voice_state calls for the same voice don't fetch it twice.
+        self._builtin_voice_download_lock = threading.Lock()
 
         # Precompute progress state — surfaced via get_status() so the UI can
         # poll inline progress without a dedicated endpoint.
@@ -235,9 +254,40 @@ class PocketTTS:
                 self.model = TTSModel.load_model(
                     config=model_path, quantize=quantize
                 )
+            elif use_r2_mirror():
+                # Redirect the gated voice-cloning weights to our R2 mirror so users
+                # without an HF token can clone voices (see providers/pocket_tts_r2.py).
+                config_path = build_r2_config(model_id, self.models_dir)
+                self.printr.print(
+                    f"Loading PocketTTS model: {model_id} from R2 mirror (quantize={quantize})...",
+                    color=LogType.INFO,
+                    server_only=True,
+                )
+                # Pre-populate pocket_tts's cache with retries + atomic writes so
+                # its own fragile download path (no timeout/retry/size check)
+                # never runs for the large cloning weights. On failure, warn and
+                # continue — the library falls back to the public non-cloning
+                # weights instead of silently breaking with no explanation.
+                try:
+                    prefetch_gated_weights(
+                        model_id,
+                        log=lambda msg: self.printr.print(
+                            msg, color=LogType.INFO, server_only=True
+                        ),
+                    )
+                except Exception as fetch_err:
+                    self.printr.toast_warning(
+                        "Could not download the PocketTTS voice-cloning weights. "
+                        "Voice cloning may be unavailable — check your internet "
+                        f"connection and restart Wingman AI.\nError: {fetch_err}"
+                    )
+                self.model = TTSModel.load_model(
+                    config=config_path,
+                    quantize=quantize,
+                )
             else:
                 self.printr.print(
-                    f"Loading PocketTTS model: {model_id} (quantize={quantize})...",
+                    f"Loading PocketTTS model: {model_id} from HuggingFace (quantize={quantize})...",
                     color=LogType.INFO,
                     server_only=True,
                 )
@@ -376,8 +426,12 @@ class PocketTTS:
                     id=name_id, name=f"PocketTTS: {name_id}", provider="pocket_tts"
                 )
             )
-        # Custom voices
+        # Custom voices. Built-in stems are excluded: their downloaded
+        # per-language embeddings live in the same directory (see
+        # _ensure_builtin_voice) but are already listed as built-ins above.
         for stem in self._list_voice_stems(self.voices_dir):
+            if stem in self._BUILTIN_VOICE_IDS:
+                continue
             voices.append(
                 VoiceInfo(id=stem, name=f"Local: {stem}", provider="custom_voices")
             )
@@ -457,9 +511,12 @@ class PocketTTS:
         audio_exts = (".wav", ".mp3", ".flac")
         extension_order = (f".{active_tag}.safetensors", *audio_exts, ".safetensors")
 
-        # Bare predefined names (e.g. "alba") are handled by pocket-tts itself
-        # (downloaded + cached from HuggingFace on first use); we just pass them
-        # through untouched.
+        # Built-in voices resolve ONLY to their model-tagged download (see
+        # _ensure_builtin_voice) — never to raw audio or a legacy untagged
+        # .safetensors, which could belong to a different (incompatible) model.
+        if voice_id_or_path in self._BUILTIN_VOICE_IDS:
+            return os.path.abspath(self._builtin_voice_cache_path(voice_id_or_path))
+
         if self.voices_dir:
             base = os.path.join(self.voices_dir, voice_id_or_path)
             if os.path.exists(base):
@@ -497,10 +554,9 @@ class PocketTTS:
         ``Emma Watson.english_2026-04.safetensors`` — so switching to another
         model later produces a separate cache entry instead of overwriting.
 
-        When ``audio_path`` is a bare predefined-voice name (no directory, no
-        extension), pocket-tts resolves it internally from its HF-cached
-        registry — we skip writing a disk cache because there's nowhere sensible
-        to put it and pocket-tts already caches those.
+        When ``audio_path`` has no directory or no extension (nothing sensible
+        to derive a cache path from), the state is returned without writing a
+        disk cache.
         """
         state = self.model.get_state_for_audio_prompt(audio_path, truncate=True)
         directory = os.path.dirname(audio_path)
@@ -538,12 +594,70 @@ class PocketTTS:
             )
         return state
 
-    # Predefined voice IDs that ship with the pocket-tts library (HF-cached).
-    # No point preloading these — pocket-tts resolves them lazily on first use
-    # and we can't write a local safetensors cache for bare predefined names.
+    # Predefined voice IDs that ship with the pocket-tts library. Their voice
+    # states are language-specific (one per model, mutually incompatible), so we
+    # download the embedding matching the active model into custom_voices as
+    # ``<voice>.<model_id>.safetensors`` on first use (see _ensure_builtin_voice)
+    # and resolve them exactly like cloned custom voices from there on.
     _BUILTIN_VOICE_IDS = frozenset(
         {"alba", "marius", "javert", "jean", "fantine", "cosette", "eponine", "azelma"}
     )
+
+    def _builtin_voice_cache_path(self, voice_id: str) -> str:
+        """Where a built-in voice's embedding for the active model lives on disk."""
+        return os.path.join(
+            self.voices_dir, f"{voice_id}.{self._active_model_tag()}.safetensors"
+        )
+
+    def _ensure_builtin_voice(self, voice_id: str) -> str:
+        """Download the language-specific embedding for a built-in voice if missing.
+
+        pocket-tts ships pre-computed voice states for every built-in voice and
+        every language in its public (non-gated) HF repo. Its own resolution of
+        bare names like "alba" is unusable for us: it hard-requires the model to
+        have been loaded from a config *inside* the library's config dir, and we
+        always load via a rewritten config file (see build_r2_config). So we
+        fetch the embedding for the active model ourselves — tagged with the
+        model ID so every language keeps its own file — and let the regular
+        custom-voice resolution pick it up.
+
+        Returns the path to the tagged safetensors file. Raises when the active
+        model is a custom YAML config (no upstream embeddings exist for those)
+        or when the download fails.
+        """
+        dest = self._builtin_voice_cache_path(voice_id)
+        if os.path.exists(dest) and os.path.getsize(dest) > 0:
+            return dest
+
+        active_tag = self._active_model_tag()
+        if active_tag not in {m["id"] for m in BUILTIN_MODELS}:
+            raise ValueError(
+                f"Built-in voice '{voice_id}' is not available for custom model "
+                f"config '{active_tag}'. Use a cloned/custom voice instead."
+            )
+
+        # Derive the URL from the library's own pinned hf:// URI so a future
+        # pocket-tts bump can never make us download embeddings from a revision
+        # the installed library doesn't expect.
+        url = hf_uri_to_https_url(
+            get_predefined_voice(language=active_tag, name=voice_id)
+        )
+        with self._builtin_voice_download_lock:
+            if os.path.exists(dest) and os.path.getsize(dest) > 0:
+                return dest
+            self.printr.print(
+                f"Downloading built-in PocketTTS voice '{voice_id}' for model '{active_tag}'...",
+                color=LogType.INFO,
+                server_only=True,
+            )
+            download_url_to_path(
+                url,
+                dest,
+                log=lambda msg: self.printr.print(
+                    msg, color=LogType.INFO, server_only=True
+                ),
+            )
+        return dest
 
     def preload_voice_states(
         self,
@@ -552,9 +666,10 @@ class PocketTTS:
     ) -> dict[str, bool]:
         """Warm the voice-state cache for the given voice IDs.
 
-        Only applies when running locally with a loaded model. Skips built-in
-        pocket-tts voices (they're resolved from HF cache on first use anyway)
-        so preloading only pays for cloned/custom voices.
+        Only applies when running locally with a loaded model. Built-in voices
+        are included on purpose: running right after every model (re)load, this
+        is what downloads their language-specific embeddings for the newly
+        selected model (cheap no-op once the files exist).
 
         Returns a map of voice_id -> True/False indicating success.
         """
@@ -562,15 +677,9 @@ class PocketTTS:
         if not self.settings.run_locally or not self.model:
             return results
 
-        # Dedupe and drop builtins while preserving order.
+        # Dedupe while preserving order.
         seen: set[str] = set()
-        unique_ids = [
-            v
-            for v in voice_ids
-            if v
-            and v not in self._BUILTIN_VOICE_IDS
-            and not (v in seen or seen.add(v))
-        ]
+        unique_ids = [v for v in voice_ids if v and not (v in seen or seen.add(v))]
         total = len(unique_ids)
         for i, voice_id in enumerate(unique_ids, start=1):
             if progress_cb:
@@ -595,7 +704,8 @@ class PocketTTS:
         model does NOT yet exist on disk — these are the ones that would
         actually be cloned by a precompute pass.
 
-        Excludes built-in voices (pocket-tts resolves those from its HF cache).
+        Excludes built-in voices — their embeddings are downloaded ready-made
+        (see _ensure_builtin_voice), never cloned from audio.
         """
         if not self.voices_dir or not os.path.isdir(self.voices_dir):
             return []
@@ -677,6 +787,22 @@ class PocketTTS:
         if not self.model:
             raise RuntimeError("PocketTTS Model is not loaded.")
 
+        if (
+            isinstance(voice_id_or_path, str)
+            and voice_id_or_path in self._BUILTIN_VOICE_IDS
+        ):
+            try:
+                self._ensure_builtin_voice(voice_id_or_path)
+            except Exception as e:
+                self.printr.print(
+                    f"Failed to download built-in voice '{voice_id_or_path}': {e}",
+                    color=LogType.ERROR,
+                )
+                raise ValueError(
+                    f"Built-in voice '{voice_id_or_path}' could not be downloaded "
+                    "for the current model. Check your internet connection."
+                ) from e
+
         resolved_key = self._resolve_voice_path(voice_id_or_path)
 
         if resolved_key in self.voice_cache:
@@ -695,30 +821,78 @@ class PocketTTS:
             self._cache_voice_state(resolved_key, state)
             return state
         except Exception as e:
-            # .safetensors from a different model version — re-clone from raw audio.
             if resolved_key.endswith(".safetensors"):
-                audio_path = self._find_audio_for_safetensors(resolved_key)
-                if audio_path:
+                stem, _tag = self._parse_safetensors_name(
+                    resolved_key, self._known_model_tags()
+                )
+                if stem in self._BUILTIN_VOICE_IDS:
+                    # Built-in embedding failed to load — stale (e.g. a
+                    # pocket-tts upgrade moved the pinned upstream revision) or
+                    # corrupt. Drop the file and re-download exactly once.
                     self.printr.print(
-                        f"Voice embedding incompatible with current model, re-cloning from: {audio_path}",
+                        f"Built-in voice file invalid, re-downloading: {resolved_key}",
                         color=LogType.WARNING,
                         server_only=True,
                     )
-                    with self._model_swap_lock:
-                        state = self._clone_from_audio_and_cache(audio_path)
-                    # Cache under the key that will be resolved on subsequent calls
-                    # (the newly-written tagged safetensors, if _clone_from_audio_and_cache
-                    # persisted one; else the raw audio path). Evict the dead key.
-                    new_key = self._resolve_voice_path(audio_path)
-                    if new_key != resolved_key:
-                        self.voice_cache.pop(resolved_key, None)
-                    self._cache_voice_state(new_key, state)
-                    return state
+                    try:
+                        try:
+                            os.remove(resolved_key)
+                        except OSError:
+                            pass
+                        self._ensure_builtin_voice(stem)
+                        with self._model_swap_lock:
+                            state = self.model.get_state_for_audio_prompt(
+                                resolved_key
+                            )
+                        self._cache_voice_state(resolved_key, state)
+                        return state
+                    except Exception as retry_err:
+                        e = retry_err
+                else:
+                    # .safetensors from a different model version — re-clone
+                    # from raw audio. (Built-ins never take this path: they
+                    # have no raw audio and must not fall back to a user file
+                    # that happens to share their name.)
+                    audio_path = self._find_audio_for_safetensors(resolved_key)
+                    if audio_path:
+                        self.printr.print(
+                            f"Voice embedding incompatible with current model, re-cloning from: {audio_path}",
+                            color=LogType.WARNING,
+                            server_only=True,
+                        )
+                        with self._model_swap_lock:
+                            state = self._clone_from_audio_and_cache(audio_path)
+                        # Cache under the key that will be resolved on subsequent calls
+                        # (the newly-written tagged safetensors, if _clone_from_audio_and_cache
+                        # persisted one; else the raw audio path). Evict the dead key.
+                        new_key = self._resolve_voice_path(audio_path)
+                        if new_key != resolved_key:
+                            self.voice_cache.pop(resolved_key, None)
+                        self._cache_voice_state(new_key, state)
+                        return state
 
             self.printr.print(
                 f"Failed to load voice {resolved_key}: {e}", color=LogType.ERROR
             )
             raise ValueError(f"Voice '{voice_id_or_path}' could not be loaded.") from e
+
+    def _gen_lock(self) -> asyncio.Lock:
+        """Return an ``asyncio.Lock`` bound to the *current* running loop.
+
+        The provider is a long-lived singleton, but synthesis can be awaited
+        from different event loops over the app's lifetime (each push-to-talk
+        handler thread creates its own loop). An ``asyncio.Lock`` is bound to
+        the loop it is first used on and raises "bound to a different event
+        loop" if awaited elsewhere, so we lazily (re)create the lock whenever
+        the running loop changes. Same-loop callers always get the same lock,
+        preserving the re-entrancy guard that keeps the event-loop thread from
+        deadlocking on ``_model_swap_lock``.
+        """
+        loop = asyncio.get_running_loop()
+        if self._async_gen_lock is None or self._async_gen_lock_loop is not loop:
+            self._async_gen_lock = asyncio.Lock()
+            self._async_gen_lock_loop = loop
+        return self._async_gen_lock
 
     async def play_audio(
         self,
@@ -763,8 +937,10 @@ class PocketTTS:
             voice_state = self.get_voice_state(voice_id)
 
             # v2's TTSModel is not thread-safe; serialize concurrent synthesis
-            # from multiple wingmen sharing this singleton.
-            async with self._async_gen_lock:
+            # from multiple wingmen sharing this singleton. The lock is bound to
+            # the current running loop (see _gen_lock) so this works across the
+            # per-interaction event loops the app uses.
+            async with self._gen_lock():
                 if config.output_streaming:
                     await self._stream_audio(
                         text, voice_state, sound_config, audio_player, wingman_name

@@ -2,6 +2,8 @@
 
 This guide explains how skills work in Wingman AI and how to create your own custom skills.
 
+> Migrating an older skill? See [MIGRATING-TO-V3.md](MIGRATING-TO-V3.md).
+
 ## Table of Contents
 
 - [What is a Skill?](#what-is-a-skill)
@@ -26,6 +28,17 @@ This guide explains how skills work in Wingman AI and how to create your own cus
 - [Bundling Dependencies](#bundling-dependencies)
 - [Skill Directory Structure](#skill-directory-structure)
 - [AI Agent Bootstrap Checklist](#ai-agent-bootstrap-checklist)
+- [The `self.wingman` facade API](#the-selfwingman-facade-api)
+  - [Calling other skills & MCP servers](#calling-other-skills--mcp-servers)
+- [Local AI API](#local-ai-api-selfwingmanlocal_ai)
+  - [Overview](#overview)
+  - [Checking Availability](#checking-availability)
+  - [The Local Model](#the-local-model)
+  - [Summarizing Large Text](#summarizing-large-text)
+  - [Embeddings](#embeddings)
+  - [Persistent Memory](#persistent-memory)
+  - [Complete API Reference](#complete-api-reference)
+  - [Full Example: Game Stats Tracker](#full-example-game-stats-tracker)
 - [Additional Resources](#additional-resources)
   - [Example Skills to Study](#example-skills-to-study)
   - [Key APIs](#key-apis)
@@ -423,16 +436,16 @@ Before creating a skill, decide whether your functionality should be:
 
 ### Decision Matrix
 
-| Feature                | Skill               | Local MCP  | Remote MCP    |
-| ---------------------- | ------------------- | ---------- | ------------- |
-| Wingman Runtime Access | Yes                 | No         | No            |
-| Lifecycle Hooks        | Yes                 | No         | No            |
-| Easy Sharing           | Manual (Discord)    | Complex    | URL only      |
-| Maintains State        | Yes                 | Yes        | No            |
-| Updates                | Manual              | Manual     | Automatic     |
-| User Setup Complexity  | Medium              | High       | Low           |
-| Hosting Required       | No                  | No         | Yes           |
-| Dependencies           | Bundled             | Separate   | None (remote) |
+| Feature                | Skill            | Local MCP | Remote MCP    |
+| ---------------------- | ---------------- | --------- | ------------- |
+| Wingman Runtime Access | Yes              | No        | No            |
+| Lifecycle Hooks        | Yes              | No        | No            |
+| Easy Sharing           | Manual (Discord) | Complex   | URL only      |
+| Maintains State        | Yes              | Yes       | No            |
+| Updates                | Manual           | Manual    | Automatic     |
+| User Setup Complexity  | Medium           | High      | Low           |
+| Hosting Required       | No               | No        | Yes           |
+| Dependencies           | Bundled          | Separate  | None (remote) |
 
 **TL;DR:** If you need Wingman integration → **Skill**. If you need easy sharing and updates → **Remote MCP**. Avoid Local MCP unless you have a specific reason.
 
@@ -500,10 +513,8 @@ async def is_waiting_response_needed(self, tool_name: str) -> bool:
 class AudioDeviceChanger(Skill):
     def __init__(self, config, settings, wingman):
         super().__init__(config, settings, wingman)
-        # Subscribe to audio events
-        self.wingman.audio_player.playback_events.subscribe(
-            "finished", self.playback_finished
-        )
+        # Subscribe to audio events — keep the returned Subscription
+        self._sub = self.wingman.audio.on_playback_finished(self.playback_finished)
 
     async def on_play_to_user(self, text: str, sound_config: SoundConfig) -> str:
         """Automatically change audio device before TTS playback."""
@@ -515,6 +526,10 @@ class AudioDeviceChanger(Skill):
     async def playback_finished(self, _):
         """Reset audio device after playback."""
         await self.reset_audio_device()
+
+    async def unload(self) -> None:
+        await super().unload()
+        self._sub.unsubscribe()  # detach the callback
 ```
 
 ### Tool-Based Skills
@@ -545,7 +560,7 @@ class ImageGeneration(Skill):
         Args:
             prompt: The image generation prompt describing what to create.
         """
-        image = await self.wingman.generate_image(prompt)
+        image = await self.wingman.ai.generate_image(prompt)
         return "Here is your generated image."
 
     @tool(description="Set a timer with specific duration and behavior")
@@ -620,7 +635,7 @@ from api.interface import SettingsConfig, SkillConfig, WingmanInitializationErro
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.open_ai_wingman import OpenAiWingman
+    from wingmen.wingman_context import WingmanContext
 
 
 class YourSkillName(Skill):
@@ -630,7 +645,7 @@ class YourSkillName(Skill):
         self,
         config: SkillConfig,
         settings: SettingsConfig,
-        wingman: "OpenAiWingman",
+        wingman: "WingmanContext",
     ) -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
         # Initialize your skill here
@@ -666,6 +681,7 @@ class YourSkillName(Skill):
 
 ```yaml
 module: skills.your_skill_name.main # Python import path
+api_version: 3 # REQUIRED for v3 — skills without it are treated as legacy and won't load
 name: YourSkillName # Class name (must match main.py)
 display_name: Your Skill Name # Human-readable name (shown in UI)
 author: Your Name # Your name or organization
@@ -726,10 +742,9 @@ Custom properties allow your skill to be configured by users through the Wingman
 >     errors = await super().validate()
 >
 >     # Use SecretKeeper for sensitive data
->     api_key = await self.retrieve_secret(
->         secret_name="your_service_api_key",
->         errors=errors,
->         hint="Get your API key from https://your-service.com/api-keys"
+>     api_key = await self.wingman.secrets.retrieve(
+>         "your_service_api_key",
+>         errors,
 >     )
 >
 >     return errors
@@ -883,14 +898,14 @@ custom_properties:
   - id: accent_color
     name: Accent Color
     hint: Accent color for highlights (hex format).
-    value: "#00aaff"
+    value: '#00aaff'
     required: false
     property_type: color
 
   - id: bg_color
     name: Background Color
     hint: Background color (hex format, e.g. #1e212b or #1e212b80 for 50% transparent).
-    value: "#1e212b"
+    value: '#1e212b'
     required: false
     property_type: color
 ```
@@ -1052,7 +1067,6 @@ def _get_my_setting(self):
    ```
 
 2. **Create the required files:**
-
    - `main.py` (your Skill class)
    - `default_config.yaml` (configuration)
    - `logo.png` (icon)
@@ -1209,7 +1223,6 @@ Wingman AI loads skills from multiple locations with a specific priority order:
 ### Load Priority (Later Overrides Earlier)
 
 1. **Bundled skills** (built into the app)
-
    - Release: `_internal/skills/`
    - Dev mode: `./skills/`
 
@@ -1349,6 +1362,605 @@ If you're using an AI agent to create a skill, use this checklist to ensure ever
 
 ---
 
+## The `self.wingman` facade API
+
+In v3, a skill talks to the runtime **only** through `self.wingman` — a controlled facade
+grouped into feature namespaces. `self.` is *your skill* (its identity, config, storage,
+decorators, lifecycle hooks); `self.wingman` is *the runtime* (everything about the
+wingman/app). No capability lives on both. There is no raw passthrough to the underlying
+Wingman.
+
+> Porting an older skill from the pre-v3 surface (`self.llm_call`, `self.wingman.audio_player`,
+> `self.local_ai`, `self.retrieve_secret`, the registries …)? See
+> [MIGRATING-TO-V3.md](MIGRATING-TO-V3.md) for the full old → new mapping.
+
+The reference below lists every member, one line each. Gotchas (cap, interrupt, read-only,
+`ToolResult`) are called out inline.
+
+### Top level — `self.wingman`
+
+| Member | Description |
+| --- | --- |
+| `.name` | This wingman's name (`str`). |
+| `.avatar_path` | **Read-only** local file path to this wingman's avatar image (PNG, `str`). Falls back to the default Wingman AI avatar if the user hasn't set a custom one; `None` if unavailable. |
+| `.config` | **Read-only** live view of the wingman config. Reads pass through to live values; any write raises `FacadeError`. Change things through a capability (`tts.set_voice`, `commands.*`, `audio.set_output_device`). |
+| `.settings` | **Read-only** view of app settings. Writing raises `FacadeError`; change devices via `audio.set_output_device(...)`. |
+| `.run_in_thread(fn, *args)` | Run a blocking callable off the event loop (args spread **positionally**). If `fn` is a coroutine function it's run in a fresh event loop. |
+
+### `self.wingman.ai` — main (cloud) model
+
+Single-turn side-calls on the user's main model. Results are NOT added to the conversation.
+
+| Member | Description |
+| --- | --- |
+| `await .generate(prompt="", *, system=None, data=None, image=None, messages=None, auto_shorten=False)` | Single-turn generation. Returns the response **`str`** (`""` if empty, never `None`). **Capped:** when condensation is on, combined input is limited (Wingman Pro: fixed 8,000 tokens; own provider: `features.skill_max_input_tokens`, default 16,000) — over the cap raises `FacadeError` (or truncates the prompt/data path if `auto_shorten=True`). Pass `messages=` (a prebuilt OpenAI-style list) to send your own turns directly — then `prompt`/`system`/`data`/`image` are ignored and it can't auto-shorten. |
+| `await .converse(user_message)` | Conversation-aware reply using the wingman's system prompt + live history, subject to normal condensation. Appends both turns to the conversation. |
+| `await .summarize(text, *, system=None)` | Summarize via the main **cloud** model (capped like `generate`). For bulk/cheap work prefer `local_ai.summarize`. |
+| `await .generate_image(prompt)` | Generate an image; returns the file path/URL (`str`). |
+
+### `self.wingman.local_ai` — free local model
+
+Runs on the user's machine. Returns `""` when the local model is unavailable — check `.available`.
+
+| Member | Description |
+| --- | --- |
+| `.available` | `bool` — local model loaded and ready. |
+| `await .generate(text, *, system="", preset=None, temperature=None, top_p=None, top_k=None)` | Local single-turn generation → `str`. |
+| `.generate_sync(...)` | Synchronous variant of `generate`. |
+| `await .summarize(text, *, instruction="", preset=None, temperature=None, top_p=None)` | Local (free) summarization → `str`; chunks large input automatically. |
+| `await .embed(texts)` | Vector embeddings for a list of strings. (`.embed_sync(...)` for the sync variant.) |
+
+### `self.wingman.tts` — speech
+
+| Member | Description |
+| --- | --- |
+| `.voice` | The voice configured on the current provider (read). |
+| `await .voices()` | All voices on the current provider (best-effort; `[]` if not cheaply enumerable). |
+| `await .set_voice(voice, errors=None)` | Set the voice on the **current** provider (no provider switch) and rebuild TTS so it takes effect. Returns a human-readable result string. |
+| `await .speak(text, *, interrupt=True, sound_config=None)` | Say text in the wingman's voice. `interrupt=True` (default) cuts off current playback; `interrupt=False` waits for it. `interrupt` is **keyword-only** and inverted from the old `no_interrupt`. |
+
+### `self.wingman.audio` — playback & devices
+
+| Member | Description |
+| --- | --- |
+| `.is_playing` | `bool` — true while the wingman is playing TTS/audio. |
+| `await .play(audio_config, *, volume=1.0)` | Start playback of a skill-owned audio file. |
+| `await .stop(audio_config, *, fade_out=0.5)` | Stop playback (optionally fading out). |
+| `.on_playback_started(cb)` → `Subscription` | Observe playback start. Keep the returned `Subscription` and call `.unsubscribe()` in `unload()`. |
+| `.on_playback_finished(cb)` → `Subscription` | Observe playback finish (same `Subscription` contract). |
+| `.output_device` / `.input_device` | Currently selected audio device settings (read-only). |
+| `await .set_output_device(id)` / `await .set_input_device(id)` | Switch the system audio device (in-process). Pass `None` to reset to the system default. Returns `False` if unavailable. |
+
+### `self.wingman.commands` — user commands
+
+| Member | Description |
+| --- | --- |
+| `.get(name)` | Live `CommandConfig` with this name, or `None`. |
+| `.all()` | All configured commands (live objects, read-only tuple). |
+| `.add(command, *, category=None)` | Add a command (optionally into a category). Call `save()` to persist. |
+| `.remove(name)` | Remove a command by name. Call `save()`. |
+| `.add_category(name)` → `CommandCategory` | Create/return a category (idempotent by name). |
+| `.update_category(category)` / `.delete_category(id_or_name)` | Rename / remove a category. |
+| `.categories()` | All categories as `CommandCategory` objects. |
+| `.register_function(func, *, label=None, description=None, respond="ai", parameters=None)` | Register a bound skill method as a runtime command function (dynamic `@command_action`). |
+| `.unregister_function(name)` | Remove a previously registered runtime command function. |
+| `.add_skill_command(name, func, *, category=None, instant_phrases=None, respond="ai")` | One call: register `func`, build a command bound to it, categorize it. Call `save()`. |
+| `await .save()` | Persist the commands section to disk. Returns `True` on success. |
+
+### `self.wingman.tools` — discover & invoke functions
+
+Every callable function the wingman has: your `@tool`s, other active skills' tools, MCP tools, and commands.
+
+| Member | Description |
+| --- | --- |
+| `.names()` | `set[str]` of all callable function names. |
+| `.has(name)` | `bool` — is this function callable right now? |
+| `.source(name)` | Human origin of a tool: the owning skill's name, or the MCP server's display name (`None` if unknown). It's a **name string**, not the skill/server object. |
+| `.describe(name)` → `ToolDescriptor` | `name`, `source`, `description`, `parameters` (JSON-schema) — or `None`. |
+| `.all()` | Tuple of `ToolDescriptor` for every callable function (with params). |
+| `.icon(name)` | Path to the owning skill's `logo.png`, or `None` (MCP tools / no logo). For UIs that show a per-tool icon. |
+| `.servers()` | Active MCP servers as dicts (`name`, `display_name`, `connected`, `tools`). |
+| `await .invoke(name, arguments=None)` → `ToolResult` | Call a function by name. Returns a **`ToolResult`** (`.response`, `.instant_response`, `.skill`, `.label`) — not a 4-tuple. |
+
+### `self.wingman.conversation` — the live conversation
+
+| Member | Description |
+| --- | --- |
+| `.history()` | Shallow copy of the live history (`list[dict]`). Don't mutate individual messages. |
+| `.summary` | The condenser's running summary (`str`). |
+| `await .add_user(content)` | Append a user turn. |
+| `await .add_assistant(content)` | Append an assistant turn. |
+| `await .summarize()` | Summarize the live conversation via the **free local** model (`""` if unavailable). |
+| `await .reset()` | Reset the conversation history. |
+
+### `self.wingman.memory` — local persistent memory
+
+Free, runs locally. Returns `None`/empty when unavailable — check `.available`.
+
+| Member | Description |
+| --- | --- |
+| `.available` | `bool` — persistent memory ready (needs local AI + config). |
+| `await .remember(content, **kw)` | Store a fact; auto-dedupes against similar entries. Returns the entry ID. |
+| `await .recall(query, **kw)` | Semantic search; returns matches sorted by relevance. |
+| `await .context(query, max_tokens=500)` | Pre-formatted memory string ready to inject into a prompt. |
+| `await .update(entry_id, new_content)` | Update an entry by ID (re-embeds). |
+| `await .forget(query)` | Fuzzy delete: removes the closest semantic match. |
+| `await .forget_by_id(entry_id)` | Deterministic delete by ID. |
+
+### `self.wingman.secrets` — stored secrets
+
+| Member | Description |
+| --- | --- |
+| `await .retrieve(name, errors=None)` | Fetch a stored secret (prompts the user if missing). |
+
+### `self.wingman.skills` — loaded skills
+
+| Member | Description |
+| --- | --- |
+| `.active()` | Tuple of `{name, display_name}` for every loaded skill. |
+| `.has(name)` | `bool` — is a skill with this name loaded? (symmetric with `tools.has`). |
+
+### Calling other skills & MCP servers
+
+Cross-skill / MCP invocation is a first-class, supported use case. Discover what's callable,
+guard with `has(...)` / `servers()`, then `invoke`:
+
+```python
+# Discover everything callable right now (with origin + params)
+for tool in self.wingman.tools.all():
+    self.log.info(f"{tool.name} (from {tool.source})", server_only=True)
+
+# Call another ACTIVE skill's tool by name
+if self.wingman.tools.has("take_screenshot"):
+    result = await self.wingman.tools.invoke("take_screenshot", {})
+    self.log.info(f"{result.response} (from {result.skill})")
+
+# Call your own MCP server's tool (many skills ship an MCP for their datasource)
+servers = {s["display_name"] for s in self.wingman.tools.servers()}
+if "My Data MCP" in servers and self.wingman.tools.has("mydata_query"):
+    res = await self.wingman.tools.invoke("mydata_query", {"q": "ships"})
+    data = res.response
+else:
+    self.log.warning("My Data MCP not active; skipping enriched lookup")
+```
+
+MCP tool names are prefixed by the registry — use the name exactly as it appears in
+`self.wingman.tools.names()` / `.all()`.
+
+---
+
+## Local AI API (`self.wingman.local_ai`)
+
+Every skill can reach the local AI capabilities through `self.wingman` — the free local model
+(`self.wingman.local_ai`), embeddings, and persistent memory (`self.wingman.memory`). These
+run entirely on the user's machine and provide a stable, safe interface.
+
+### Overview
+
+The local AI features run entirely on the user's machine via llama.cpp. Users enable and configure them in Settings (model selection, context window size, GPU backend). Your skill doesn't need to worry about any of that — `self.wingman.local_ai` and `self.wingman.memory` handle everything internally.
+
+**Key principles:**
+
+- **Reached through `self.wingman`** — `self.wingman.local_ai` for the model/embeddings, `self.wingman.memory` for persistent memory
+- **Safe by default** — methods handle errors internally, log them to the client, and return `""`/empty results. Skills never need `try/except` around these calls.
+- **Both async and sync** — async is preferred; sync variants have a `_sync` suffix
+- **Plain strings** — `generate`/`summarize` return a `str` (`""` when the local model is unavailable), not a response object
+- **Stable contract** — the internal implementation may change across versions, but this API won't break
+
+```python
+# Quick taste — that's really all it takes:
+text = await self.wingman.local_ai.generate("Summarize this text", system="You are a summarizer.")
+if text:
+    print(text)
+```
+
+### Checking Availability
+
+Local AI is optional — users may not have it enabled or models may not be downloaded yet. Always check before using:
+
+```python
+@tool()
+async def my_tool(self, query: str) -> str:
+    if not self.wingman.local_ai.available:
+        return "Local AI is not enabled. Please enable it in Settings."
+
+    text = await self.wingman.local_ai.generate(query, system="Answer concisely.")
+    return text or "Processing failed."
+```
+
+**Availability properties:**
+
+```python
+self.wingman.local_ai.available  # Local model is loaded and ready
+self.wingman.memory.available    # Persistent memory is available (requires local AI + wingman config)
+```
+
+> **Tip:** `self.wingman.memory.available` implies the embedding model is loaded (memory needs embeddings). The local model (`local_ai.available`) loads separately.
+
+### The Local Model
+
+The local model is a small LLM (e.g., Qwen 3.5 2B) that runs on the user's machine. Use it for text processing tasks like extraction, classification, summarization, or reformatting. It's fast, free, and private — no API calls leave the machine.
+
+```python
+async def generate(text: str, *, system: str = "", preset=None,
+                   temperature=None, top_p=None, top_k=None) -> str
+def generate_sync(text: str, *, system: str = "", ...) -> str
+```
+
+**Parameters:**
+
+| Parameter | Type  | Description                                                    |
+| --------- | ----- | -------------------------------------------------------------- |
+| `text`    | `str` | The input text / user prompt                                   |
+| `system`  | `str` | Instructions for the model. If empty, a default prompt is used |
+
+**Returns** a plain `str` — the model's response, or `""` if local AI is unavailable or an error occurs (error is logged to the client automatically).
+
+**Examples:**
+
+```python
+# Simple text processing
+text = await self.wingman.local_ai.generate(
+    user_message,
+    system="Extract the player name and ship type from this message. Return as JSON.",
+)
+if text:
+    data = json.loads(text)
+```
+
+> **Important:** The local model has a limited context window (user-configurable, default 4096 tokens). If your input is too large, the model silently loses data beyond its context limit. For potentially large inputs, use `summarize()` instead.
+
+#### Prompt Writing Guidelines for Small Models
+
+The local model is a 2B-parameter model with limited instruction-following ability. Prompts that work well with large cloud models (GPT-4, Claude) will often fail here. Follow these rules when writing `system` strings:
+
+- **Be direct and literal.** Use short, imperative sentences. Avoid nuance, hedging, or nested clauses.
+- **Use labeled sections** (`Backstory:`, `Input:`, `Rules:`) instead of prose paragraphs. The model parses structured prompts more reliably.
+- **Say "EXACT words"** when you want the model to reference source material. Without this, it will paraphrase loosely and hallucinate details (e.g., turning "gift ideas" into "gift cards").
+- **Say "IN CHARACTER" explicitly** when the model must rephrase instructions in its persona's voice. Otherwise it will dump template text verbatim (e.g., outputting "The user talks to you by holding the home key" instead of weaving it into a natural sentence).
+- **Constrain what it may NOT do.** Small models are prone to confabulation — add explicit "Do NOT add anything not in [source]" rules.
+- **Keep prompts short.** Every token of system prompt reduces the budget available for input and output. Aim for under 200 tokens.
+
+### Summarizing Large Text
+
+When you have text that might exceed the model's context window (e.g., API responses, large documents), use `summarize()`. It automatically chunks the text, summarizes each chunk, and merges the results.
+
+```python
+async def summarize(text: str, *, instruction: str = "", preset=None,
+                   temperature=None, top_p=None) -> str
+def summarize_sync(text: str, *, instruction: str = "", ...) -> str
+```
+
+**Parameters:**
+
+| Parameter     | Type  | Description                                                                 |
+| ------------- | ----- | --------------------------------------------------------------------------- |
+| `text`        | `str` | The text to summarize. Can be arbitrarily large                             |
+| `instruction` | `str` | Optional focus instruction (e.g., "Focus on combat stats and ship loadout") |
+
+If the text fits in the context window, it's processed in a single call (same as `generate()`). If it's too large, chunking and merging happen automatically. Returns a plain `str` (`""` if unavailable).
+
+**Common pattern — API call → summarize → remember:**
+
+```python
+@tool(wait_response=True)
+async def fetch_player_stats(self, player_name: str) -> str:
+    """Fetch and remember player statistics."""
+    if not self.wingman.local_ai.available:
+        return "Local AI is not enabled."
+
+    # 1. Fetch (could be huge)
+    async with aiohttp.ClientSession() as session:
+        resp = await session.get(f"https://api.game.com/stats/{player_name}")
+        raw = await resp.text()
+
+    # 2. Summarize — handles any size automatically
+    summary = await self.wingman.local_ai.summarize(
+        raw,
+        instruction="Extract key stats: rank, wins, losses, favorite loadout.",
+    )
+    if not summary:
+        return "Failed to process stats."
+
+    # 3. Remember for future conversations
+    if self.wingman.memory.available:
+        await self.wingman.memory.remember(f"{player_name}'s stats: {summary}")
+
+    return summary
+```
+
+**When to use `generate()` vs `summarize()`:**
+
+| Use `generate()` when                        | Use `summarize()` when                     |
+| -------------------------------------------- | ------------------------------------------ |
+| Input size is predictable and small          | Input size is unknown or potentially large |
+| You need precise control over the prompt     | You want a hands-off summary               |
+| Doing extraction, classification, formatting | Condensing API responses, documents, logs  |
+
+### Embeddings
+
+Generate vector embeddings for semantic search, similarity comparison, or custom RAG workflows. Embeddings are 768-dimensional vectors from the Nomic Embed v1.5 model.
+
+```python
+async def embed(texts: list[str]) -> list[list[float]] | None
+def embed_sync(texts: list[str]) -> list[list[float]] | None
+```
+
+**Example:**
+
+```python
+# Generate embeddings for custom similarity search
+embeddings = await self.wingman.local_ai.embed([
+    "The user prefers stealth gameplay",
+    "The user likes aggressive combat tactics",
+])
+if embeddings:
+    # embeddings[0] = 768-dim vector for first text
+    # embeddings[1] = 768-dim vector for second text
+    similarity = cosine_similarity(embeddings[0], embeddings[1])
+```
+
+> **Tip:** For most use cases, the persistent memory API (below) handles embeddings automatically. Only use `embed()` directly if you're building custom search or similarity features.
+
+### Persistent Memory
+
+Persistent memory lets your skill remember facts about the user across conversations, through the `self.wingman.memory` namespace. Memories are stored locally in a SQLite database with vector embeddings for semantic search.
+
+#### Remembering Facts
+
+```python
+async def remember(content: str, **kw) -> int | None
+```
+
+**Automatic deduplication:** When you save a fact that's semantically similar (>90%) to an existing one, it **updates** the existing entry instead of creating a duplicate. This means you can safely call `remember()` repeatedly without worrying about duplicates.
+
+```python
+# First call: creates a new entry
+await self.wingman.memory.remember("Player rank: Gold 3")
+
+# Later: player ranks up — this UPDATES the existing entry (>90% similar)
+await self.wingman.memory.remember("Player rank: Platinum 1")
+```
+
+**Returns** the entry ID (`int`) on success, or `None` on failure.
+
+#### Recalling Memories
+
+```python
+async def recall(query: str, **kw) -> list[MemorySearchResult]
+```
+
+Search memories by semantic similarity. Returns results sorted by relevance.
+
+```python
+@dataclass(frozen=True)
+class MemorySearchResult:
+    id: int                     # Entry ID (for update/delete)
+    content: str                # The memory text
+    entry_type: str             # "fact" or "session_summary"
+    source_wingman: str | None  # Which wingman stored this
+    created_at: float           # Unix timestamp
+```
+
+**Always returns a list** — empty on failure or no matches. Safe to iterate without None checks.
+
+```python
+# Search for relevant memories
+results = await self.wingman.memory.recall("player's ship and loadout", limit=3)
+for memory in results:
+    print(f"[{memory.entry_type}] {memory.content}")
+```
+
+#### Getting Memory Context for Prompts
+
+```python
+async def context(query: str, max_tokens: int = 500) -> str
+```
+
+Returns a **pre-formatted string** of relevant memories, ready to inject into a system prompt. Combines facts and recent session summaries, formatted with headers.
+
+**Always returns a string** — empty on failure. Safe to concatenate directly.
+
+```python
+# Build context-aware prompts
+async def get_prompt(self) -> str | None:
+    """Inject relevant memories into the wingman's system prompt."""
+    if not self.wingman.memory.available:
+        return None
+
+    context = await self.wingman.memory.context("user preferences and history")
+    if context:
+        return f"What you remember about this user:\n{context}"
+    return None
+```
+
+#### Updating and Deleting Memories
+
+```python
+# Update a specific memory (re-embeds automatically)
+async def update(entry_id: int, new_content: str) -> bool
+
+# Delete by ID (deterministic)
+async def forget_by_id(entry_id: int) -> bool
+
+# Delete by semantic search (fuzzy — finds closest match)
+async def forget(query: str) -> bool
+```
+
+**Two deletion strategies:**
+
+```python
+# Strategy 1: Track the ID from remember() — deterministic
+entry_id = await self.wingman.memory.remember("Player owns a Cutlass Black")
+# ... later ...
+await self.wingman.memory.forget_by_id(entry_id)  # Exactly this entry
+
+# Strategy 2: Fuzzy search — deletes the closest semantic match
+await self.wingman.memory.forget("Cutlass Black")  # Finds and deletes closest match
+```
+
+> **When to use which:** Use `forget_by_id()` when you tracked the ID. Use `forget()` when you want to delete "anything about X" without tracking IDs. Deduplication in `remember()` often makes explicit deletion unnecessary — just save the updated fact and the old one gets replaced.
+
+### Complete API Reference
+
+```text
+self.wingman.local_ai                                # free local model + embeddings
+│   ├── .available                                   → bool    # local model ready?
+│   ├── .generate(text, *, system, preset, ...)      → str
+│   ├── .generate_sync(text, *, system, ...)         → str
+│   ├── .summarize(text, *, instruction, ...)        → str
+│   ├── .summarize_sync(text, *, instruction, ...)   → str
+│   ├── .embed(texts)                                → list[list[float]] | None
+│   └── .embed_sync(texts)                           → list[list[float]] | None
+
+self.wingman.memory                                  # local persistent memory
+    ├── .available                                   → bool    # persistent memory ready?
+    ├── .remember(content, **kw)                     → int | None
+    ├── .recall(query, **kw)                         → list[MemorySearchResult]
+    ├── .context(query, max_tokens)                  → str
+    ├── .update(entry_id, new_content)               → bool
+    ├── .forget(query)                               → bool
+    └── .forget_by_id(entry_id)                      → bool
+```
+
+**Return type conventions:**
+
+| Return type       | On failure            |
+| ----------------- | --------------------- |
+| `str`             | Empty string `""`     |
+| `list[...]`       | Empty list `[]`       |
+| `bool`            | `False`               |
+| `int` (entry ID)  | `None`                |
+
+### Full Example: Game Stats Tracker
+
+A complete skill that fetches player stats from an API, summarizes them with the local support model, and remembers key facts for future conversations.
+
+```python
+from typing import TYPE_CHECKING
+from api.interface import SettingsConfig, SkillConfig, WingmanInitializationError
+from skills.skill_base import Skill, tool
+
+if TYPE_CHECKING:
+    from wingmen.wingman_context import WingmanContext
+
+
+class GameStatsTracker(Skill):
+    """Tracks and remembers player game statistics."""
+
+    def __init__(
+        self,
+        config: SkillConfig,
+        settings: SettingsConfig,
+        wingman: "WingmanContext",
+    ) -> None:
+        super().__init__(config=config, settings=settings, wingman=wingman)
+
+    async def validate(self) -> list[WingmanInitializationError]:
+        errors = await super().validate()
+        self.retrieve_custom_property_value("api_base_url", errors)
+        return errors
+
+    def _get_api_base_url(self) -> str:
+        errors = []
+        return self.retrieve_custom_property_value("api_base_url", errors)
+
+    async def get_prompt(self) -> str | None:
+        """Inject remembered player facts into every conversation."""
+        if not self.wingman.memory.available:
+            return None
+
+        context = await self.wingman.memory.context("player stats and preferences")
+        if context:
+            return f"What you remember about this player:\n{context}"
+        return None
+
+    @tool(
+        description="""Fetch and remember a player's current game statistics.
+
+        WHEN TO USE:
+        - User asks about their stats, rank, or performance
+        - User wants to check their current standing
+        - User mentions a player name and wants info about them""",
+        wait_response=True,
+    )
+    async def fetch_player_stats(self, player_name: str) -> str:
+        """
+        Args:
+            player_name: The in-game player name to look up.
+        """
+        if not self.wingman.local_ai.available:
+            return "Local AI is not enabled. Enable it in Settings to use this feature."
+
+        # 1. Fetch from API
+        import aiohttp
+        base_url = self._get_api_base_url()
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}/players/{player_name}") as resp:
+                if resp.status != 200:
+                    return f"Could not find player '{player_name}'."
+                raw = await resp.text()
+
+        # 2. Summarize (handles large responses automatically)
+        summary = await self.wingman.local_ai.summarize(
+            raw,
+            instruction="Extract: player rank, win/loss ratio, favorite loadout, "
+                        "notable achievements. Be concise.",
+        )
+        if not summary:
+            return "Failed to process the stats response."
+
+        # 3. Remember for future conversations
+        if self.wingman.memory.available:
+            await self.wingman.memory.remember(f"{player_name}: {summary}")
+
+        return summary
+
+    @tool(
+        description="""Recall what you remember about a player.
+
+        WHEN TO USE:
+        - User asks "what do you remember about..."
+        - User references a player you've looked up before
+        - User wants historical stats comparison""",
+    )
+    async def recall_player_info(self, query: str) -> str:
+        """
+        Args:
+            query: What to search for (e.g., "player rank", "combat stats").
+        """
+        if not self.wingman.memory.available:
+            return "Memory is not available. Enable Local AI and Persistent Memory in Settings."
+
+        results = await self.wingman.memory.recall(query, limit=5)
+        if not results:
+            return "No matching memories found."
+
+        return "\n".join(
+            f"- {r.content}" for r in results
+        )
+
+    @tool(
+        description="""Forget stored information about a player.
+
+        WHEN TO USE:
+        - User explicitly asks to forget or delete player data
+        - User wants to clear outdated information""",
+    )
+    async def forget_player_info(self, query: str) -> str:
+        """
+        Args:
+            query: What to forget (e.g., "player stats for Marcus").
+        """
+        if not self.wingman.memory.available:
+            return "Memory is not available."
+
+        deleted = await self.wingman.memory.forget(query)
+        return "Done, I've forgotten that." if deleted else "No matching memory found."
+```
+
+---
+
 ## Additional Resources
 
 ### Example Skills to Study
@@ -1382,36 +1994,38 @@ If you're using an AI agent to create a skill, use this checklist to ensure ever
 
 ### Key APIs
 
-**Wingman Access:**
+**Wingman Access (`self.wingman` facade — see [the full reference above](#the-selfwingman-facade-api)):**
 
 ```python
-self.wingman.config               # Wingman configuration
-self.wingman.name                 # Wingman name
-self.wingman.generate_image()     # Generate image
-self.wingman.audio_player         # Audio player instance
+self.wingman.config                    # Wingman configuration (read-only)
+self.wingman.name                      # Wingman name
+self.wingman.avatar_path               # Path to the wingman's avatar PNG (or None)
+await self.wingman.ai.generate(...)    # Main-model side-call (capped)
+await self.wingman.ai.generate_image(prompt)  # Generate image
+self.wingman.audio.is_playing          # Is the wingman speaking?
 ```
 
-**Settings:**
+**Settings (read-only):**
 
 ```python
-self.settings.debug_mode          # Is debug mode enabled?
-self.settings.audio.output        # Output device config
+self.wingman.settings.debug_mode       # Is debug mode enabled?
+self.wingman.settings.audio.output     # Output device config
 ```
 
 **Utilities:**
 
 ```python
-self.printr.print()               # Log to console
-await self.printr.print_async()   # Async logging
-self.get_generated_files_dir()    # Get persistent storage dir
+self.log.info(msg)                     # Friendly logging (pass server_only=True to skip the toast)
+self.log.warning(msg) / self.log.error(msg)
+self.get_generated_files_dir()         # Get persistent storage dir
+self.wingman.run_in_thread(fn, *args)  # Run a blocking callable off the event loop
 ```
 
 **Configuration & Secrets:**
 
 ```python
 self.retrieve_custom_property_value(property_id, errors)  # Get config value (just-in-time!)
-await self.retrieve_secret(secret_name, errors, hint)      # Get secret from SecretKeeper
-self.secret_keeper.retrieve()                              # Direct SecretKeeper access
+await self.wingman.secrets.retrieve(secret_name, errors)  # Get secret from SecretKeeper
 ```
 
 ### Best Practices

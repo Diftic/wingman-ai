@@ -33,7 +33,8 @@ class ContextBuilder:
         self._settings = settings
         self._wingman_name = wingman_name
         self._last_compiled_context: str = ""
-        self._memory_recall_notified: bool = False
+        # The "Memory: N facts loaded" line goes out once per session.
+        self._memory_loaded_notified: bool = False
 
     async def build(
         self,
@@ -77,12 +78,21 @@ class ContextBuilder:
                 and self._config.elevenlabs.tts_prompt
             ):
                 tts_prompt = self._config.elevenlabs.tts_prompt
-        elif self._config.features.tts_provider == TtsProvider.INWORLD or (
-            self._config.features.tts_provider == TtsProvider.WINGMAN_PRO
-            and self._config.wingman_pro.tts_provider == WingmanProTtsProvider.INWORLD
+        elif self._config.features.tts_provider in (
+            TtsProvider.INWORLD,
+            # The subscription speaks through Inworld, so it takes the same prompt.
+            TtsProvider.WINGMAN_PRO,
         ):
             if self._config.inworld.use_tts_prompt and self._config.inworld.tts_prompt:
                 tts_prompt = self._config.inworld.tts_prompt
+                # Steering instructions ("[calm and measured]") only work on
+                # inworld-tts-2; the flash model ignores them, and the shipped
+                # prompt says so. The delivery block is appended for tts-2 only,
+                # so a user's edited prompt stays one text and still gets it.
+                if (self._config.inworld.model_id or "").strip() == "inworld-tts-2":
+                    from services.file import get_prompt
+
+                    tts_prompt = tts_prompt.rstrip() + "\n\n" + get_prompt("inworld-tts2-delivery")
         elif self._config.features.tts_provider == TtsProvider.OPENAI_COMPATIBLE:
             if (
                 self._config.openai_compatible_tts.use_tts_prompt
@@ -122,50 +132,30 @@ class ContextBuilder:
                 + conversation_summary
             )
 
-        # Persistent memory injection
-        persistent_memory_context = ""
-        if persistent_memory_service and messages:
-            # Use the most recent user message as the query
-            last_user_msg = ""
-            for msg in reversed(messages):
-                role = (
-                    msg.get("role")
-                    if isinstance(msg, dict)
-                    else getattr(msg, "role", None)
-                )
-                raw_content = (
-                    msg.get("content", "")
-                    if isinstance(msg, dict)
-                    else getattr(msg, "content", "")
-                )
-                # Extract plain text from multimodal content (images etc.)
-                content = self._extract_text_content(raw_content) if raw_content else ""
-                if role == "user" and content:
-                    last_user_msg = content
-                    break
-            if last_user_msg:
-                try:
-                    persistent_memory_context = (
-                        await persistent_memory_service.build_memory_context(
-                            last_user_msg
-                        )
+        # Persistent memory: one block with every fact and the recent
+        # episodes. It sits in the system prompt because it only changes at a
+        # checkpoint, every twenty minutes at most, so the provider's prompt
+        # cache keeps covering it. A per-message lookup used to sit behind the
+        # history instead, and changed on every turn.
+        memory_block = ""
+        if persistent_memory_service:
+            try:
+                memory_block = persistent_memory_service.memory_block()
+                if memory_block and not self._memory_loaded_notified:
+                    self._memory_loaded_notified = True
+                    facts, episodes = persistent_memory_service.block_stats()
+                    parts = []
+                    if facts:
+                        parts.append(f"{facts} {'fact' if facts == 1 else 'facts'}")
+                    if episodes:
+                        parts.append(f"{episodes} {'session' if episodes == 1 else 'sessions'}")
+                    await printr.print_async(
+                        f"Memory: {' and '.join(parts)} loaded",
+                        color=LogType.MEMORY,
+                        source_name=self._wingman_name,
                     )
-                    if persistent_memory_context and not self._memory_recall_notified:
-                        self._memory_recall_notified = True
-                        # Count restored fact lines (lines starting with "- ")
-                        fact_count = sum(
-                            1
-                            for line in persistent_memory_context.splitlines()
-                            if line.startswith("- ")
-                        )
-                        if fact_count > 0:
-                            await printr.print_async(
-                                f"Memory: {fact_count} {'memory' if fact_count == 1 else 'memories'} recalled",
-                                color=LogType.MEMORY,
-                                source_name=self._wingman_name,
-                            )
-                except Exception:
-                    pass  # Don't let memory failures break conversation
+            except Exception:
+                pass  # Don't let memory failures break conversation
 
         spoken = getattr(self._settings, "spoken_language", "multilingual")
         if spoken == "multilingual":
@@ -194,26 +184,30 @@ class ContextBuilder:
         ):
             context += "\n\n" + conversation_summary_section
 
-        # Append persistent memory context
-        if persistent_memory_context:
-            context += "\n\n" + persistent_memory_context
+        if memory_block:
+            context += "\n\n" + memory_block
 
         # Persistent memory tool instructions
         if persistent_memory_service:
             context += (
                 "\n\n# PERSISTENT MEMORY\n"
-                "You have persistent memory. Important facts and past conversation summaries "
-                "are provided in the [Memory] sections above (if any). "
-                "You can use the `memory_remember`, `memory_recall`, and `memory_forget` tools when the user "
-                "explicitly asks you to remember, recall, or forget something. "
-                "You don't need to use `memory_remember` for routine information — that is handled automatically."
+                "You have persistent memory. What you know about the user from earlier "
+                "sessions is listed in the MEMORY section above (if any). "
+                "Call `memory_remember` right away when the user tells you something that should "
+                "still hold next month: how to address them, which language to answer in, a "
+                "standing instruction, what they own, who they play with, what they like or "
+                "dislike, a goal. Do not store where they are, what they are doing right now, a "
+                "status, or a mood. Use `memory_recall` only when the user asks what you know "
+                "about them, and `memory_forget` when they ask you to forget something. Never "
+                "call a memory tool for a question about the world or the game. Everything else "
+                "said in a session is picked up automatically."
             )
 
         self._last_compiled_context = context
         return context
 
     def get_last_context(self) -> str:
-        """Return the last compiled system context (cached from the most recent LLM call)."""
+        """The last compiled system context, as the model saw it."""
         return self._last_compiled_context
 
     def build_user_context(
@@ -275,8 +269,8 @@ class ContextBuilder:
         messages.insert(0, {"role": "system", "content": context})
 
     def reset_memory_notification(self) -> None:
-        """Reset the memory recall notification flag (e.g., on conversation reset)."""
-        self._memory_recall_notified = False
+        """The next build says again what was loaded (new session, reset)."""
+        self._memory_loaded_notified = False
 
     @staticmethod
     def _extract_text_content(content) -> str:

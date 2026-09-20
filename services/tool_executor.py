@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Callable, Awaitable
 from api.enums import LogType
 from services.benchmark import Benchmark
 from services.printr import Printr
-from services.tool_response_cache import ToolResponseCompressor
+from services.tool_response_limiter import ToolResponseLimiter
 
 if TYPE_CHECKING:
     from api.interface import CommandConfig, WingmanConfig, SettingsConfig
@@ -37,7 +37,7 @@ class ToolExecutor:
         self._config = config
         self._settings = settings
         self._wingman_name = wingman_name
-        self._tool_response_compressor = ToolResponseCompressor()
+        self._tool_response_limiter = ToolResponseLimiter()
 
     # ------------------------------------------------------------------
     # fix_tool_calls  (was _fix_tool_calls)
@@ -111,6 +111,7 @@ class ToolExecutor:
         execute_command_fn: Callable[["CommandConfig", bool], Awaitable[tuple]],
         play_to_user_fn: Callable[[str], Awaitable[None]],
         local_ai_service,
+        settings_service=None,
         update_tool_response_fn: Callable[[str, str], Awaitable[bool]],
         add_tool_response_fn: Callable,
         pending_tool_calls: list,
@@ -170,6 +171,7 @@ class ToolExecutor:
                     mcp_registry=mcp_registry,
                     capability_registry=capability_registry,
                     persistent_memory_service=persistent_memory_service,
+                    settings_service=settings_service,
                     get_command_fn=get_command_fn,
                     execute_command_fn=execute_command_fn,
                     play_to_user_fn=play_to_user_fn,
@@ -180,22 +182,27 @@ class ToolExecutor:
                 if tool_label:
                     tool_timings.append((tool_label, tool_time_ms))
 
-                # Compress large tool responses via local AI before the cloud LLM sees them
-                if (
-                    tool_call.id
-                    and self._config.features.compress_tool_responses
+                # Never feed an oversized tool/MCP response to the (paid) main model.
+                # Same cap as ctx.ai.generate, always on. Over the cap the response is
+                # summarized by the support model when the user allows it, cut otherwise.
+                from wingmen.facade import skill_input_cap
+
+                summarizer = (
+                    local_ai_service
+                    if self._config.features.compress_tool_responses
                     and local_ai_service
                     and local_ai_service.is_ready()
-                    and self._tool_response_compressor.should_compress(
-                        str(function_response)
-                    )
-                ):
-                    function_response = await self._tool_response_compressor.compress(
-                        response_text=str(function_response),
-                        local_ai_service=local_ai_service,
-                        wingman_name=self._wingman_name,
-                        tool_name=function_name,
-                    )
+                    else None
+                )
+                limited = await self._tool_response_limiter.limit(
+                    response_text=str(function_response),
+                    cap=skill_input_cap(self._config),
+                    tool_name=function_name,
+                    wingman_name=self._wingman_name,
+                    local_ai_service=summarizer,
+                )
+                if limited != str(function_response):
+                    function_response = limited
 
                 if tool_call.id:
                     # updating the dummy tool response with the actual response
@@ -233,6 +240,7 @@ class ToolExecutor:
         get_command_fn: Callable[[str], "CommandConfig | None"],
         execute_command_fn: Callable[["CommandConfig", bool], Awaitable[tuple]],
         play_to_user_fn: Callable[[str], Awaitable[None]],
+        settings_service=None,
     ) -> tuple[str, str | None, "Skill | None", str | None]:
         """Dispatches a single function call to the appropriate handler.
 
@@ -265,6 +273,18 @@ class ToolExecutor:
         instant_response = ""
         used_skill = None
         tool_label = None
+
+        # ── 0. Speech vocabulary tools ──────────────────────────────
+        if function_name in ("vocabulary_remember", "vocabulary_forget") and settings_service:
+            from services.audio.vocabulary_tools import run_vocabulary_tool
+
+            function_response = run_vocabulary_tool(
+                function_name, function_args, settings_service, persistent_memory_service
+            )
+            await printr.print_async(
+                function_response, color=LogType.INFO, source_name=self._wingman_name
+            )
+            return function_response, None, None, f"🔤 {function_name}"
 
         # ── 1. Persistent memory tools ──────────────────────────────
         if (

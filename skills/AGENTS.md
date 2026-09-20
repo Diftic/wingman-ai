@@ -2,6 +2,8 @@
 
 Before creating or modifying a skill, **read [README.md](README.md)** in this directory for full documentation including custom property types, discovery metadata guidelines, dependency bundling, and example skills.
 
+**Migrating an existing skill?** See [MIGRATING-TO-V3.md](MIGRATING-TO-V3.md).
+
 ## STOP — Before You Start Implementing
 
 **You MUST ask the user these questions before writing any code:**
@@ -118,10 +120,10 @@ from api.interface import SettingsConfig, SkillConfig, WingmanInitializationErro
 from skills.skill_base import Skill, tool
 
 if TYPE_CHECKING:
-    from wingmen.open_ai_wingman import OpenAiWingman
+    from wingmen.wingman_context import WingmanContext
 
 class YourSkillName(Skill):
-    def __init__(self, config: SkillConfig, settings: SettingsConfig, wingman: "OpenAiWingman") -> None:
+    def __init__(self, config: SkillConfig, settings: SettingsConfig, wingman: "WingmanContext") -> None:
         super().__init__(config=config, settings=settings, wingman=wingman)
 
     async def validate(self) -> list[WingmanInitializationError]:
@@ -143,10 +145,51 @@ class YourSkillName(Skill):
         await super().unload()
 ```
 
+## Command Actions — `@command_action`
+
+Besides AI-callable `@tool`s, a skill can expose **command actions**: functions a user binds as an action inside a **Command** (alongside keyboard / mouse / write / wait), triggered by an **instant phrase** or by the AI. The Client renders an input for each parameter; the user fills **static** values that are stored in the command and passed to your function at trigger time.
+
+```python
+from skills.skill_base import Skill, command_action   # separate decorator from @tool
+from typing import Literal
+
+class YourSkill(Skill):
+    @command_action(label="Set Brightness", description="Set the display brightness.")
+    def set_brightness(self, level: int, mode: Literal["soft", "hard"] = "soft") -> str:
+        ...
+        return f"Brightness set to {level}"   # handed to the AI (respond="ai" default)
+```
+
+**Decorator:** `@command_action(label=None, description=None, respond="ai")`
+
+- `label` — name shown in the command editor (defaults to the function name).
+- `description` — one-line help text shown under the function picker in the editor.
+- `respond` — `Literal["ai", "speak"]`; **where your return value goes** (see below).
+
+**Separate from `@tool`.** A function can carry both, one, or neither. Carrying both makes it AI-callable *and* user-bindable.
+
+**Parameters must be UI-renderable** — only `str`, `int`, `float`, `bool`, and `Literal[...]` (rendered as a dropdown), plus optionals (params with defaults). Any other type (`dict`, `list`, custom) is **rejected at import time** with a clear error. The schema is auto-generated from your type hints (same machinery as `@tool`). The Client sends only declared params and Core drops stray keys, so your function never gets an unexpected keyword argument.
+
+**Output — return a plain `str` (or `None`); `respond` decides where it goes:**
+
+- `respond="ai"` *(default)* — the return is handed to the **AI**, which voices/uses it (it may paraphrase or chain). Pair with a command's static `responses` for a fixed acknowledgment.
+- `respond="speak"` — the return is **spoken verbatim** via TTS (no AI roundtrip on instant activation) and also given to the AI. Use for a *dynamic*, input-dependent spoken reply.
+- **Return `None`** ⇒ the command falls through to its usual `"OK"` acknowledgment (fire-and-forget), like a keyboard command.
+
+**Interplay with a Command's static `responses`:** the command's static `responses` (e.g. "I got you.") are the *fixed* acknowledgment — used when the action doesn't speak its own result (`respond="ai"` or fire-and-forget). A `respond="speak"` action provides a *dynamic* spoken result and **takes precedence** over the static response (the wingman never says both). Static for input-independent replies; `respond="speak"` for input-dependent ones.
+
+**Reference examples in bundled skills:**
+
+- `radio_chatter` — `turn_on_radio` / `turn_off_radio` / `get_radio_status`: stacks `@command_action` on existing `@tool` methods; no-arg `respond="speak"` toggles.
+- `spotify` — `control_spotify_playback`: a `Literal[...]` param renders as an enum dropdown (the user fixes one action per command) plus an optional `int` input.
+- `hud` — `hud_show` / `hud_hide`: no-arg async toggles.
+- `voice_changer` — `switch_voice_now`: a *new* method (no matching `@tool`), giving users a manual handle on an otherwise event-driven skill.
+
 ## Minimal default_config.yaml
 
 ```yaml
 module: skills.your_skill_name.main
+api_version: 3                         # REQUIRED for v3 — without it the skill is treated as legacy and won't load
 name: YourSkillName                    # Must match class name exactly
 display_name: Your Skill Name
 author: Your Name
@@ -183,12 +226,87 @@ async def unload(self) -> None
 
 ```python
 self.retrieve_custom_property_value(property_id, errors)  # Config value (just-in-time!)
-await self.retrieve_secret(secret_name, errors, hint)      # Secrets via SecretKeeper
-self.wingman.config                                        # Wingman configuration
-self.wingman.audio_player                                  # Audio player
-self.printr.print() / await self.printr.print_async()      # Logging
+await self.wingman.secrets.retrieve(secret_name, errors)  # stored secret (prompts user if missing)
+self.wingman.config                                        # READ-ONLY view of the config
+self.log.info(msg) / self.log.warning(msg) / self.log.error(msg)  # Logging (server_only=True skips the toast)
 self.get_generated_files_dir()                             # Persistent storage directory
 ```
+
+### The facade — what you may read vs. change
+
+`self.wingman` is a **controlled facade** (`WingmanContext`). You can **read** almost everything,
+but you may only **change** things through sanctioned capabilities. Writing to config raises
+`FacadeError` with guidance.
+
+```python
+# READ (free): self.wingman.config.<...>  — live, read-only. Writing raises FacadeError.
+#   copy.deepcopy(self.wingman.config.sound) gives a mutable detached copy if you need to customize.
+
+# CHANGE (sanctioned capabilities only):
+await self.wingman.tts.set_voice(voice)                 # voice on the CURRENT provider (no switching)
+await self.wingman.tts.speak(text, interrupt=True)      # say text; interrupt=False waits for current playback
+self.wingman.audio.is_playing                           # read playback state
+await self.wingman.audio.play(cfg) / .stop(cfg)         # play/stop your own audio
+sub = self.wingman.audio.on_playback_started(cb)        # returns a Subscription; sub.unsubscribe() in unload()
+await self.wingman.audio.set_output_device(device_id)   # switch output device in-process
+self.wingman.commands.get(name) / .all() / await .save()  # read/edit/persist commands
+self.wingman.tools.has(name) / await .invoke(name, args)  # discover + invoke tools/commands -> ToolResult
+self.wingman.tools.source(name) / .all() / .servers()   # tool origin + enumerate callable functions / MCP servers
+
+# CONVERSATION:
+self.wingman.conversation.history() / .summary          # read the live conversation
+await self.wingman.conversation.add_user(c) / .add_assistant(c) / .reset()
+await self.wingman.conversation.summarize()             # summarize the live convo (free, local)
+
+# SECRETS / MEMORY:
+await self.wingman.secrets.retrieve(name, errors)       # stored secret (prompts user if missing)
+self.wingman.memory.available                           # persistent memory ready?
+await self.wingman.memory.remember(c) / .recall(q) / .context(q) / .update(id, c) / .forget(q) / .forget_by_id(id)
+
+# MAIN AI — two clearly-different calls (both replace the removed raw LLM call):
+text = await self.wingman.ai.generate(prompt, system=..., data=..., image=..., messages=..., auto_shorten=False)
+#   single-turn side-call, NOT added to the conversation; returns a str (""). Input is CAPPED when
+#   conversation condensation is on (Wingman Pro hardcoded; own providers config.features.skill_max_input_tokens).
+#   Over the cap -> FacadeError (or truncates if auto_shorten=True). Images are charged a flat
+#   estimate, never the base64 length. Pass messages= to send a prebuilt message list directly.
+summary = await self.wingman.local_ai.summarize(...)    # bulk reduction on the small support model
+resp = await self.wingman.local_ai.generate(t, system_prompt=...)  # support-model single-turn -> SupportResponse (.text)
+```
+
+**Removed (do NOT use):** the raw LLM call (`self.llm_call(...)` / `actual_llm_call` — use `self.wingman.ai.generate`),
+`self.wingman.switch_tts_provider(...)` (runtime provider switching is not allowed; use `tts.set_voice`),
+the raw registries (`self.wingman.registry.*` — use `self.wingman.tools.*`), and writing to
+`self.wingman.config` / `self.settings` (read-only; use the capabilities above).
+
+### Calling other skills & MCP servers
+
+```python
+# Discover everything callable right now (with origin + params)
+for tool in self.wingman.tools.all():
+    self.log.info(f"{tool.name} (from {tool.source})", server_only=True)
+
+# Call another ACTIVE skill's tool by name
+if self.wingman.tools.has("take_screenshot"):
+    result = await self.wingman.tools.invoke("take_screenshot", {})
+    self.log.info(f"{result.response} (from {result.skill})")
+
+# Call your own MCP server's tool (many skills ship an MCP for their datasource)
+servers = {s["display_name"] for s in self.wingman.tools.servers()}
+if "My Data MCP" in servers and self.wingman.tools.has("mydata_query"):
+    res = await self.wingman.tools.invoke("mydata_query", {"q": "ships"})
+    data = res.response
+else:
+    self.log.warning("My Data MCP not active; skipping enriched lookup")
+```
+
+MCP tool names are prefixed by the registry — use the name exactly as it appears in
+`self.wingman.tools.names()` / `.all()`.
+
+## Local Model — Sampling Parameters
+
+Global defaults are tuned for summarization (low temperature). **Override for creative tasks.** Use `SamplingPreset` from `services/skill_local_ai.py` or pass `temperature` / `top_p` directly to `self.wingman.local_ai.generate()`, `.generate_sync()`, and `.summarize()`. Manual values override presets. See `SamplingPreset` docstring for available presets and values.
+
+Pass `reasoning=True` to make the local model *think* before answering — better quality on structured or analytical work, but slower. Only do this on background tasks the user is not waiting for. Leave it unset (or `False`) on anything latency-sensitive. Available on `generate()`, `generate_sync()`, `summarize()`, and `summarize_sync()`.
 
 ## Example Skills
 
