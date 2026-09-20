@@ -2,9 +2,9 @@
   "format_version": 1,
   "engine_version": 3,
   "package_id": "sc_log_reader_2",
-  "revision": 6,
-  "version": "0.3.2-update-test",
-  "release_notes": "Version-only release for testing instruction update detection and next-startup activation. Parsing rules and location mappings are unchanged from revision 5, including Orbituary and Orbituary Clinic. Requires reader 0.3.0. Activation follows the installed reader's update policy; full-build qualification remains incomplete.",
+  "revision": 7,
+  "version": "0.3.3-update-test",
+  "release_notes": "Version-only release for testing a newer update after revision 6 was rejected through recovery. Parsing rules and location mappings are unchanged from revision 6, including Orbituary and Orbituary Clinic. Requires reader 0.3.0. Activation follows the installed reader's update policy; full-build qualification remains incomplete.",
   "verified_game_builds": [],
   "framing": {
     "record_start": "^<\\d{4}-\\d\\d-\\d\\dT",
