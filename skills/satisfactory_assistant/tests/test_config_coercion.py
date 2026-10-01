@@ -240,6 +240,6 @@ def test_update_satisfactory_plan_accepts_output_rate_alias(tmp_path: Path) -> N
         )
     )
 
-    assert result.startswith("Added production flow 'Copper Ingots'")
+    assert result.startswith("Saved the production setup 'Copper Ingots'")
     flow = assistant.workspace._read("flows")[0]
     assert flow["outputs"] == ["Copper Ingots per minute"]

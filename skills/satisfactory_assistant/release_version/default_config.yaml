@@ -3,14 +3,14 @@ api_version: 3
 name: SatisfactoryAssistant
 display_name: Satisfactory Assistant
 author: ShipBit
-auto_activate: false
+auto_activate: true
 discoverable_by_default: false
 tags:
   - Game
   - Satisfactory
   - Planning
 description:
-  en: Help Satisfactory players plan, audit, and mirror factories for the currently active save only, including notes, todos, production goals, expected machine rates, inferred production lines, Space Elevator phases, and Project Assembly deliverables.
+  en: "Help Satisfactory players use their current save: find machines on a map, keep notes and jobs, check production, and plan Space Elevator phases."
 discovery_keywords:
   - satisfactory
   - factory planning
@@ -47,51 +47,48 @@ discovery_keywords:
   - how many machines
 
 prompt: |
-  You can help with Satisfactory factory planning for the active save only.
+  You are the active Wingman's Satisfactory factory companion. Everything needed
+  for Satisfactory behavior comes from this skill; do not rely on the Wingman's
+  backstory or any profile-specific instructions.
+  Treat the active Satisfactory save as the source of truth. Keep every save's
+  notes, jobs, goals, scans, and plans separate. Never carry factory details from
+  one save into another.
+  Speak like a helpful, experienced player. Use short sentences and everyday words.
+  Lead with what the player needs to know or do next. Do not read internal IDs,
+  file paths, database terms, or diagnostic labels aloud. Translate technical
+  tool wording into normal game language, and explain uncommon terms briefly.
   Use the skill tools when the player asks about save-specific plans, notes, todos,
   production goals, factory layouts, material inputs, item outputs, recipes,
   machine counts, bottlenecks, or maintenance work.
+  The factory scan refreshes automatically when a save is detected and when
+  Satisfactory creates or updates a save file. For any question asking where
+  something is, its coordinates, a resource node, or a map, call
+  show_satisfactory_map with the search term in query. This opens the skill's
+  own positionable popup; it does not use the HUD skill. Use action "hide" when
+  the player asks to close the map. Never use lookup for a location request;
+  lookup is only for item and recipe catalog facts. Speech recognition may
+  render "oil extractors" as "oilless extractors"; still use the map tool.
   In Satisfactory, "phase" usually means Space Elevator / Project Assembly phase.
   The skill can calculate a Project Assembly phase plan for the active save
   (machines needed, power draw, and required inputs) using its planning tools;
   phase deliverable requirements come from verified bundled game data, not guesswork.
   If the player asks to finish a phase, plan around that phase's deliverables
   unless they explicitly mean a custom project phase.
+  Keep plans useful during play. Start with the goal, what is holding it back,
+  materials and machines needed, the next few build steps, and a simple way to
+  check that it works. Consider logistics and power when they matter.
+  When correcting a plan, compare it with the latest save and the player's current
+  goal. Point out old assumptions, missing prerequisites, production shortages or
+  excess, transport bottlenecks, and power risks. Suggest the smallest useful fix.
+  If exact save information is missing, say what is missing in plain language and
+  clearly label any estimate instead of presenting it as a fact.
   Never claim access to other saves. If the tool says no active save is confirmed,
   ask the player to start or load a Satisfactory save first.
 
 custom_properties:
-  - id: satisfactory_saved_dir
-    name: Satisfactory Saved Directory
-    hint: "Optional path to the Satisfactory 'Saved' directory (e.g. C:/Users/<you>/AppData/Local/FactoryGame/Saved). Leave empty to auto-detect common locations. When set, only this directory is used."
-    value: ""
-    property_type: string
-    required: false
-
-  - id: satisfactory_docs_file
-    name: Satisfactory Docs File
-    hint: "Optional path to CommunityResources/Docs/en-US.json. Leave empty to auto-detect common Steam install paths."
-    value: ""
-    property_type: string
-    required: false
-
   - id: satisfactory_install_dir
     name: Satisfactory Install Directory
     hint: "Optional path to the Satisfactory game install root (e.g. D:/SteamLibrary/steamapps/common/Satisfactory). Leave empty to auto-detect via Steam, Epic, or common install paths."
-    value: ""
-    property_type: string
-    required: false
-
-  - id: satisfactory_docs_locale
-    name: Satisfactory Docs Locale
-    hint: "Locale of the CommunityResources/Docs JSON file to use, e.g. en-US or de-DE. Docs are per-locale; en-US is used as a fallback when the requested locale is missing."
-    value: "en-US"
-    property_type: string
-    required: false
-
-  - id: satisfactory_parser_runtime_dir
-    name: Satisfactory Parser Runtime Directory
-    hint: "Optional directory containing node_modules for @etothepii/satisfactory-file-parser. Leave empty to use the runtime installed by install.bat; set this if audit says the parser dependency is missing."
     value: ""
     property_type: string
     required: false
@@ -109,6 +106,48 @@ custom_properties:
     value: true
     property_type: boolean
     required: false
+
+  - id: map_overlay_enabled
+    name: Enable Map Popup
+    hint: "Show location maps in Satisfactory's own click-through popup, independent of the HUD skill. Requires borderless-windowed or windowed game mode."
+    value: true
+    property_type: boolean
+    required: false
+
+  - id: map_overlay_display
+    name: Map Popup Display (1 = Primary Monitor)
+    hint: "One-based monitor number used for the map popup."
+    value: 1
+    property_type: number
+    required: false
+
+  - id: map_overlay_size
+    name: Map Popup Size in Pixels (240-1200)
+    hint: "Width and height of the square location-map popup."
+    value: 520
+    property_type: number
+    required: false
+
+  - id: map_overlay_duration_seconds
+    name: Map Popup Duration in Seconds (0 = Until Hidden)
+    hint: "How long a map remains visible after opening. Set to 0 to keep it open until you ask the assistant to close it."
+    value: 15
+    property_type: number
+    required: false
+
+  - id: map_overlay_position
+    name: Map Popup Position
+    hint: "Choose the popup's standard position on the selected monitor."
+    value: top_center
+    property_type: single_select
+    required: false
+    options:
+      - label: Top Left
+        value: top_left
+      - label: Top Centre
+        value: top_center
+      - label: Top Right
+        value: top_right
 
   - id: mirror_trend_window_saves
     name: Mirror Trend Window Saves
@@ -130,4 +169,3 @@ custom_properties:
     value: 25
     property_type: number
     required: false
-

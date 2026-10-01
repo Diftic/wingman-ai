@@ -270,7 +270,7 @@ def test_master_scope_with_nonzero_phase_returns_validation_message(
 
     result = _run_plan(stub, phase=phase, scope="master")
 
-    assert "scope='master'" in result
+    assert "full-game plan" in result
     assert str(phase) in result
     assert not (stub.workspace.dir / "planning.sqlite3").exists()
 
@@ -395,7 +395,7 @@ def test_stage_scope_regression_still_produces_a_stage_plan(
 # --- Tool surface: exactly three @tool methods --------------------------------
 
 
-def test_exactly_three_tool_methods() -> None:
+def test_exactly_four_tool_methods() -> None:
     tool_methods = [
         name
         for name, value in vars(main.SatisfactoryAssistant).items()
@@ -403,10 +403,11 @@ def test_exactly_three_tool_methods() -> None:
     ]
     assert set(tool_methods) == {
         "get_satisfactory_context",
+        "show_satisfactory_map",
         "update_satisfactory_plan",
         "calculate_satisfactory_plan",
     }
-    assert len(tool_methods) == 3
+    assert len(tool_methods) == 4
 
 
 # --- Pure format_master_response / export_master_summary tests ---------------

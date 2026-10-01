@@ -8,10 +8,21 @@ from pathlib import Path
 from satisfactory_docs import load_docs_catalog, parse_item_amounts
 from satisfactory_mirror import (
     TrendConfig,
+    _write_json,
     build_factory_mirror,
     calculate_health,
     store_mirror_artifacts,
 )
+
+
+def test_write_json_atomically_replaces_and_cleans_temp(tmp_path: Path) -> None:
+    path = tmp_path / "latest_mirror.json"
+    path.write_text('{"old": true}', encoding="utf-8")
+
+    _write_json(path, {"new": True})
+
+    assert json.loads(path.read_text(encoding="utf-8")) == {"new": True}
+    assert list(tmp_path.glob(".latest_mirror.json.*.tmp")) == []
 
 
 def _docs_file(tmp_path: Path) -> Path:
@@ -220,4 +231,3 @@ def test_store_mirror_caps_file_over_limit(tmp_path: Path) -> None:
 
     # The append pushed history past the cap, so the file is trimmed back to it.
     assert obs_path.read_text(encoding="utf-8").count("\n") == cap
-

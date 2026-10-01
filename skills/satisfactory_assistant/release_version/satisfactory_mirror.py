@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -390,7 +391,16 @@ def _mirror_dir(workspace_dir: Path) -> Path:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    """Atomically replace a JSON artifact so concurrent readers never see a partial file."""
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        temp.replace(path)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -498,12 +508,16 @@ def store_mirror_artifacts(
 
     history = _read_jsonl(observations_path)
     # Keep the file bounded while preserving enough data for larger future windows.
-    keep = deque(history, maxlen=max(50, trend_config.window_saves * 4))
-    observations_path.write_text(
-        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in keep),
-        encoding="utf-8",
-    )
-    health = calculate_health(list(keep), trend_config)
+    # Rewrite only when the append pushed the file past the cap; while it stays
+    # within the cap the append above is the only write.
+    cap = max(50, trend_config.window_saves * 4)
+    if len(history) > cap:
+        history = list(deque(history, maxlen=cap))
+        observations_path.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in history),
+            encoding="utf-8",
+        )
+    health = calculate_health(history, trend_config)
     _write_json(out_dir / "latest_health.json", health)
     return {
         "mirrorDir": str(out_dir),
@@ -599,6 +613,5 @@ def format_factory_audit(
 
     lines.append(f"  Artifacts: {artifact_info.get('mirrorDir')}")
     return "\n".join(lines)
-
 
 

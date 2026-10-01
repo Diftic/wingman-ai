@@ -282,7 +282,7 @@ def test_format_context_stays_within_budget_and_dedupes(tmp_path: Path) -> None:
 def test_format_context_empty_workspace(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
     text = format_context(["Active save: Test"], ws.summary(12))
-    assert "No planning records yet" in text
+    assert "No saved notes or plans yet" in text
 
 
 @pytest.mark.skipif(os.name == "nt", reason="case-sensitivity test is POSIX-only")

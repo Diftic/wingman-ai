@@ -1,3 +1,22 @@
+# SC Accountant — Personal ERP
+
+The current skill uses **Simple** and **Advanced** modes over one local ERP database.
+It connects to the newer SC Log Reader's versioned SQLite event feed, keeps uncertain
+requests separate from confirmed transactions, and links operations, money, cargo,
+processing jobs, assets and plans.
+
+See [ERP_README.md](ERP_README.md) for setup, migration, current capabilities and
+verification limits. The Wingman v3 entry point is `skills.sc_accountant.main`, delegating to the ERP adapter.
+Existing legacy code and data are retained. Live Wingman/game qualification is separate
+from the automated and local-browser tests.
+
+---
+
+## Historical accountant documentation
+
+The following describes the previous implementation. Its three tiers, market tools
+and old JSONL integration do not describe the new ERP entry point.
+
 # SC_Accountant — Corporate Accounting for Star Citizen
 
 **Author:** Mallachi

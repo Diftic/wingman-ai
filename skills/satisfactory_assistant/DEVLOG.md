@@ -41,6 +41,28 @@ recorded as `ACCEPTED (delegated)` with Fable 5 QC evidence; material
 product decisions and plan amendments continue to be logged with
 rationale. Non-overlapping packets may run in parallel.
 
+## 2026-08-16 - v0.6.0 - Automatic live mirror refresh
+
+- User live-test finding: Apex correctly activated Satisfactory Assistant, but
+  a location request used Docs `lookup` instead of mirror `locate`, and no
+  factory mirror existed because audit was manual-only.
+- Product decision: Satisfactory Assistant activates with its configured
+  wingman, audits immediately when an active save becomes detectable, then
+  watches `SaveGames` for created or changed `.sav` files. The in-game
+  autosave interval controls refresh frequency; a forced two-minute parse was
+  considered and explicitly superseded to avoid redundant work.
+- Implementation: one background watcher task, five-second cheap file poll,
+  deterministic save-tree marker, serialized manual/automatic audits,
+  off-event-loop parsing, and unload that waits for an in-flight parse.
+- Location routing now explicitly requires `locate` for where, coordinate,
+  node, and map requests; `lookup` remains catalog-only.
+- Mirror JSON replacement is atomic so a concurrent locate call never reads a
+  partially written `latest_mirror.json`.
+- Verification: targeted automatic-audit, mirror, and plan-tool suites pass
+  (`54 passed`); full suite passes (`458 passed, 1 skipped`); Ruff passes for
+  the complete source/test tree. Release sync, install, and live-startup
+  verification remain before the v0.6.0 bundle is accepted.
+
 ## 2026-07-09 - Maintenance - Two behavior-preserving performance fixes
 
 Scope: performance-only, no behavior change; audit finding #11.
@@ -5342,6 +5364,35 @@ Verified against `C:\Users\larse\AppData\Local\FactoryGame\Saved` (FactoryGame
 
 
 
+## 2026-08-16 - v0.7.0 standalone top-centre map popup
 
+- Replaced the deferred HUD delivery assumption with a Satisfactory-owned,
+  click-through layered Windows popup based on SC NavPoint's navigation-ring
+  overlay mechanics. The popup is independent of wingman HUD lifecycle.
+- Added settings for popup enablement, monitor, size, and visibility duration.
+- Added `show_satisfactory_map` for explicit show/reopen/hide behavior. Existing
+  `get_satisfactory_context(locate=...)` also opens the popup for compatibility.
+- Removed the obsolete HUD markdown-image hint from locate output.
+- The overlay remains subject to the same compositor limit as NavPoint:
+  windowed/borderless-windowed works; exclusive fullscreen cannot be overlaid.
 
+### v0.7.1 location alias follow-up
 
+- Live Apex testing routed correctly but passed `oilfields`; the mirror stored
+  built extractors as `Build_OilPump` with an unresolved `Persistent_Level`
+  resource, so the old literal matcher returned no hits.
+- Added player-facing aliases and singular/plural normalization for all current
+  production-building classes plus known later-game production machines and
+  generators. Type queries now label pins with official building names.
+
+### v0.7.2 focused map follow-up
+
+- Live screenshot/log review found two remaining issues: Faster Whisper emitted
+  `oilless extractor`, and the renderer fitted all 1,185 factory machines.
+- Normalize that observed transcript to Oil Extractor. Explicit machine-type
+  queries suppress production-line matches, while map coverage uses up to 100
+  hits independently of the five-line spoken-response cap.
+- Focus maps now fit matching hits, retain only in-frame factory dots as
+  orientation context, number pins, and report the total match count.
+- Recognized machine names misrouted into context `focus` are defensively sent
+  through the locate/popup path.

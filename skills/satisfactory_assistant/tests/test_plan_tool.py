@@ -216,6 +216,11 @@ class _PlanToolStub:
         self.audit_calls.append((result, ws, phase))
         return "AUDIT RESULT"
 
+    async def _run_factory_audit_async(
+        self, result: ActiveSaveResult, ws: SaveWorkspace, phase: int = 0
+    ) -> str:
+        return self._run_factory_audit(result, ws, phase)
+
 
 class _NoSaveStub(_PlanToolStub):
     """Stub simulating no active save resolved."""
@@ -299,8 +304,8 @@ def test_docs_missing_returns_hint_message(
 
     result = _run_plan(stub, phase=1)
 
-    assert "Docs file not found" in result
-    assert "place a; place b" in result
+    assert "couldn't find Satisfactory's game data" in result
+    assert "place a; place b" not in result
 
 
 def test_docs_invalid_returns_tool_error(
@@ -323,7 +328,7 @@ def test_docs_invalid_returns_tool_error(
 
     result = _run_plan(stub, phase=1)
 
-    assert "Could not load the Satisfactory Docs file" in result
+    assert "couldn't read Satisfactory's game data" in result
     assert "Unexpected docs JSON root" in result
     assert stub.diagnostics
 
@@ -436,14 +441,14 @@ def test_audit_mode_without_save_file_refuses(tmp_path: Path) -> None:
 
     result = _run_plan(stub, phase=1, mode="audit")
 
-    assert "physical .sav file is not" in result
+    assert "couldn't read its save file" in result
     assert not stub.audit_calls
 
 
 # --- Tool surface: exactly three @tool methods -------------------------------
 
 
-def test_exactly_three_tool_methods() -> None:
+def test_exactly_four_tool_methods() -> None:
     tool_methods = [
         name
         for name, value in vars(main.SatisfactoryAssistant).items()
@@ -451,10 +456,11 @@ def test_exactly_three_tool_methods() -> None:
     ]
     assert set(tool_methods) == {
         "get_satisfactory_context",
+        "show_satisfactory_map",
         "update_satisfactory_plan",
         "calculate_satisfactory_plan",
     }
-    assert len(tool_methods) == 3
+    assert len(tool_methods) == 4
 
 
 # --- Display names: format_plan_response substitutes mapped names ------------
@@ -737,8 +743,8 @@ def test_ban_recipes_changes_response(
     )
 
     assert banned != baseline
-    assert "solver status" in banned
-    assert "Nothing persisted" in banned
+    assert "couldn't make a workable plan" in banned
+    assert "No plan was saved" in banned
 
 
 # --- SSP-P5-W04: logistics wiring (append-only) ------------------------------
@@ -949,7 +955,7 @@ def test_create_build_todos_refused_when_plan_writes_disabled(
         create_build_todos=True,
     )
 
-    assert "Plan writes are disabled in skill settings." in result
+    assert "Saving notes and plans is turned off" in result
     assert stub.workspace._read("todos") == []
 
 
@@ -1043,7 +1049,7 @@ def test_pace_scenarios_stage_scope_bounded_not_persisted(
 
     assert "Pace scenario comparison" in result
     assert "scope=stage, phase=1" in result
-    assert "Nothing persisted" in result
+    assert "No plan was saved" in result
     assert len(result) <= 3200
     assert not (stub.workspace.dir / "planning.sqlite3").exists()
     assert not (stub.workspace.dir / "plans").exists()
@@ -1059,7 +1065,7 @@ def test_pace_scenarios_master_scope_bounded_not_persisted(
 
     assert "Pace scenario comparison" in result
     assert "scope=master" in result
-    assert "Nothing persisted" in result
+    assert "No plan was saved" in result
     assert len(result) <= 3200
     assert not (stub.workspace.dir / "planning.sqlite3").exists()
     assert not (stub.workspace.dir / "plans").exists()

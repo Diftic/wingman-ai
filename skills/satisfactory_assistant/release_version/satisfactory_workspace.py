@@ -291,12 +291,21 @@ class SaveWorkspace:
         _import_legacy_jsonl(store, legacy_sources)
         return store
 
-    def _read(self, kind: str) -> list[dict]:
+    def _read_open(self, store: SaveStore, kind: str) -> list[dict]:
+        """Read a record kind from an already-open store.
+
+        Lets a caller that already holds an open store (e.g. ``summary``) reuse
+        it across many reads instead of paying an ``_open_store`` legacy-import
+        check per read. The single-read ``_read`` below is built on this.
+        """
         if kind not in _KINDS:
             raise ValueError(f"Unknown record kind: {kind}")
+        return store.list_records(kind, newest_first=False)
+
+    def _read(self, kind: str) -> list[dict]:
         store = self._open_store()
         try:
-            return store.list_records(kind, newest_first=False)
+            return self._read_open(store, kind)
         finally:
             store.close()
 
@@ -416,6 +425,17 @@ class SaveWorkspace:
         hidden behind newer unrelated records.
         """
         focus_lc = focus.strip().lower()
+        store = self._open_store()
+        try:
+            return self._summary_from(store, max_items, focus_lc)
+        finally:
+            store.close()
+
+    def _summary_from(self, store: SaveStore, max_items: int, focus_lc: str) -> dict:
+        """Build the summary from a single already-open store (see ``summary``)."""
+
+        def read(kind: str) -> list[dict]:
+            return self._read_open(store, kind)
 
         def matches(record: dict) -> bool:
             if not focus_lc:
@@ -440,15 +460,15 @@ class SaveWorkspace:
         def latest_open(kind: str) -> list[dict]:
             items = [
                 r
-                for r in self._read(kind)
+                for r in read(kind)
                 if r.get("status") == STATUS_OPEN and matches(r)
             ]
             items.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
             return items[:max_items]
 
-        notes = [r for r in self._read("notes") if matches(r)]
+        notes = [r for r in read("notes") if matches(r)]
         notes.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
-        recent_changes = [r for r in self._read("changes") if matches(r)]
+        recent_changes = [r for r in read("changes") if matches(r)]
         recent_changes.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
 
         def shape(record: dict) -> dict:
@@ -473,7 +493,7 @@ class SaveWorkspace:
 
         all_flows = [
             r
-            for r in self._read("flows")
+            for r in read("flows")
             if r.get("status") != STATUS_ARCHIVED and matches(r)
         ]
         all_flows.sort(key=lambda r: r.get("updated_at", ""), reverse=True)
@@ -493,7 +513,7 @@ class SaveWorkspace:
             "flows": [shape_flow(r) for r in all_flows[:max_items]],
             "blocked_flows": [shape_flow(r) for r in blocked_flows[:max_items]],
             "recent_changes": [shape(r) for r in recent_changes[:max_items]],
-            "counts": {kind: len(self._read(kind)) for kind in _KINDS},
+            "counts": {kind: len(read(kind)) for kind in _KINDS},
         }
 
 
@@ -563,15 +583,15 @@ def format_context(
             out.extend(pending)
             used += sum(len(s) + 1 for s in pending)
 
-    emit("Production flows", non_blocked, _flow_line)
-    emit("Blocked / missing inputs", summary.get("blocked_flows", []), _flow_line)
-    emit("Open todos", summary.get("open_todos", []), _item_line)
-    emit("Production goals", summary.get("goals", []), _item_line)
+    emit("Production setups", non_blocked, _flow_line)
+    emit("Needs attention", summary.get("blocked_flows", []), _flow_line)
+    emit("Next jobs", summary.get("open_todos", []), _item_line)
+    emit("Goals", summary.get("goals", []), _item_line)
     emit("Notes", summary.get("notes", []), _item_line)
     emit("Recent changes", summary.get("recent_changes", []), _item_line)
 
     if truncated:
-        out.append("\n(more items not shown; narrow with a focus keyword)")
+        out.append("\n(more items are available; ask about one topic to narrow the list)")
     if len(out) <= len(header_lines):
-        out.append("\nNo planning records yet for this save.")
+        out.append("\nNo saved notes or plans yet for this save.")
     return "\n".join(out)

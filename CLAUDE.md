@@ -58,8 +58,8 @@ SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })
 ## Swarm & Routing
 
 ### Config
-- **Topology**: hierarchical (accepted values: `hierarchical`, `mesh`, `star`), with anti-drift gates
-- **Max Agents**: 15 (also the CLI default)
+- **Topology**: hierarchical (accepted values: `hierarchical`, `mesh`, `ring`, `star`, `hybrid`, `hierarchical-mesh`, `pheromone-adaptive`), with anti-drift gates
+- **Max Agents**: 15 is the DEFAULT. 50 is the hard MAXIMUM. Anything above 50 is silently clamped to 50 with no warning, and `--max-agents 0` falls back to the 15 default.
 - **Memory**: hybrid
 - **HNSW**: Enabled
 - **Neural**: Enabled
@@ -68,7 +68,11 @@ SendMessage({ to: "researcher", summary: "Start", message: "[task context]" })
 ruflo swarm init --topology hierarchical --max-agents 15 --strategy specialized --v3-mode
 ```
 
-`--v3-mode` is what enables the 15-agent hierarchical mesh. Anti-drift is a swarm_init feature, not a topology name.
+`--v3-mode` sets the topology to `hierarchical-mesh`. It does NOT set or cap the agent count: it prints "15-agent coordination" whatever `--max-agents` says, so `--max-agents 50 --v3-mode` gives a swarm with Max Agents 50 alongside that same 15-agent message. The 15 in its help text is a label, not a limit, and the two flags do not conflict. Anti-drift is a swarm_init feature, not a topology name.
+
+`swarm init` creates a coordination record and nothing more. It spawns no workers, and it only counts agents created through ruflo itself (`ruflo agent spawn`). Agents spawned with the harness's own Agent tool never appear in `ruflo agent list` or `ruflo swarm status`, so a healthy swarm sitting at 0 agents for hours is expected, not a fault. `.swarm/state.json` holds one swarm, so each `swarm init` replaces the previous one; `ruflo swarm stop <swarm-id>` needs the ID, it does not default to the current swarm.
+
+Measured against ruflo v3.34.0 on 2026-08-02. These numbers are version-specific: re-run `ruflo swarm init --help` and re-check the clamp after any update rather than trusting this block.
 
 ### Agent Routing
 
@@ -177,7 +181,7 @@ ruflo security scan            # Security scan
 ruflo performance benchmark    # Benchmarks
 ```
 
-37 top-level commands. Use `--help` on any command for details. Beyond those above: `autopilot`, `guidance`, `claims`, `issues`, `analyze`, `route`, `providers`, `plugins`, `deployment`, `embeddings`, `ruvector`, `neural`, `workflow`, `process`, `appliance`, `migrate`, `cleanup`, `update`.
+37 top-level commands in v3.34.0 (36 in 3.32.24; `policy` is new). Use `--help` on any command for details. Beyond those above: `autopilot`, `guidance`, `claims`, `issues`, `analyze`, `route`, `policy`, `providers`, `plugins`, `deployment`, `embeddings`, `ruvector`, `neural`, `workflow`, `process`, `appliance`, `migrate`, `cleanup`, `update`.
 
 ## Setup
 

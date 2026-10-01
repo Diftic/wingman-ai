@@ -13,8 +13,9 @@ RELEASE_DIR = SKILL_DIR / "release_version"
 RELEASE_FILES = [
     "__init__.py",
     "default_config.yaml",
+    "install.bat",
     "main.py",
-    "route_optimizer.py",
+    "sc_nav_route_optimizer.py",
 ]
 
 RELEASE_DIRS = [

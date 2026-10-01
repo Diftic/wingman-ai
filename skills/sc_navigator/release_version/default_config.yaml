@@ -1,14 +1,13 @@
 module: skills.sc_navigator.main
 name: SC_Navigator
-display_name: Star Citizen Navigator (Outdated)
+display_name: Star Citizen Navigator
 author: Mallachi
 tags:
   - Star Citizen
   - Navigation
   - Route Planning
-  - Outdated
 description:
-  en: "[OUTDATED — pre-SC 4.7] Optimizes travel routes between multiple Star Citizen locations using a precomputed distance matrix. The bundled dataset was built before patch 4.7's overhaul of navigation points, so locations, gateways, and distances may be wrong. Use with caution until the dataset is regenerated against 4.7."
+  en: "Coordinate-based route optimization across Stanton, Pyro, and Nyx (4.8 universe data). Straight-line quantum-travel distances are computed at runtime from real location coordinates, so multi-stop routes, cross-system legs through jump-point gateways, and point-to-point lookups all use live geometry rather than a precomputed table."
 discovery_keywords:
   - navigate
   - route
@@ -38,29 +37,30 @@ prompt: |
   - `find_location`: Search for location names by partial match. Use this to validate or resolve ambiguous names.
 
   **When to use these tools:**
-  - Player has multiple stops to make (hauling, selling ore, buying, deliveries) → use `plan_route`
-  - Player asks "how far is X from Y" or about travel distance → use `get_distance`
-  - Player mentions a location name you're not sure about → use `find_location` to verify it exists
-  - Player asks for the best order to visit places → use `plan_route`
+  - Player has multiple stops to make (hauling, selling ore, buying, deliveries) then use `plan_route`
+  - Player asks "how far is X from Y" or about travel distance then use `get_distance`
+  - Player mentions a location name you're not sure about then use `find_location` to verify it exists
+  - Player asks for the best order to visit places then use `plan_route`
 
   **Route planning rules:**
-  - Routes are ONE-WAY by default: start location → destinations. Do NOT set `return_to_start` to true unless the player explicitly asks to return to their starting point.
-  - If the player mentions their current location, pass it as `start_location`.
-  - If the SC_LogReader skill is active, you may already know the player's current location — use it as the start.
+  - Routes are ONE-WAY by default: start location through destinations. Do NOT set `return_to_start` to true unless the player explicitly asks to return to their starting point.
+  - If the player mentions their current location, pass it as `start_location`. When no start is given, the optimizer evaluates every waypoint as a potential start.
+  - If the SC_LogReader skill is active, you may already know the player's current location, use it as the start.
   - For hauling contracts with separate pickup and delivery locations, include ALL stops as waypoints.
-  - Distances are in Gigameters (Gm). Cross-system routes automatically go through jump point gateways.
+  - Distances are straight-line quantum distances in Gigameters (Gm). Cross-system routes automatically go through jump-point gateways.
+  - If a tool reports an ambiguous location with candidates (the same name exists in more than one system), ask the player which one they mean before continuing.
 
   **How to present routes:**
-  Always present the route as a numbered list showing the distance between each consecutive stop. Include the total distance at the end. Example format:
+  Always present the route as a numbered list showing the distance between each consecutive stop. Include the total distance at the end. Example format (distances shown are illustrative placeholders):
 
-  1. Port Olisar
-     ↳ 42.29 Gm
-  2. Area 18
-     ↳ 22.88 Gm
+  1. Everus Harbor
+     -> 12.00 Gm (example)
+  2. Area18
+     -> 22.00 Gm (example)
   3. Lorville
-     ↳ 38.40 Gm
+     -> 38.00 Gm (example)
   4. New Babbage
 
-  Total distance: 103.57 Gm
+  Total distance: 72.00 Gm (example)
 
-  If a leg crosses star systems via a gateway, mention which gateway is used.
+  If a leg crosses star systems via a gateway, name the gateways from the leg's `via_gateways` field (exit gateway then entry gateway).

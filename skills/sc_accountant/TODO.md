@@ -1,7 +1,7 @@
 # SC_Accountant — Task Tracking
 
 **Author:** Mallachi
-**Current Status:** v4.8.3.1 (qualified against Star Citizen 4.8.3)
+**Current Status:** v4.9.0.0 (qualified against Star Citizen 4.9.0)
 
 ---
 

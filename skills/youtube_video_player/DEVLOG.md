@@ -2,6 +2,56 @@
 
 ---
 
+## 2026-07-13 - Session 19 - Automated test pass (no code changes) + GitHub distribution blocker found
+
+### What was tested
+
+First activity on this skill since Session 18 (2026-05-14). Automated verification only, no code changed anywhere:
+
+- **Unit suite**: 12/12 pass (`tests/test_confidence.py`).
+- **Statics**: `py_compile` clean on all 5 .py files, `default_config.yaml` + `skill_installer_config.json` parse clean.
+- **Dev vs release_version**: zero drift on all 7 shipped files (hash-compared).
+- **HTTP layer** (Opus agent drove the skill's own `PlayerClient` against the local `D:\PycharmProjects\wingman-player\artifacts\` build): `ensure_running()` auto-launch works, time-to-ready 3.24s; load/play/pause/stop/seek/next/previous all return success; hide/show return 404 as expected on that build.
+
+### Environment findings
+
+- The live `custom_skills\youtube_video_player\` install is GONE (swept at some point since May; only the 4 SC skills remain in custom_skills). The player is also not installed at the canonical MSI path.
+- The local `artifacts\Wingman-Player.exe` is v0.5.0 commit `9447fb2` (Session 11). It predates BOTH Session 13's renderer `playVideo()` chaining AND v0.5.1's hide/show + idle auto-hide.
+
+### Playback NOT confirmed, and why that is expected on this build
+
+All command endpoints ack with 2xx, but state never left `{"state": "idle", "videoId": null}` after `load_youtube("dQw4w9WgXcQ")`; seek(30) did not move position. That is the exact "video loaded but not playing" shape Sessions 9-13 fought, and the build under test lacks the Session 13 renderer fix. Conclusion: client layer verified; real playback verification requires the v0.5.1 player, which was never installed on this machine.
+
+### BLOCKER: Diftic GitHub account shadow-hidden (discovered this session)
+
+`https://github.com/Diftic` and every Diftic repo return 404 to anonymous visitors, while authenticated `gh` sees the repo PUBLIC and release v0.5.1 (2026-05-14, .msi + .exe assets, not draft). Probe validated against ShipBit/wingman-ai (200 anon). Until GitHub reinstates the account, the skill's `download_player_installer` URL, the player's in-app update checker, and any GitHub-hosted distribution are dead for end users. User-side action: check for a flag banner on browser login / contact GitHub support.
+
+### PlayerClient observations from the HTTP pass (not fixed, triage later)
+
+- Warmup race: right after launch `/player/state` returns HTTP 200 with an EMPTY body; `state()` swallows the JSON parse failure and returns None, and `is_running()` (status==200 only) can green-light a not-fully-initialized player.
+- `state()` collapses HTTP>=400, network errors, and JSON-parse failure into one None; `_post` collapses all failures into False (status only visible in logs).
+- A fresh `aiohttp.ClientSession` is created per call, including each 0.5s poll inside `ensure_running` (up to `max_wait*2` sessions).
+- `ensure_running(max_wait_seconds=0)` launches then gives up immediately (loop body never runs).
+
+### Round 2 (same day): environment reinstalled + PLAYBACK CONFIRMED on v0.5.1
+
+- Player v0.5.1 installed from the GitHub release (authed `gh release download`, silent per-user MSI, exit 0) at the canonical path. Note: exe FileVersion still reads 0.5.0 while ProductVersion is `0.5.1+8efb3eb`; cosmetic, player-repo nit.
+- Skill reinstalled to `custom_skills\youtube_video_player\` (8 files, hash-verified). Wingman restart still required to pick it up.
+- HTTP exercise repeated against the installed v0.5.1 (all via the skill's own PlayerClient, observed state JSON at every checkpoint):
+  - **Playback works**: after `load_youtube("dQw4w9WgXcQ")`, state hit "playing" by t+3s, videoId matched, duration 213.061, currentTime advanced ~1s/s through t+15.
+  - **Transport verified**: pause froze position (12.488 at two reads), play resumed past it, seek(30) landed at 31.44, next/previous are no-ops without a playlist (2xx, no error).
+  - **hide/show now return 2xx** and do not alter playback state.
+  - **Warmup race unchanged on 0.5.1**: first HTTP 200 at ~t+0.67s after spawn has an EMPTY body; `is_running()` can green-light before `state()` returns JSON. Stays on the PlayerClient triage list.
+  - **stop() settle lag**: state read immediately after stop still says "playing"; settles to "cued" (videoId retained, title/duration dropped) within 8s.
+  - **Idle auto-hide is not observable via HTTP**: `/player/state` has no visibility field. Verify visually in the fireside test (it is already on that checklist).
+
+### Next steps
+
+1. User: resolve the GitHub account flag (blocks all distribution). Re-probe ANONYMOUSLY before declaring fixed.
+2. User: restart Wingman, enable the skill, run the Session 18 fireside voice checklist (the only remaining verification: voice flow, badge behavior, visual auto-hide).
+
+---
+
 ## 2026-05-14 - Session 18 - Install discovery UX + minimize / show / idle auto-hide + companion player v0.5.1 release
 
 ### What landed today

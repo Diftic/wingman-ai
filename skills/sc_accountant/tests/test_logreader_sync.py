@@ -21,7 +21,7 @@ from store import AccountantStore  # noqa: E402
 
 
 def _load_skill_main():
-    """Load skills/sc_accountant/main.py by explicit file path.
+    """Load skills/sc_accountant/legacy_main.py by explicit file path.
 
     A plain ``from main import ...`` is not safe here: the repository also
     has an unrelated top-level ``main.py`` at its root (the app entry point),
@@ -35,7 +35,7 @@ def _load_skill_main():
     if module_name in sys.modules:
         return sys.modules[module_name]
     spec = importlib.util.spec_from_file_location(
-        module_name, os.path.join(_skill_dir, "main.py")
+        module_name, os.path.join(_skill_dir, "legacy_main.py")
     )
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module

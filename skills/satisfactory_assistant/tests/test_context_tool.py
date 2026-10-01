@@ -265,7 +265,7 @@ def test_lookup_renders_capped_items_and_recipes(
 
     result = _run_context(stub, lookup="iron")
 
-    assert "Lookup 'iron':" in result
+    assert "Game information for 'iron':" in result
     assert "Items:" in result
     assert "Iron Ore" in result
     assert "Iron Plate" in result
@@ -281,7 +281,7 @@ def test_lookup_unavailable_line_when_docs_missing(
 
     result = _run_context(stub, lookup="iron")
 
-    assert "Lookup 'iron': unavailable" in result
+    assert "couldn't find Satisfactory's game data" in result
 
 
 def test_lookup_unavailable_line_when_docs_invalid(
@@ -304,7 +304,7 @@ def test_lookup_unavailable_line_when_docs_invalid(
 
     result = _run_context(stub, lookup="iron")
 
-    assert "Lookup 'iron': unavailable (could not load Docs file)." in result
+    assert "game data would not open" in result
     assert stub.diagnostics
 
 
@@ -314,7 +314,7 @@ def test_lookup_no_matches_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
 
     result = _run_context(stub, lookup="zzz_no_such_item")
 
-    assert "no matching items or recipes" in result
+    assert "couldn't find an item or recipe" in result
 
 
 def test_no_lookup_param_has_no_lookup_section(tmp_path: Path) -> None:
@@ -380,7 +380,7 @@ def test_response_with_lookup_and_plan_status_stays_within_budget(
 
     result = _run_context(stub, lookup="iron")
 
-    assert "Lookup 'iron':" in result
+    assert "Game information for 'iron':" in result
     assert "Plan status (master):" in result
     assert len(result) <= _CONTEXT_CHAR_BUDGET
 
@@ -429,10 +429,10 @@ def test_locate_renders_locations_with_fixture_mirror(tmp_path: Path) -> None:
 
     result = _run_context(stub, locate="iron")
 
-    assert "Locations 'iron':" in result
+    assert "I found these matches for 'iron':" in result
     assert "Iron Ingot line" in result
     assert "Recipe_IngotIron_C" in result
-    assert "distance" in result
+    assert "east" in result
 
 
 def test_locate_absent_mirror_explains_to_run_audit_first(tmp_path: Path) -> None:
@@ -440,8 +440,8 @@ def test_locate_absent_mirror_explains_to_run_audit_first(tmp_path: Path) -> Non
 
     result = _run_context(stub, locate="iron")
 
-    assert "no factory mirror yet" in result
-    assert "audit" in result
+    assert "haven't finished reading the current save" in result
+    assert "save the game once" in result
 
 
 def test_no_locate_param_has_no_locations_section(tmp_path: Path) -> None:
@@ -451,6 +451,16 @@ def test_no_locate_param_has_no_locations_section(tmp_path: Path) -> None:
     result = _run_context(stub)
 
     assert "Locations" not in result
+
+
+def test_machine_type_misrouted_to_focus_still_opens_location_path(tmp_path: Path) -> None:
+    stub = _ContextToolStub(tmp_path)
+    _plant_mirror(stub.workspace)
+
+    result = _run_context(stub, focus="smelters")
+
+    assert "I found these matches for 'smelters':" in result
+    assert "Smelter" in result
 
 
 def test_response_with_locate_stays_within_budget(tmp_path: Path) -> None:

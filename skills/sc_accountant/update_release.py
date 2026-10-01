@@ -23,6 +23,7 @@ RELEASE_FILES = [
     "install.bat",
     "logo.png",
     "main.py",
+    "legacy_main.py",
     "market_data.py",
     "models.py",
     "planning.py",
@@ -30,10 +31,23 @@ RELEASE_FILES = [
     "reports.py",
     "statements.py",
     "store.py",
+    "erp.py",
+    "erp_actions.py",
+    "erp_intake.py",
+    "erp_values.py",
+    "erp_skill.py",
+    "erp_web.py",
+    "erp_sharing.py",
+    "erp_feed.py",
+    "erp_reader_client.py",
+    "erp_launcher.py",
+    "ERP_README.md",
+    "skill_installer_config.json",
 ]
 
 RELEASE_DIRS = [
     "accountant_ui",
+    "erp_ui",
     "data",
 ]
 

@@ -16,7 +16,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-from route_optimizer import RouteOptimizer
+from sc_nav_route_optimizer import AMBIGUOUS, MATCHED, RouteOptimizer
 
 if TYPE_CHECKING:
     from wingmen.open_ai_wingman import OpenAiWingman
@@ -24,10 +24,10 @@ if TYPE_CHECKING:
 
 class SC_Navigator(Skill):
     # Versions mirror the Star Citizen patch this skill is qualified against.
-    # Within-patch updates append a dotted suffix (4.8.0.1, 4.8.0.2, …).
+    # Within-patch updates append a dotted suffix (4.8.0.2, 4.8.0.3, ...).
     # See skills/Versioning.md.
-    VERSION = "4.8.0.0"
-    SC_TARGET_VERSION = "4.8.0"
+    VERSION = "4.9.0.0"
+    SC_TARGET_VERSION = "4.9.0"
 
     def __init__(
         self,
@@ -47,11 +47,32 @@ class SC_Navigator(Skill):
             errors.append(
                 WingmanInitializationError(
                     wingman_name=self.wingman.name,
-                    message=f"SC_Navigator: Failed to load distance data: {e}",
+                    message=f"SC_Navigator: Failed to load location data: {e}",
                     error_type="sc_navigator_data_load",
                 )
             )
         return errors
+
+    def _resolve_or_error(self, name: str):
+        """Resolve a spoken name to a location or a JSON error payload.
+
+        Returns a (location, None) tuple on a clean match, or (None, error)
+        where error is a JSON string the LLM can relay: an ambiguous name
+        lists the candidate display keys and asks the player to pick a system,
+        an unknown name reports it plainly.
+        """
+        result = self._optimizer.resolve_location(name)
+        if result.status == MATCHED and result.location is not None:
+            return result.location, None
+        if result.status == AMBIGUOUS:
+            return None, json.dumps(
+                {
+                    "error": f"Ambiguous location: '{name}'",
+                    "candidates": result.candidates,
+                    "hint": "Ask the player which one they mean (specify the system).",
+                }
+            )
+        return None, json.dumps({"error": f"Unknown location: '{name}'"})
 
     @tool(
         description="Find the optimal visit order for multiple Star Citizen locations. "
@@ -69,12 +90,13 @@ class SC_Navigator(Skill):
 
         Args:
             waypoints: List of location names to visit.
-            start_location: Starting location (optional). If empty, the optimizer picks the best start.
+            start_location: Starting location (optional). If empty, the optimizer
+                evaluates every waypoint as a potential start (heuristic path).
             end_location: Force the route to end at this location (optional).
             return_to_start: Whether the route should loop back to the starting location.
         """
         if not self._optimizer:
-            return json.dumps({"error": "Navigator not initialized. Check distance data."})
+            return json.dumps({"error": "Navigator not initialized. Check location data."})
         result = self._optimizer.optimize_route(
             waypoints=waypoints,
             start_location=start_location,
@@ -96,19 +118,21 @@ class SC_Navigator(Skill):
             to_location: Destination location name.
         """
         if not self._optimizer:
-            return json.dumps({"error": "Navigator not initialized. Check distance data."})
-        # Resolve names
-        a = self._optimizer.resolve_location(from_location)
-        b = self._optimizer.resolve_location(to_location)
-        if a is None:
-            return json.dumps({"error": f"Unknown location: '{from_location}'"})
-        if b is None:
-            return json.dumps({"error": f"Unknown location: '{to_location}'"})
+            return json.dumps({"error": "Navigator not initialized. Check location data."})
 
+        origin, origin_err = self._resolve_or_error(from_location)
+        if origin_err is not None:
+            return origin_err
+        destination, dest_err = self._resolve_or_error(to_location)
+        if dest_err is not None:
+            return dest_err
+
+        a = origin.display_key
+        b = destination.display_key
         dist, via = self._optimizer.get_distance(a, b)
-        sys_a = self._optimizer.get_system(a)
-        sys_b = self._optimizer.get_system(b)
-        is_cross = sys_a != sys_b if (sys_a and sys_b) else bool(via)
+        sys_a = origin.system
+        sys_b = destination.system
+        is_cross = sys_a != sys_b
         result = {
             "from": a,
             "to": b,
@@ -136,7 +160,7 @@ class SC_Navigator(Skill):
             system: Optional system filter (e.g. 'Stanton', 'Pyro', 'Nyx').
         """
         if not self._optimizer:
-            return json.dumps({"error": "Navigator not initialized. Check distance data."})
+            return json.dumps({"error": "Navigator not initialized. Check location data."})
         results = self._optimizer.find_locations(query, system)
         if not results:
             return json.dumps({"matches": [], "message": f"No locations found matching '{query}'"})

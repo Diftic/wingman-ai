@@ -1,4 +1,4 @@
-"""Tests for locating factory lines/machines and rendering the schematic map."""
+"""Tests for locating factory lines/machines and rendering location maps."""
 
 from __future__ import annotations
 
@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 
 from satisfactory_adapter import build_locate_lines
-from satisfactory_map import LocationHit, find_locations, render_map
+from satisfactory_map import (
+    LocationHit,
+    _world_to_terrain_px,
+    find_locations,
+    find_map_locations,
+    render_map,
+)
 
 
 def _line(line_id: str, item: str, rate: float, machine_count: int, x: float, y: float) -> dict:
@@ -89,9 +95,9 @@ def test_find_locations_matches_machine_recipe_resource_and_type() -> None:
 
     assert any(hit.label == "Recipe_IngotIron_C" for hit in by_recipe)
     assert any(hit.label == "Desc_OreIron_C" for hit in by_resource)
-    # m2 has no recipe, so its label falls back to its resource field even
-    # when the match came from its machine-type field.
-    assert any(hit.label == "Desc_OreIron_C" for hit in by_type)
+    # A machine-type query uses the official player-facing building name even
+    # when the mirror also carries a resource class.
+    assert any(hit.label == "Miner Mk.1" for hit in by_type)
 
 
 def test_find_locations_line_carries_machine_count_not_clock() -> None:
@@ -127,6 +133,19 @@ def test_find_locations_limit_clamped_to_five() -> None:
     assert len(hits) == 5
 
 
+def test_map_locations_can_include_more_than_response_limit() -> None:
+    mirror = {
+        "lines": [],
+        "machines": [
+            _machine(f"pump-{i}", "", "", "Build_OilPump", 1.0, i * 100.0, 0.0)
+            for i in range(12)
+        ],
+    }
+
+    assert len(find_locations(mirror, "oil extractors")) == 5
+    assert len(find_map_locations(mirror, "oil extractors")) == 12
+
+
 def test_find_locations_respects_smaller_limit() -> None:
     mirror = _mirror()
 
@@ -146,6 +165,106 @@ def test_find_locations_no_match_returns_empty_tuple() -> None:
     mirror = _mirror()
 
     assert find_locations(mirror, "zzz_nothing_here") == ()
+
+
+def test_oilfield_language_resolves_unresolved_oil_pumps_as_extractors() -> None:
+    mirror = {
+        "lines": [_line("oil", "Crude Oil", 120.0, 2, 5000.0, 2000.0)],
+        "machines": [
+            _machine(
+                "pump",
+                "",
+                "Persistent_Level:PersistentLevel",
+                "Build_OilPump",
+                2.5,
+                1000.0,
+                2000.0,
+            )
+        ],
+    }
+
+    for query in ("oilfields", "oil field", "oil nodes", "oil extractors"):
+        hits = find_locations(mirror, query)
+        assert hits
+        assert hits[0].label == "Oil Extractor"
+        assert hits[0].kind == "machine"
+
+
+def test_oilless_extractor_transcription_resolves_to_oil_extractors() -> None:
+    mirror = {
+        "lines": [_line("oil", "Crude Oil", 120.0, 2, 5000.0, 2000.0)],
+        "machines": [
+            _machine("pump", "", "", "Build_OilPump", 1.0, 1000.0, 2000.0)
+        ],
+    }
+
+    hits = find_locations(mirror, "oilless extractor")
+
+    assert hits
+    assert hits[0].label == "Oil Extractor"
+    assert all(hit.kind == "machine" for hit in hits)
+
+
+def test_nitrogen_extraction_selects_only_nitrogen_resource_wells() -> None:
+    mirror = {
+        "lines": [_line("nitrogen", "Nitrogen Gas", 120.0, 3, 5000.0, 2000.0)],
+        "machines": [
+            _machine("n", "", "Desc_NitrogenGas", "Build_FrackingExtractor", 2.5, 1, 1),
+            _machine("w", "", "Desc_Water", "Build_FrackingExtractor", 2.5, 2, 2),
+            _machine("o", "", "Desc_LiquidOil", "Build_FrackingExtractor", 2.5, 3, 3),
+            _machine(
+                "p",
+                "Recipe_PackagedNitrogen",
+                "",
+                "Build_Packager",
+                2.5,
+                4,
+                4,
+            ),
+        ],
+    }
+
+    for query in ("nitrogen extractor", "nitrogen extraction", "nitrogen gas extractors"):
+        hits = find_map_locations(mirror, query)
+        assert len(hits) == 1
+        assert hits[0].label == "Nitrogen Gas Resource Well Extractor"
+        assert hits[0].kind == "machine"
+
+
+@pytest.mark.parametrize(
+    ("machine_type", "query", "expected_label"),
+    [
+        ("Build_ConstructorMk1", "constructors", "Constructor"),
+        ("Build_AssemblerMk1", "assemblers", "Assembler"),
+        ("Build_ManufacturerMk1", "manufacturers", "Manufacturer"),
+        ("Build_OilRefinery", "refineries", "Refinery"),
+        ("Build_Blender", "blenders", "Blender"),
+        ("Build_HadronCollider", "particle accelerators", "Particle Accelerator"),
+        ("Build_WaterPump", "water extractors", "Water Extractor"),
+        (
+            "Build_FrackingSmasher",
+            "resource well pressurizers",
+            "Resource Well Pressurizer",
+        ),
+        ("Build_QuantumEncoder", "quantum encoders", "Quantum Encoder"),
+    ],
+)
+def test_manufacturing_type_aliases_handle_player_names_and_plurals(
+    machine_type: str,
+    query: str,
+    expected_label: str,
+) -> None:
+    mirror = {
+        "lines": [],
+        "machines": [
+            _machine("m", "", "Persistent_Level:PersistentLevel", machine_type, 1.0, 0, 0)
+        ],
+    }
+
+    hits = find_locations(mirror, query)
+
+    assert hits
+    assert hits[0].label == expected_label
 
 
 def test_find_locations_skips_entries_missing_coordinates() -> None:
@@ -202,6 +321,36 @@ def test_render_map_writes_a_valid_png(tmp_path: Path) -> None:
         assert image.size == (1024, 1024)
 
 
+def test_world_to_terrain_pixels_uses_satisfactory_y_down_orientation() -> None:
+    north_west = _world_to_terrain_px(-324_698.832031, -375_000.0, 1000, 1000)
+    south_east = _world_to_terrain_px(425_301.832031, 375_000.0, 1000, 1000)
+
+    assert north_west == pytest.approx((0.0, 0.0))
+    assert south_east == pytest.approx((999.0, 999.0))
+
+
+def test_render_map_uses_geographic_background_when_configured(tmp_path: Path) -> None:
+    pytest.importorskip("PIL")
+    from PIL import Image, ImageDraw
+
+    terrain_path = tmp_path / "terrain.png"
+    terrain = Image.new("RGB", (1000, 1000), color=(200, 30, 30))
+    ImageDraw.Draw(terrain).rectangle((0, 500, 999, 999), fill=(30, 60, 200))
+    terrain.save(terrain_path)
+    out_path = tmp_path / "geographic.png"
+    corner_hits = (
+        LocationHit("North-west", "machine", -324_698.832031, -375_000.0, 0.0),
+        LocationHit("South-east", "machine", 425_301.832031, 375_000.0, 0.0),
+    )
+
+    ok = render_map(corner_hits, (), out_path, terrain_path=terrain_path)
+
+    assert ok is True
+    with Image.open(out_path) as rendered:
+        assert rendered.getpixel((512, 100)) == pytest.approx((200, 30, 30), abs=5)
+        assert rendered.getpixel((512, 900)) == pytest.approx((30, 60, 200), abs=5)
+
+
 def test_render_map_handles_empty_hits_and_points(tmp_path: Path) -> None:
     pytest.importorskip("PIL")
     out_path = tmp_path / "empty.png"
@@ -244,13 +393,11 @@ def test_build_locate_lines_hostile_query_slug_is_contained(tmp_path: Path) -> N
     _write_mirror(tmp_path, _mirror())
     hostile_query = "../../../../etc/passwd iron"
 
-    lines = build_locate_lines(tmp_path, hostile_query)
-    result = "\n".join(lines)
+    build_locate_lines(tmp_path, hostile_query)
 
     assert not (tmp_path.parent / "etc").exists()
-    if "Map artifact:" in result and "unavailable" not in result:
-        artifact_line = next(line for line in lines if line.startswith("Map artifact:"))
-        artifact_path = Path(artifact_line.split("Map artifact:", 1)[1].strip())
+    artifacts = list((tmp_path / "mirror").glob("location_*.png"))
+    for artifact_path in artifacts:
         assert artifact_path.resolve().is_relative_to(tmp_path.resolve())
         assert artifact_path.is_file()
 
@@ -259,8 +406,8 @@ def test_build_locate_lines_absent_mirror_explains(tmp_path: Path) -> None:
     lines = build_locate_lines(tmp_path, "iron")
 
     assert len(lines) == 1
-    assert "no factory mirror yet" in lines[0]
-    assert "audit" in lines[0]
+    assert "haven't finished reading the current save" in lines[0]
+    assert "save the game once" in lines[0]
 
 
 def test_build_locate_lines_no_match_explains(tmp_path: Path) -> None:
@@ -269,4 +416,5 @@ def test_build_locate_lines_no_match_explains(tmp_path: Path) -> None:
     lines = build_locate_lines(tmp_path, "zzz_no_such_thing")
 
     assert len(lines) == 1
-    assert "no matching lines or machines" in lines[0]
+    assert "couldn't find" in lines[0]
+    assert "current save" in lines[0]

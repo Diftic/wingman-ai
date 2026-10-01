@@ -144,8 +144,45 @@ function pathLeaf(raw) {
     return null;
   }
   const text = String(raw);
-  const leaf = text.split("/").pop() || text;
+  let leaf = text.split("/").pop() || text;
+  if (leaf.includes(":")) {
+    leaf = leaf.split(".").pop() || leaf;
+    return leaf;
+  }
   return leaf.replace(/\.[^.]+$/, "");
+}
+
+function inventoryDescriptorPath(inventory) {
+  const props = (inventory && inventory.properties) || {};
+  for (const entry of (props.mAllowedItemDescriptors || {}).values || []) {
+    const descriptor = referencePath(entry);
+    if (descriptor) {
+      return descriptor;
+    }
+  }
+  for (const stack of (props.mInventoryStacks || {}).values || []) {
+    const item = stack && stack.properties && stack.properties.Item;
+    const itemReference = item && item.value && item.value.itemReference;
+    const descriptor = referencePath(itemReference);
+    if (descriptor) {
+      return descriptor;
+    }
+  }
+  return null;
+}
+
+function outputResourcePath(obj, objectsByName) {
+  if (!objectsByName) {
+    return null;
+  }
+  for (const suffix of [".OutputInventory", ".outputInventory"]) {
+    const inventory = objectsByName.get(`${obj.instanceName}${suffix}`);
+    const descriptor = inventoryDescriptorPath(inventory);
+    if (descriptor) {
+      return descriptor;
+    }
+  }
+  return null;
 }
 
 function vector(value) {
@@ -200,10 +237,11 @@ function isMachineCandidate(obj) {
   );
 }
 
-function machineSnapshot(levelName, obj) {
+function machineSnapshot(levelName, obj, objectsByName) {
   const props = obj.properties || {};
   const recipePath = referencePath(props.mCurrentRecipe);
-  const resourcePath = referencePath(props.mExtractableResource);
+  const resourcePath =
+    outputResourcePath(obj, objectsByName) || referencePath(props.mExtractableResource);
   const result = {
     id: obj.instanceName,
     level: levelName,
@@ -320,6 +358,9 @@ function main() {
   let objectsWithTransform = 0;
 
   for (const level of levels) {
+    const objectsByName = new Map(
+      (level.objects || []).map((obj) => [obj.instanceName, obj]),
+    );
     for (const obj of level.objects || []) {
       objectCount += 1;
       if (obj.transform) {
@@ -331,7 +372,7 @@ function main() {
       if (!isMachineCandidate(obj)) {
         continue;
       }
-      const snapshot = machineSnapshot(level.name, obj);
+      const snapshot = machineSnapshot(level.name, obj, objectsByName);
       machines.push(snapshot);
       increment(countsByType, snapshot.type || "<unknown>");
       increment(countsByKind, snapshot.kind);
@@ -377,9 +418,17 @@ function main() {
   console.log(stringifyJson(output, options.pretty));
 }
 
-try {
-  main();
-} catch (error) {
-  console.error(error && error.stack ? error.stack : String(error));
-  process.exitCode = 1;
+module.exports = {
+  inventoryDescriptorPath,
+  outputResourcePath,
+  pathLeaf,
+};
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    console.error(error && error.stack ? error.stack : String(error));
+    process.exitCode = 1;
+  }
 }

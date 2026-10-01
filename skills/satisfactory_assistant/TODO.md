@@ -1,5 +1,20 @@
 # Satisfactory Assistant - TODO / Open Items
 
+Status 2026-08-16: v0.7.0 adds a standalone top-centre map popup based on
+SC NavPoint's proven navigation-ring overlay. It is click-through,
+always-on-top, independent of HUD, and configurable for monitor, size, and
+visibility duration. A dedicated show/hide map tool now owns location routing.
+v0.7.1 generalizes location aliases across production buildings and fixes
+oilfield/oil-node/oil-extractor language against raw `Build_OilPump` records.
+v0.7.2 corrects the observed `oilless extractor` speech transcript, frames
+maps around every matching building, and recovers misrouted building queries.
+
+v0.6.0 automatic live mirror refresh is implemented. The skill starts with its configured
+wingman, audits the first detected active save, and refreshes when Satisfactory
+creates or updates a `.sav`; the player's in-game autosave interval controls
+the cadence. Location requests are routed to `locate`, and mirror JSON writes
+are atomic. Verification: `458 passed, 1 skipped`; full Ruff check clean.
+
 Status 2026-07-02: ROADMAP COMPLETE. All implementable phases (0-9) of
 `SatisfactorySkillPlan.md` delivered and accepted; both section 15
 definitions of done met. Released as v0.5.0 in `release_version/`
@@ -174,8 +189,8 @@ wells.
       - Base map image source and licensing (community map vs generated
         schematic grid); world-to-pixel calibration constants must be
         verified, not guessed.
-      - Delivery path: depend on the `hud` skill being active vs talk to
-        the hud_server HTTP API directly from this skill.
+      - [resolved 2026-08-16] Delivery uses a standalone top-centre layered
+        popup based on SC NavPoint's ring; it does not depend on HUD.
       - Fits roadmap Phase 9 ("optional graph and map artifacts");
         candidate packet SSP-P9-W01 once the mirror/lookup surface
         stabilizes.
@@ -197,5 +212,3 @@ wells.
   Windows).
 - Config values are retrieved just-in-time, never cached in `validate()`.
 - Tool returns are compact summaries; no raw logs or raw JSONL dumps.
-
-

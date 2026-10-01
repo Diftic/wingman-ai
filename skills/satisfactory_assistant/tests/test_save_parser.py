@@ -2,11 +2,58 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from satisfactory_save_parser import SaveParserError, _format_parser_failure, copied_save
+
+
+def test_node_snapshot_prefers_output_inventory_resource_descriptor() -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node.js is not available")
+    helper_path = (
+        Path(__file__).resolve().parents[1]
+        / "tools"
+        / "save_parser"
+        / "extract_save_snapshot.cjs"
+    )
+    inventory = {
+        "properties": {
+            "mAllowedItemDescriptors": {
+                "values": [
+                    {
+                        "pathName": (
+                            "/Game/FactoryGame/Resource/RawResources/NitrogenGas/"
+                            "Desc_NitrogenGas.Desc_NitrogenGas_C"
+                        )
+                    }
+                ]
+            }
+        }
+    }
+    script = (
+        f"const h=require({json.dumps(str(helper_path))});"
+        f"const inventory={json.dumps(inventory)};"
+        "process.stdout.write(JSON.stringify({"
+        "path:h.inventoryDescriptorPath(inventory),"
+        "leaf:h.pathLeaf(h.inventoryDescriptorPath(inventory))}));"
+    )
+
+    result = subprocess.run(
+        [node, "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    parsed = json.loads(result.stdout)
+    assert parsed["leaf"] == "Desc_NitrogenGas"
+    assert parsed["path"].endswith("Desc_NitrogenGas_C")
 
 
 def _make_save(tmp_path: Path, name: str = "source.sav") -> Path:

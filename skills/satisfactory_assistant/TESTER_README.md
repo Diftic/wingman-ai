@@ -10,6 +10,14 @@ Run `install.bat`. It copies the release files to:
 
 After installing, fully close and relaunch Wingman AI.
 
+The skill works with any Wingman profile that has SatisfactoryAssistant enabled.
+Its Satisfactory behavior is built into the skill, so no Apex prompt or other
+profile-specific instructions are required.
+On startup it audits the first active save it can detect, then watches
+Satisfactory's `SaveGames` tree and refreshes the mirror whenever a `.sav` is
+created or changed. Set the desired refresh cadence with Satisfactory's own
+autosave interval.
+
 `install.bat` also installs the optional save parser dependency with `npm ci`
 when Node.js/npm are available. Planning works without it, but `mode: audit`,
 actuals comparison, and `locate` need that parser. If npm is missing during
@@ -21,25 +29,24 @@ npm ci --omit=dev --ignore-scripts
 
 ## Profile Setup
 
-Your current Satisfactory config directory is:
-
-```text
-C:\Users\larse\AppData\Roaming\ShipBit\WingmanAI\3_1_1\configs\Satisfactory
-```
-
-In that profile, enable the `SatisfactoryAssistant` skill.
+Enable `SatisfactoryAssistant` in the Skills settings of any Wingman profile.
 
 Recommended custom properties:
 
-- `satisfactory_saved_dir`: leave blank for auto-detect, or set to `C:/Users/<you>/AppData/Local/FactoryGame/Saved`.
+- `satisfactory_install_dir`: leave blank for automatic game detection, or choose the Satisfactory installation folder.
 - `allow_plan_writes`: `true`.
-- `max_response_items`: keep low while testing, such as `4` or `5`.
+- `max_response_items`: `12` by default.
+- `map_overlay_enabled`: `true`.
+- `map_overlay_display`: `1` for the primary monitor.
+- `map_overlay_size`: `520` pixels by default.
+- `map_overlay_duration_seconds`: `15`, or `0` to keep it open until hidden.
+- `map_overlay_position`: top-left, top-centre, or top-right.
 
 ## Quickstart
 
 Load a save, ask the wingman which save is active, note a plan item or two,
-then ask for a Project Assembly stage plan. The three tools cover context,
-notes, and planning:
+then ask for a Project Assembly stage plan. The tools cover context, notes,
+planning, and the standalone map popup:
 
 - `get_satisfactory_context` - compact active-save summary, or a targeted
   `lookup` query.
@@ -48,6 +55,8 @@ notes, and planning:
 - `calculate_satisfactory_plan` - compute (and persist) a Project Assembly
   stage plan for a given `phase`, or run `mode: audit` to check the save
   for deficits and blocked items.
+- `show_satisfactory_map` - locate something and open its schematic map in a
+  top-centre popup, reopen the last map, or hide the popup.
 
 `calculate_satisfactory_plan` also accepts `scope: master` to build and
 persist all five Project Assembly phases in one call, reporting how each
@@ -71,9 +80,12 @@ unplanned production, and surplus. Phase 0 or no stored plan for that
 phase keeps the classic audit unchanged. `get_satisfactory_context` takes
 a `locate` query (item, recipe, or resource name) to find it on the
 factory mirror: up to 5 coordinate matches plus a rendered schematic map
-PNG for the top hit, with a display hint for the HUD. `locate` needs a
-prior audit to have built the mirror; without one, the response explains
-how to run one.
+PNG for the top hit and opens it in the skill's own top-centre popup.
+`show_satisfactory_map` is the preferred location entry point and is independent
+of the HUD skill. Location maps need a mirror; the automatic watcher normally
+keeps it ready. If startup could not
+detect a save or the automatic audit failed, the response explains how to run
+one manually.
 
 ## Smoke Test
 

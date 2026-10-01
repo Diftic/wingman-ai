@@ -863,7 +863,7 @@ def _render_scenarios_response(
     scope_text = "scope=master" if phase is None else f"scope=stage, phase={phase}"
     lines = [
         f"Pace scenario comparison ({scope_text}).",
-        "Nothing persisted: scenarios are exploratory only.",
+        "No plan was saved; these options are only a comparison.",
         "",
     ]
 

@@ -105,8 +105,8 @@ class SC_Accountant(Skill):
     # Versions mirror the Star Citizen patch this skill is qualified against.
     # Within-patch updates append a dotted suffix (4.8.0.1, 4.8.0.2, …).
     # See skills/Versioning.md.
-    VERSION = "4.8.3.1"
-    SC_TARGET_VERSION = "4.8.3"
+    VERSION = "4.9.0.0"
+    SC_TARGET_VERSION = "4.9.0"
 
     def __init__(
         self,
@@ -1071,8 +1071,10 @@ class SC_Accountant(Skill):
 
     async def _announce_ui_startup(self) -> None:
         """Post a QR code + LAN URL to the wingman chat on skill activation."""
-        # Let the WebSocket connection establish before printing
-        await asyncio.sleep(3)
+        # Cold-boot race (2026-07-16): a connected but still-loading UI drops
+        # broadcasts, and the core only replays messages queued while NO client
+        # is connected. 15s outlasts UI view construction.
+        await asyncio.sleep(15)
 
         if not self._ui_server:
             return
@@ -1083,8 +1085,8 @@ class SC_Accountant(Skill):
 
         qr_b64 = _generate_qr_png_base64(lan_url)
         msg = (
-            "SC Accountant dashboard is ready. Scan the QR code with your phone, "
-            "or open on any device on your home network:\n"
+            "SC Accountant dashboard ready.\n"
+            "Scan with your phone, or open:\n"
             f"{lan_url}"
         )
 
@@ -3220,7 +3222,9 @@ def _generate_qr_png_base64(url: str) -> str | None:
 
         qr = QrCode.encode_text(url, QrCode.Ecc.LOW)
         size = qr.get_size()
-        scale = 10
+        # Chat UI stretches images to the bubble width, so keep the PNG small
+        # (roughly a quarter of the old size) for a compact, phone-scannable QR.
+        scale = 3
         border = 4
         img_size = (size + 2 * border) * scale
 

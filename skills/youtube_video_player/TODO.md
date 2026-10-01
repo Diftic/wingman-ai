@@ -2,6 +2,16 @@
 
 ---
 
+## Session 19 fallout (2026-07-13) — blockers before the fireside test
+
+- [ ] **BLOCKER (user-side): Diftic GitHub account shadow-hidden.** All Diftic URLs 404 anonymously (validated probe); skill's MSI download link + player update checker dead for end users. Resolve with GitHub support, then re-probe ANONYMOUSLY before declaring fixed. See DEVLOG Session 19.
+- [x] **Reinstall the test environment.** Done 2026-07-13 round 2: player v0.5.1 MSI installed (canonical path, silent, exit 0), skill reinstalled to custom_skills (8 files hash-verified). Wingman restart still needed to pick the skill up.
+- [ ] **Triage PlayerClient hardening** (confirmed present on v0.5.1 too): warmup race (200 + empty body treated as ready; measured at ~0.67s after spawn), error-collapsing in `state()`/`_post`, per-call ClientSession churn, `max_wait_seconds=0` edge. Also noted: stop() settles to "cued" with up to ~8s lag. Fold into the next code session on this skill.
+- [x] **Automated verification pass.** Round 1 (v0.5.0 artifacts build): 12/12 unit tests, statics clean, dev == release_version, auto-launch + HTTP surface OK but playback never left idle (stale build). Round 2 (installed v0.5.1): PLAYBACK CONFIRMED (playing by t+3s, position advances, pause/resume/seek verified by state), hide/show 2xx. Remaining verification is voice + visual only (fireside checklist below).
+- [ ] **Player-repo nit: FileVersion not bumped.** v0.5.1 exe reports FileVersion 0.5.0 (ProductVersion is correct at 0.5.1+8efb3eb). Fix the version stamping in the player csproj on the next player release.
+
+---
+
 ## v0.1.0 scaffold (2026-05-02)
 
 ### Done

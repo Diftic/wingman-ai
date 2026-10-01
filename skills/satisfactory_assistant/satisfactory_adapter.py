@@ -11,7 +11,6 @@ imported after ``main.py``'s sys.path bootstrap has run (or via the tests'
 from __future__ import annotations
 
 import json
-import math
 import os
 from collections.abc import Callable
 from dataclasses import replace
@@ -25,7 +24,7 @@ from satisfactory_dataset import DatasetInfo, get_docs_catalog, lookup_items, lo
 from satisfactory_docs import DocsCatalog, normalize_class_name
 from satisfactory_extraction import DEFAULT_MINER_MARK, plan_extraction
 from satisfactory_logistics import check_logistics
-from satisfactory_map import LocationHit, find_locations, render_map
+from satisfactory_map import LocationHit, find_locations, find_map_locations, render_map
 from satisfactory_master_plan import build_master_plan
 from satisfactory_mirror import (
     TrendConfig,
@@ -102,7 +101,9 @@ _MAX_PLAN_STATUS_LINES = 5
 _MAX_CONSTRUCTION_TASK_LINES = 10
 _MAX_CONSTRUCTION_BOM_LINES = 10
 _MAX_BUILD_TODOS = 20
-_PLAN_WRITES_DISABLED_MESSAGE = "Plan writes are disabled in skill settings."
+_PLAN_WRITES_DISABLED_MESSAGE = (
+    "Saving notes and plans is turned off in the skill settings."
+)
 
 
 def _construction_task_line(task: BuildTask) -> str:
@@ -203,25 +204,23 @@ def _format_lookup_recipe(recipe: dict[str, Any]) -> str:
 
 def _format_solve_failure(phase: int, status: str, diagnostics: tuple[str, ...]) -> str:
     """Render a compact, bounded message for a non-optimal solve; nothing persists."""
-    lines = [f"Phase {phase} plan: solver status '{status}'."]
+    lines = [f"I couldn't make a workable plan for Phase {phase} ({status})."]
     shown = diagnostics[:_MAX_SOLVE_FAILURE_DIAGNOSTICS]
     if shown:
-        lines.append("Diagnostics:")
+        lines.append("What got in the way:")
         lines.extend(f"- {diagnostic}" for diagnostic in shown)
         remaining = len(diagnostics) - len(shown)
         if remaining > 0:
             lines.append(f"+{remaining} more")
-    lines.append("Nothing persisted.")
+    lines.append("No plan was saved.")
     return "\n".join(lines)
 
 
 def format_docs_missing_message(searched: tuple[str, ...]) -> str:
     """Render the standard "Docs file not found" refusal with a bounded search hint."""
-    searched_hint = "; ".join(searched[:6])
     return (
-        "Satisfactory Docs file not found. Configure 'Satisfactory Docs "
-        "File' or 'Satisfactory Install Directory' in skill settings. "
-        f"Searched: {searched_hint}"
+        "I couldn't find Satisfactory's game data. Set the Satisfactory Install "
+        "Directory in the skill settings, then try again."
     )
 
 
@@ -233,9 +232,9 @@ def build_lookup_lines(catalog: DocsCatalog, query: str) -> list[str]:
     items = lookup_items(catalog, query)
     recipes = lookup_recipes(catalog, query)
     if not items and not recipes:
-        return [f"Lookup '{query}': no matching items or recipes."]
+        return [f"I couldn't find an item or recipe matching '{query}'."]
 
-    lines = [f"Lookup '{query}':"]
+    lines = [f"Game information for '{query}':"]
     if items:
         lines.append("Items:")
         lines.extend(
@@ -279,20 +278,24 @@ def _mirror_points(mirror: dict[str, Any]) -> tuple[tuple[float, float], ...]:
 
 
 def _locate_hit_line(hit: LocationHit) -> str:
-    distance_m = math.hypot(hit.x, hit.y) / 100.0
+    x_m = hit.x / 100.0
+    y_m = hit.y / 100.0
+    east_west = f"{abs(x_m):.0f} m {'east' if x_m >= 0 else 'west'}"
+    north_south = f"{abs(y_m):.0f} m {'south' if y_m >= 0 else 'north'}"
     if hit.machine_count is not None:
-        extra = f", {hit.machine_count} machines"
+        extra = f"; {hit.machine_count} machines"
     elif hit.clock is not None:
-        extra = f", clock {hit.clock * 100.0:.0f}%"
+        extra = f"; clock speed {hit.clock * 100.0:.0f}%"
     else:
         extra = ""
-    return (
-        f"  - {hit.label} ({hit.kind}): x={hit.x / 100.0:.1f}m y={hit.y / 100.0:.1f}m "
-        f"z={hit.z / 100.0:.1f}m, distance {distance_m:.1f}m from origin{extra}"
-    )
+    return f"  - {hit.label}: {east_west}, {north_south}{extra}"
 
 
-def build_locate_lines(workspace_dir: Path, query: str) -> list[str]:
+def build_locate_lines(
+    workspace_dir: Path,
+    query: str,
+    terrain_path: Path | None = None,
+) -> list[str]:
     """Assemble the "Locations:" section for ``get_satisfactory_context``'s ``locate`` param.
 
     Reads ``workspace_dir/mirror/latest_mirror.json`` read-only (never
@@ -300,41 +303,47 @@ def build_locate_lines(workspace_dir: Path, query: str) -> list[str]:
     pointing at the factory audit tool instead of raising. On a match,
     renders a schematic PNG for the top hit to
     ``workspace_dir/mirror/location_<slug(query)>.png`` (same containment
-    idiom as ``export_stage_artifacts``) and appends its path plus a HUD
-    markdown-image display hint line; a Pillow-less environment degrades
+    idiom as ``export_stage_artifacts``) and appends its path; a Pillow-less environment degrades
     that to a coordinates-only note instead of failing.
     """
     mirror_path = workspace_dir / "mirror" / "latest_mirror.json"
     if not mirror_path.is_file():
         return [
-            f"Locations '{query}': no factory mirror yet. Run "
-            "calculate_satisfactory_plan(mode='audit') first."
+            "I haven't finished reading the current save yet. Wait for the startup "
+            "scan, or save the game once, then try again."
         ]
     try:
         mirror = json.loads(mirror_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return [f"Locations '{query}': could not read factory mirror ({exc})."]
+        return [f"I couldn't read the latest factory scan ({exc})."]
 
     hits = find_locations(mirror, query)
     if not hits:
-        return [f"Locations '{query}': no matching lines or machines in the factory mirror."]
+        return [f"I couldn't find '{query}' in the current save."]
 
-    lines = [f"Locations '{query}':"]
+    lines = [f"I found these matches for '{query}':"]
     lines.extend(_locate_hit_line(hit) for hit in hits)
 
     base = workspace_dir.resolve()
     out_path = (base / "mirror" / f"location_{slugify(query)}.png").resolve()
     if not _is_within(base, out_path):
-        lines.append(f"Map artifact: refused outside workspace for {query!r}.")
+        lines.append("I couldn't make the map safely.")
         return lines
 
-    top_hit = hits[0]
-    rendered = render_map(hits, _mirror_points(mirror), out_path, highlight_index=0)
+    map_hits = find_map_locations(mirror, query)
+    rendered = render_map(
+        map_hits,
+        _mirror_points(mirror),
+        out_path,
+        highlight_index=0,
+        fit_to_hits=True,
+        compact_labels=True,
+        terrain_path=terrain_path,
+    )
     if rendered:
-        lines.append(f"Map artifact: {out_path}")
-        lines.append(f"Display hint (HUD markdown image): ![{top_hit.label}]({out_path})")
+        lines.append(f"The map shows {len(map_hits)} matching location(s).")
     else:
-        lines.append("Map artifact: unavailable (Pillow not installed); coordinates only.")
+        lines.append("I couldn't draw the map, so I returned the directions instead.")
     return lines
 
 

@@ -1,9 +1,43 @@
 # SC_Accountant — Development Log
 
 **Author:** Mallachi
-**Skill Version:** 4.8.3.1 (qualified against Star Citizen 4.8.3)
+**Skill Version:** 4.9.0.0 (qualified against Star Citizen 4.9.0)
 
 ---
+
+## 2026-07-18 - Version: 4.9.0.0
+
+All four SC skills aligned to game version 4.9.0 by user decision. VERSION, __version__, and skill_installer_config.json bumped to 4.9.0.0; SC_TARGET_VERSION and __sc_target_version__ to 4.9.0. _check_dependency_versions compares the SC_TARGET_VERSION patch triple against SC_LogReader; both now report 4.9.0, so the check passes. In-game requalification against 4.9.0 is still pending.
+
+## 2026-07-17 - Version: 4.8.3.3
+
+QR PNG scale lowered from 10 to 3, and the startup announcement shortened to
+three short lines. No other change.
+
+The chat UI stretches images to the chat-bubble width, and the bubble width
+follows the longest text line. User feedback (with screenshot) showed the
+startup QR rendering about 4x too large; the ask was for it roughly 75 percent
+smaller. Two levers together do that: dropping `scale` 10 to 3 in
+`_generate_qr_png_base64` shrinks the PNG to about a quarter of its old size
+while staying phone-scannable, and reducing the longest line in the
+`_announce_ui_startup` message ("SC Accountant dashboard ready." / "Scan with
+your phone, or open:" / the URL) narrows the bubble the image is stretched to.
+The on-demand QR from `open_accounting_window` shrinks too, since it shares the
+same generator.
+
+## 2026-07-16 - Version: 4.8.3.2
+
+Startup dashboard announcement delay raised from 3s to 15s. No other change.
+
+The "dashboard is ready" chat message (with QR code) is posted from an async
+task that slept 3 seconds after skill activation. On a cold boot (Wingman core
+and UI started together, auto-login within a second), 3 seconds was not enough:
+the message fired and was written to the core log, but the UI was still building
+its views when the broadcast arrived over the websocket, so the connected client
+dropped it. The core only queues messages for replay when NO client is
+connected, so a connected-but-loading UI loses them (observed 2026-07-16, the
+message was in the core log but never displayed). Raising the fixed delay to 15
+seconds outlasts UI view construction so the announcement lands.
 
 ## 2026-07-11 - Version: 4.8.3.1
 

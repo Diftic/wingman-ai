@@ -583,15 +583,15 @@ def format_context(
             out.extend(pending)
             used += sum(len(s) + 1 for s in pending)
 
-    emit("Production flows", non_blocked, _flow_line)
-    emit("Blocked / missing inputs", summary.get("blocked_flows", []), _flow_line)
-    emit("Open todos", summary.get("open_todos", []), _item_line)
-    emit("Production goals", summary.get("goals", []), _item_line)
+    emit("Production setups", non_blocked, _flow_line)
+    emit("Needs attention", summary.get("blocked_flows", []), _flow_line)
+    emit("Next jobs", summary.get("open_todos", []), _item_line)
+    emit("Goals", summary.get("goals", []), _item_line)
     emit("Notes", summary.get("notes", []), _item_line)
     emit("Recent changes", summary.get("recent_changes", []), _item_line)
 
     if truncated:
-        out.append("\n(more items not shown; narrow with a focus keyword)")
+        out.append("\n(more items are available; ask about one topic to narrow the list)")
     if len(out) <= len(header_lines):
-        out.append("\nNo planning records yet for this save.")
+        out.append("\nNo saved notes or plans yet for this save.")
     return "\n".join(out)
