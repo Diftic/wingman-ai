@@ -2,12 +2,12 @@
   "format_version": 1,
   "engine_version": 3,
   "package_id": "sc_log_reader_2",
-  "revision": 8,
-  "version": "0.3.4",
-  "release_notes": "Adds the maintainer block, shown by the Wingman client when the rules can't be reached or don't validate. Parsing rules and location mappings are unchanged from revision 7. Requires reader 0.3.0.",
+  "revision": 9,
+  "version": "0.3.5",
+  "release_notes": "Corrects the maintainer's Discord name. The maintainer block is shown by the Wingman client when the rules can't be reached or don't validate. Parsing rules and location mappings are unchanged from revision 7. Requires reader 0.3.0.",
   "maintainer": {
     "name": "Mallachi",
-    "discord": "Mallachi",
+    "discord": "mallachi_of_the_north",
     "url": "https://github.com/Diftic/wingman-ai"
   },
   "verified_game_builds": [],
