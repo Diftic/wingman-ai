@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import atexit
 import faulthandler
+import logging
 import html
 from enum import Enum
 from os import path
@@ -34,12 +35,11 @@ faulthandler.enable()
 if getattr(sys, "frozen", False):
     # Running as bundled exe
     _internal_dir = sys._MEIPASS
+    # CUDA 13 puts every toolkit library in nvidia/cu13/bin/x86_64; cuDNN keeps
+    # nvidia/cudnn/bin. Parakeet also preloads them via onnxruntime.
     _nvidia_paths = [
-        path.join(_internal_dir, "nvidia", "cublas", "bin"),
+        path.join(_internal_dir, "nvidia", "cu13", "bin", "x86_64"),
         path.join(_internal_dir, "nvidia", "cudnn", "bin"),
-        path.join(_internal_dir, "nvidia", "cuda_runtime", "bin"),
-        path.join(_internal_dir, "nvidia", "cuda_nvrtc", "bin"),
-        path.join(_internal_dir, "nvidia", "nvrtc", "bin"),
     ]
     # Prepend existing paths that exist
     _existing_nvidia_paths = [p for p in _nvidia_paths if path.isdir(p)]
@@ -50,9 +50,41 @@ if getattr(sys, "frozen", False):
             + os.environ.get("PATH", "")
         )
 
+    # The PyInstaller bootloader put _internal in front of LD_LIBRARY_PATH and
+    # kept the old value in LD_LIBRARY_PATH_ORIG. The loader of this process
+    # read the variable at startup, so changing it now only affects programs
+    # Core starts: MCP servers, llama-server, xdg-open. Those must load the
+    # system's libraries, not our copies of libstdc++, OpenSSL or GLib.
+    if platform.system() == "Linux":
+        if "LD_LIBRARY_PATH_ORIG" in os.environ:
+            os.environ["LD_LIBRARY_PATH"] = os.environ.pop("LD_LIBRARY_PATH_ORIG")
+        else:
+            os.environ.pop("LD_LIBRARY_PATH", None)
+
+# sounddevice loads PortAudio when it is imported. A Linux system without it
+# used to die on that import in wingman_core with a traceback the client never
+# showed; the user only saw "Backend startup timed out". Say what is missing.
+if platform.system() == "Linux":
+    try:
+        import sounddevice  # noqa: F401
+    except OSError as portaudio_error:
+        from api.enums import LogType
+        from services.printr import Printr
+
+        Printr().print(
+            f"PortAudio is missing ({portaudio_error}). Wingman needs it for the "
+            "microphone and for speech output. Install it with your package manager "
+            "and start Wingman again: 'sudo dnf install portaudio' (Fedora), "
+            "'sudo apt install libportaudio2' (Ubuntu, Debian), "
+            "'sudo pacman -S portaudio' (Arch).",
+            color=LogType.ERROR,
+            server_only=True,
+        )
+        sys.exit(1)
+
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.concurrency import asynccontextmanager
 from fastapi.routing import APIRoute
 from fastapi.middleware.cors import CORSMiddleware
@@ -65,8 +97,12 @@ from services.command_handler import CommandHandler
 from services.config_manager import ConfigManager, ConfigValidationError
 from services.connection_manager import ConnectionManager
 from services.esp32_handler import Esp32Handler
+from services import error_reporting
+from services.avatar_studio import variant_file
+from services.file import get_generated_images_dir
 from services.secret_keeper import SecretKeeper
 from services.printr import Printr
+from services.websocket_user import WebSocketUser
 from services.mcp_oauth import CALLBACK_PATH, get_oauth_service
 from services.system_manager import LOCAL_VERSION, SystemManager
 from wingman_core import WingmanCore
@@ -79,11 +115,17 @@ connection_manager = ConnectionManager()
 printr = Printr()
 Printr.set_connection_manager(connection_manager)
 
+# Before the config is loaded, so a crash in the migration is reported too.
+# Sends nothing until the user has agreed in the client.
+error_reporting.init()
+
 app_is_bundled = getattr(sys, "frozen", False)
 app_root_path = sys._MEIPASS if app_is_bundled else path.dirname(path.abspath(__file__))
 
 # Set the bundled skills directory for ModuleManager
 from services.module_manager import set_bundled_skills_dir
+from services.wingman_default_voices import apply_default_voices
+from services import other_language
 
 bundled_skills_path = path.join(app_root_path, "skills")
 set_bundled_skills_dir(bundled_skills_path)
@@ -119,6 +161,18 @@ core = WingmanCore(
     system_manager=system_manager,
 )
 core.set_connection_manager(connection_manager)
+
+
+def _error_report_tags() -> dict:
+    settings = config_manager.settings_config
+    return {
+        "stt_provider": getattr(settings.stt.provider, "value", None),
+        "voice_activation": settings.voice_activation.enabled,
+        "plan": core.client_plan,
+    }
+
+
+error_reporting.set_tag_provider(_error_report_tags)
 
 keyboard.hook(core.on_key)
 
@@ -163,6 +217,9 @@ def exit_handler():
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     # executed before the application starts
+    # WebSocket sends from worker threads have to be routed back to this loop
+    WebSocketUser.set_main_loop(asyncio.get_running_loop())
+    error_reporting.watch_event_loop(asyncio.get_running_loop())
     modify_openapi()
 
     yield
@@ -244,7 +301,14 @@ def custom_openapi():
                     }
 
                 cls_schema_dict.setdefault("required", []).append(field_name)
-        openapi_schema["components"]["schemas"][cls.__name__] = cls_schema_dict
+        # Models a command nests (TokenUsage in LogCommand) arrive as $defs.
+        # The refs already point at components/schemas, so they have to live
+        # there; a model only ever used by a command is in no REST route and
+        # would otherwise be a dangling ref that breaks the client generator.
+        schemas = openapi_schema["components"]["schemas"]
+        for def_name, def_schema in cls_schema_dict.pop("$defs", {}).items():
+            schemas.setdefault(def_name, def_schema)
+        schemas[cls.__name__] = cls_schema_dict
 
     app.openapi_schema = openapi_schema
     return app.openapi_schema
@@ -420,6 +484,40 @@ async def start_secrets(secrets: dict[str, Any]):
     await core.config_service.load_config()
 
 
+_exit_task: asyncio.Task | None = None
+
+
+@app.post("/shutdown", tags=["main"], include_in_schema=False)
+async def shutdown_and_exit(request: Request):
+    """Shut Core down cleanly and end the process.
+
+    The client calls this before it installs an update and restarts. Killing
+    Core instead leaves llama-server, Pocket TTS and xVASynth running: they hold
+    their ports and GPU memory against the Core that starts next, and on Windows
+    the installer cannot replace their files. Core listens on every interface
+    as a sidecar, so only the machine it runs on may ask.
+    """
+    global _exit_task
+    if request.client is None or request.client.host not in ("127.0.0.1", "::1"):
+        raise HTTPException(status_code=403)
+
+    async def _shutdown_then_exit():
+        # Let the response go out before the server goes away.
+        await asyncio.sleep(0.2)
+        printr.print(
+            "Shutdown requested by the client.", color=LogType.SYSTEM, server_only=True
+        )
+        try:
+            await shutdown()
+        finally:
+            logging.shutdown()
+            # The atexit handler would run shutdown() a second time.
+            os._exit(0)
+
+    if _exit_task is None:
+        _exit_task = asyncio.create_task(_shutdown_then_exit())
+
+
 @app.get("/ping", tags=["main"], response_model=CoreStatusResponse)
 async def ping():
     return core.get_status()
@@ -476,6 +574,43 @@ def _callback_page(accepted: bool, message: str) -> str:
   <p>{message}</p>
   <p style="margin-top:1rem">You can close this tab and go back to Wingman AI.</p>
 </main></body></html>"""
+
+
+@app.get("/generated-images/{filename}", tags=["main"], include_in_schema=False)
+async def get_generated_image(filename: str):
+    """Serve one image the Image Generation skill produced.
+
+    The client renders these with a plain <img src>, so they travel over HTTP
+    instead of through the WebSocket - a generated image as a base64 data URL is
+    several megabytes and used to stall the socket for every other message.
+
+    Kept out of the OpenAPI schema: the client builds the URL from the path Core
+    broadcasts, there is no generated method to call.
+    """
+    images_dir = path.realpath(get_generated_images_dir())
+    # No traversal: the name must be a plain file directly inside the directory.
+    if path.basename(filename) != filename:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    file_path = path.realpath(path.join(images_dir, filename))
+    if path.commonpath([images_dir, file_path]) != images_dir or not path.isfile(
+        file_path
+    ):
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    return FileResponse(file_path)
+
+
+@app.get(
+    "/avatar-images/{wingman_name}/{filename}", tags=["main"], include_in_schema=False
+)
+async def get_avatar_image(wingman_name: str, filename: str):
+    """Serve one avatar studio variant. Same reason as /generated-images: the
+    client renders it with a plain <img src> and draws it onto a canvas."""
+    file_path = variant_file(wingman_name, filename)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(file_path)
 
 
 @app.get("/client/plan", tags=["main"], response_model=str)
@@ -558,6 +693,19 @@ async def async_main(host: str, port: int, sidecar: bool):
         await core.set_core_state(CoreState.MIGRATING, message="Migrating configurations...")
         await core.config_service.migrate_configs(system_manager)
 
+        # Dutch set as another language before Wingman spoke it: now it does.
+        promoted = other_language.promote_to_supported(core.config_manager)
+        if promoted:
+            printr.print(f"Spoken language is now {promoted}.", server_only=True)
+
+        # Shipped Wingmen still on a default voice get the one recorded in
+        # the spoken language (also on the first start and after an update).
+        apply_default_voices(
+            core.config_manager,
+            core.app_root_path,
+            core.settings_service.settings.spoken_language.value,
+        )
+
         # Set LOADING_CONFIG state
         await core.set_core_state(CoreState.LOADING_CONFIG, message="Loading configuration...")
         await core.config_service.load_config()
@@ -594,9 +742,8 @@ async def async_main(host: str, port: int, sidecar: bool):
                 if platform.system() == "Linux":
                     msg = (
                         "Push-to-talk unavailable: keyboard access denied.\n"
-                        "Run these commands, then log out and back in:\n"
-                        "sudo usermod -a -G input $USER\n"
-                        "sudo usermod -a -G tty $USER"
+                        "Run this command, then log out and back in:\n"
+                        "sudo usermod -a -G input $USER"
                     )
                 elif platform.system() == "Darwin":
                     msg = (

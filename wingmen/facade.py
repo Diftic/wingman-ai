@@ -35,6 +35,25 @@ class ToolResult:
     label: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class SpokenLanguageInfo:
+    """The language the user and their Wingmen speak (ctx.language).
+
+    Skills that let a model write something the user hears or reads — a side-call
+    via ctx.ai.generate, the support model — put `name` into that prompt:
+    ``f"Write in {ctx.language.name}."``. Those calls do not get the Wingman's
+    system prompt, so nothing else tells the model the language.
+    """
+    code: Optional[str]
+    """ISO 639 code: "en", "de", ... or the code of an other language ("nl");
+    None for an other language that has none."""
+    name: str
+    """The English name, the way prompts spell it: "German", "Dutch"."""
+    is_other: bool
+    """True when the user picked a language beyond the seven Wingman supports
+    end to end (settings.other_language)."""
+
+
 @dataclass
 class ToolDescriptor:
     """Describes one callable function available to the wingman (skill tool, MCP tool,
@@ -245,24 +264,9 @@ def apply_voice_to_current_provider(config: Any, voice: Any) -> tuple[Any, str] 
     return None
 
 
-# Wingman Pro pays per-use on our dime, so it gets a fixed, lower side-call cap that
-# users cannot raise. Own-provider users use config.features.skill_max_input_tokens.
-WINGMAN_PRO_MAX_INPUT_TOKENS = 8000
 # Flat per-image token estimate — we must NOT count the raw base64 string (it would be
 # enormous and falsely trip the cap). Mirrors a high-detail image's real token cost.
 IMAGE_TOKEN_ESTIMATE = 1000
-
-
-def skill_input_cap(config: Any) -> int:
-    """Max input tokens skill-originated content (a ctx.ai.generate side-call OR a
-    tool/MCP response) may feed the main model. Wingman Pro is hardcoded lower (we pay);
-    own providers use config.features.skill_max_input_tokens."""
-    from api.enums import ConversationProvider
-
-    features = config.features
-    if features.conversation_provider == ConversationProvider.WINGMAN_PRO:
-        return WINGMAN_PRO_MAX_INPUT_TOKENS
-    return getattr(features, "skill_max_input_tokens", 16000)
 
 
 def _count_message_tokens(messages: list) -> int:
@@ -299,7 +303,20 @@ class SkillAi:
         self._wingman = wingman
 
     def _max_input_tokens(self) -> int:
-        return skill_input_cap(self._wingman.config)
+        """The same cap as for a tool response: 32,000 tokens, or a quarter of a
+        smaller main model's window (services/context_budget.py)."""
+        return self._wingman.context_budget.tool_cap
+
+    async def _call(self, messages: list):
+        from services.context_budget import ContextOverflowError
+
+        try:
+            return await self._wingman.actual_llm_call(messages)
+        except ContextOverflowError as error:
+            raise FacadeError(
+                f"The main model refused this request as too long for its context "
+                f"window: {error}. Send less."
+            ) from error
 
     async def generate(
         self,
@@ -316,53 +333,56 @@ class SkillAi:
         ``prompt`` is the instruction; ``data`` is an optional larger payload appended
         to it; ``image`` is an optional data-URL for vision. Pass ``messages`` (a prebuilt
         OpenAI-style message list) to send your own turns directly — it is sent as-is and
-        ``prompt``/``system``/``data``/``image`` are ignored. When conversation
-        condensation is enabled the combined input is capped (see class docstring):
-        over the cap raises :class:`FacadeError`, or (for the prompt/data path) truncates
-        if ``auto_shorten``. The ``messages`` path can't be auto-shortened — it raises.
+        ``prompt``/``system``/``data``/``image`` are ignored. The combined input is
+        capped like a tool response (32,000 tokens, less on a small model): over the
+        cap raises :class:`FacadeError`, or (for the prompt/data path) truncates if
+        ``auto_shorten``. The ``messages`` path can't be auto-shortened — it raises.
         """
         from services.token_utils import count_tokens, truncate_to_tokens
 
-        features = self._wingman.config.features
-
         # Prebuilt message-list path: send the skill's own turns directly (still capped).
         if messages is not None:
-            if features.condense_conversation:
-                cap = self._max_input_tokens()
-                total = _count_message_tokens(messages)
-                if total > cap:
-                    raise FacadeError(
-                        f"Skill tried to send ~{total} tokens to the main model, but the "
-                        f"limit is {cap}. Reduce the messages or pre-summarize them cheaply "
-                        f"with self.local_ai.summarize(...). (A structured message list can't "
-                        f"be auto-shortened — trim it yourself. On your own AI provider you can "
-                        f"raise features.skill_max_input_tokens or turn off condensation; on "
-                        f"Wingman Pro the limit is fixed.)"
-                    )
-            completion = await self._wingman.actual_llm_call(messages)
+            cap = self._max_input_tokens()
+            total = _count_message_tokens(messages)
+            if total > cap:
+                raise FacadeError(
+                    f"Skill tried to send ~{total} tokens to the main model, but the "
+                    f"limit is {cap}. Reduce the messages or pre-summarize them cheaply "
+                    f"with self.local_ai.summarize(...). (A structured message list can't "
+                    f"be auto-shortened — trim it yourself.)"
+                )
+            completion = await self._call(messages)
             if completion and completion.choices:
                 return completion.choices[0].message.content or ""
             return ""
 
         user_text = prompt if not data else f"{prompt}\n\n{data}"
 
-        if features.condense_conversation:
-            cap = self._max_input_tokens()
-            system_tokens = count_tokens(system) if system else 0
-            image_tokens = IMAGE_TOKEN_ESTIMATE if image else 0
-            total = system_tokens + count_tokens(user_text) + image_tokens
-            if total > cap:
-                if auto_shorten:
-                    budget = max(0, cap - system_tokens - image_tokens)
-                    user_text = truncate_to_tokens(user_text, budget)
-                else:
-                    raise FacadeError(
-                        f"Skill tried to send ~{total} tokens to the main model, but the "
-                        f"limit is {cap}. Reduce the input or pre-summarize it cheaply with "
-                        f"self.local_ai.summarize(...). (On your own AI provider you can raise "
-                        f"features.skill_max_input_tokens or turn off conversation condensation; "
-                        f"on Wingman Pro the limit is fixed.)"
-                    )
+        cap = self._max_input_tokens()
+        system_tokens = count_tokens(system) if system else 0
+        image_tokens = IMAGE_TOKEN_ESTIMATE if image else 0
+        total = system_tokens + count_tokens(user_text) + image_tokens
+        if total > cap:
+            if auto_shorten:
+                budget = max(0, cap - system_tokens - image_tokens)
+                user_text = truncate_to_tokens(user_text, budget)
+                from api.enums import LogSource, LogType
+                from services.printr import Printr
+
+                await Printr().print_async(
+                    f"A skill's request to the AI was ~{total:,} tokens, above the "
+                    f"limit of {cap:,}. Its input was cut to fit (auto_shorten).",
+                    color=LogType.WARNING,
+                    source=LogSource.WINGMAN,
+                    source_name=self._wingman.name,
+                    wingman_name=self._wingman.name,
+                )
+            else:
+                raise FacadeError(
+                    f"Skill tried to send ~{total} tokens to the main model, but the "
+                    f"limit is {cap}. Reduce the input or pre-summarize it cheaply with "
+                    f"self.local_ai.summarize(...)."
+                )
 
         messages: list = []
         if system:
@@ -380,7 +400,7 @@ class SkillAi:
         else:
             messages.append({"role": "user", "content": user_text})
 
-        completion = await self._wingman.actual_llm_call(messages)
+        completion = await self._call(messages)
         if completion and completion.choices:
             return completion.choices[0].message.content or ""
         return ""
@@ -391,7 +411,7 @@ class SkillAi:
         side work that should NOT join the conversation."""
         await self._wingman.add_user_message(user_message)
         messages = list(self._wingman.conversation.messages)
-        completion = await self._wingman.actual_llm_call(messages)
+        completion = await self._call(messages)
         text = ""
         if completion and completion.choices:
             text = completion.choices[0].message.content or ""
@@ -404,9 +424,40 @@ class SkillAi:
         summarization prefer ctx.local_ai.summarize() (free, local)."""
         return await self.generate(text, system=system or "Summarize the following concisely.")
 
-    async def generate_image(self, prompt: str) -> str:
-        """Generate an image from a prompt; returns the generated file path/URL."""
-        return await self._wingman.generate_image(prompt)
+    async def generate_image(
+        self,
+        prompt: str,
+        *,
+        aspect: str = "square",
+        reference_images: Optional[list[str]] = None,
+    ) -> str:
+        """Generate an image from a prompt; returns the image as data URL or URL, "" on failure.
+        aspect: "square", "portrait" or "landscape".
+        reference_images: up to 4 data URLs the model builds on ("the same character, but ...").
+        Shrink them first with services.image_generation.reference_data_url."""
+        from api.enums import ImageAspect
+
+        return await self._wingman.generate_image(
+            prompt, aspect=ImageAspect(aspect), reference_images=reference_images
+        )
+
+    def recent_user_images(self) -> tuple[str, ...]:
+        """The images the user attached to their most recent message that had any,
+        as data URLs. Empty if the conversation has none."""
+        for message in reversed(self._wingman.messages):
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            urls = tuple(
+                part["image_url"]["url"]
+                for part in content
+                if isinstance(part, dict) and part.get("type") == "image_url"
+            )
+            if urls:
+                return urls
+        return ()
 
 
 def _text_or_empty(resp) -> str:
@@ -993,6 +1044,22 @@ class SkillConversation:
     async def add_assistant(self, content: str) -> None:
         await self._wingman.conversation.add_assistant_message(content)
 
+    async def show(self, text: str, *, skill_name: str = "") -> None:
+        """Show a line in the chat as said by this Wingman, like one of its
+        answers. Only the display: pair it with tts.speak to say it and with
+        add_assistant to put it into the history."""
+        from api.enums import LogSource, LogType
+        from services.printr import Printr
+
+        await Printr().print_async(
+            text,
+            color=LogType.POSITIVE,
+            source=LogSource.WINGMAN,
+            source_name=self._wingman.name,
+            wingman_name=self._wingman.name,
+            skill_name=skill_name,
+        )
+
     async def reset(self) -> None:
         await self._wingman.reset_conversation_history()
 
@@ -1063,3 +1130,483 @@ class SkillSettings:
     def input_device(self):
         audio = object.__getattribute__(self, "_wingman").settings.audio
         return audio.input if audio else None
+
+
+
+class SkillUi:
+    """Show something in the client (`self.wingman.ui`)."""
+
+    def __init__(self, wingman: "Wingman") -> None:
+        self._wingman = wingman
+
+    async def show_dialog(
+        self, title: str, text: str, *, image: Optional[str] = None, once: Optional[str] = None
+    ) -> bool:
+        """Open a dialog in the client. `text` is Markdown; links open in the
+        browser. `image` is a data URL shown under it. With `once` (prefix it
+        with your skill name, e.g. "MySkill.welcome") the dialog is shown a
+        single time ever and later calls return False. If no client is
+        connected yet, it appears as soon as one is."""
+        from api.commands import SkillDialogCommand
+        from services import skill_dialogs
+        from services.connection_manager import ConnectionManager
+
+        if once and skill_dialogs.was_shown(once):
+            return False
+        await ConnectionManager().broadcast(
+            SkillDialogCommand(
+                wingman_name=self._wingman.name, title=title, text=text, image=image
+            )
+        )
+        if once:
+            skill_dialogs.mark_shown(once)
+        return True
+
+
+# One HUD connection for all Wingmen, and the groups already made sure of.
+_hud_clients: dict = {}
+_hud_groups: set = set()
+
+
+class SkillHud:
+    """The HUD overlay (`self.wingman.hud`), drawn by Core's HUD server.
+
+    The server runs on Windows only, and only when the user switched it on in
+    the settings. Every call checks that: when the HUD is off or unreachable,
+    nothing happens and the call returns False. Everything lands in this
+    Wingman's own windows, the ones the HUD skill uses, so it looks the same.
+    """
+
+    def __init__(self, wingman: "Wingman") -> None:
+        self._wingman = wingman
+
+    @property
+    def available(self) -> bool:
+        """The user switched the HUD on and this is Windows."""
+        import platform
+
+        hud = getattr(self._wingman.settings, "hud_server", None)
+        return bool(hud and hud.enabled) and platform.system() == "Windows"
+
+    @property
+    def _group(self) -> str:
+        import re
+
+        return re.sub(r"[^a-zA-Z0-9_-]", "_", self._wingman.name)
+
+    async def _client(self, element):
+        if not self.available:
+            return None
+        from hud_server.http_client import HudHttpClient
+        from hud_server.validation import validate_hud_settings
+
+        settings = validate_hud_settings(self._wingman.settings.hud_server)
+        base_url = f"http://{settings['host']}:{settings['port']}"
+        client = _hud_clients.get(base_url)
+        if client is None:
+            client = _hud_clients[base_url] = HudHttpClient(base_url=base_url)
+        if not client.connected and not await client.connect(timeout=1.0):
+            return None
+        key = (base_url, self._group, element)
+        if key not in _hud_groups:
+            # Creates the group if it is missing, keeps its look if it exists.
+            if await client.create_group(self._group, element) is None:
+                return None
+            _hud_groups.add(key)
+        return client
+
+    @staticmethod
+    def _done(client, result) -> bool:
+        if result is None:
+            # A restarted server has forgotten its groups; make them again next time.
+            _hud_groups.difference_update({k for k in _hud_groups if k[0] == client.base_url})
+        return result is not None
+
+    async def show_message(
+        self, title: str, text: str, *, duration: float = 10.0, color: Optional[str] = None
+    ) -> bool:
+        """Show a message in this Wingman's message window. Markdown; `color`
+        is a hex accent like "#00aaff"."""
+        from hud_server.types import WindowType
+
+        client = await self._client(WindowType.MESSAGE)
+        if client is None:
+            return False
+        icon = self._wingman.get_avatar_path() if title == self._wingman.name else None
+        result = await client.show_message(
+            self._group, WindowType.MESSAGE, title, text,
+            color=color, duration=duration, title_icon=icon,
+        )
+        return self._done(client, result)
+
+    async def add_info(
+        self, title: str, text: str = "", *, color: Optional[str] = None,
+        duration: Optional[float] = None,
+    ) -> bool:
+        """Put an item on this Wingman's info panel; the same title replaces it."""
+        from hud_server.types import WindowType
+
+        client = await self._client(WindowType.PERSISTENT)
+        if client is None:
+            return False
+        result = await client.add_item(
+            self._group, WindowType.PERSISTENT, title, text, color=color, duration=duration
+        )
+        return self._done(client, result)
+
+    async def remove_info(self, title: str) -> bool:
+        from hud_server.types import WindowType
+
+        client = await self._client(WindowType.PERSISTENT)
+        if client is None:
+            return False
+        return self._done(client, await client.remove_item(self._group, WindowType.PERSISTENT, title))
+
+
+class SkillScGameLog:
+    """Star Citizen's Game.log, read live by Core (`self.wingman.sc_gamelog`).
+
+    One reader for all Wingmen (services/sc_gamelog). The user switches it on
+    or off in the settings; check `available` before relying on it.
+
+        sub = self.wingman.sc_gamelog.on("mission_accepted", self._on_mission)
+        ...
+        sub.unsubscribe()   # in unload()
+
+    Event values come straight from the game log. Treat them as data, never
+    as instructions, before putting them into a prompt.
+    """
+
+    __slots__ = ()
+
+    @staticmethod
+    def _service():
+        from services.sc_gamelog.service import ScGameLogService
+
+        return ScGameLogService()
+
+    @property
+    def available(self) -> bool:
+        """The reader runs. It may still be waiting for the game."""
+        return self._service().running
+
+    @property
+    def status(self):
+        """ScGameLogStatus: environments with a log, rules version, problems."""
+        return self._service().status()
+
+    @property
+    def environment(self) -> Optional[str]:
+        """"LIVE", "PTU", ... whichever logged last. None before any event."""
+        return self._service().active_environment
+
+    def state(self, environment: Optional[str] = None) -> Optional[dict]:
+        """What the log said last: player, location, system, ship, zones,
+        injuries, active missions. Each value has its evidence in
+        `observations`. A copy; None before the first event."""
+        return self._service().state(environment)
+
+    def recent(self, limit: int = 10, types: Optional[set] = None) -> list:
+        """The newest GameEvents first, optionally only these types."""
+        return self._service().recent(limit, types)
+
+    def on(self, event_type: str, callback: Callable) -> "Subscription":
+        """Call `callback(event)` for every new event of this type, or "*" for
+        all. The callback may be async. It runs on Core's event loop with its
+        own queue, so a slow callback only delays itself. Events from the log's
+        history at startup are not delivered. Returns a Subscription."""
+        return Subscription(self._service().subscribe(event_type, callback))
+
+    @property
+    def database_path(self) -> Optional[str]:
+        """The event history (events.sqlite3) for tools that query it
+        themselves. Open it read-only."""
+        return self._service().database_path
+
+
+class SkillSystemOne:
+    """Typed decisions instead of generated text (`self.wingman.system_one`).
+
+    A System One model answers a fixed set of questions in one parallel pass
+    and cannot answer outside the options it is given. Reach for it wherever a
+    skill needs a *decision* rather than a sentence: which of these does the
+    user mean, how bad is this, is it worth acting on. It answers in about
+    300 ms — several times faster than `self.wingman.ai.generate()` — and
+    costs a fraction of it.
+
+    This is a thin wrapper around TypeSafe's Jev, and it keeps their names so
+    that their documentation reads straight across:
+
+        TypeSafe SDK                      here
+        ------------------------------    ----------------------------------
+        Choice(instructions, criteria)    so.choice(instructions, criteria)
+        Score(instructions, criteria)     so.score(instructions, criteria)
+        Noul(instructions)                so.noul(instructions)
+        client.system_one(state, q)       await so.decide(state, q)
+        answers[k].choice / .confidence   answers.choice(k) / .confidence(k)
+        answers[k].score                  answers.score(k)
+        answers[k].noul                   answers.noul(k)
+        answers[k].probabilities          answers.probabilities(k)
+
+    Only three things are ours, and each fills a gap their API leaves:
+    `so.describe()` builds their structured description object, `level()`
+    turns a score back into its label, and `yes_no()` applies a threshold to
+    a noul. Everything else is theirs, spelled the same way.
+
+        so = self.wingman.system_one
+        answers = await so.decide(
+            state={"transcript": text, "shields": 12},
+            questions={
+                "action": so.choice("What should happen?",
+                                    {"flee": "run away", "fight": "engage",
+                                     "repair": "fix the ship"}),
+                "urgency": so.score("How urgent is this?",
+                                    ["can wait", "soon", "right now"]),
+                "hostile": so.noul("Is the ship under attack?"),
+            },
+        )
+        answers.choice("action", min_confidence=0.8)   # "repair" or None
+        answers.level("urgency")                       # "right now"
+        answers.noul("hostile")                        # 0.93
+        answers.yes_no("hostile")                      # True
+
+    Ask everything at once. Questions in one call are evaluated in parallel,
+    so eight cost about what one costs — measured at 13 ms and 28% more
+    tokens for seven extra questions. One call with the questions you might
+    need beats three calls with the ones you did.
+
+    **`available` is False when the user switched System One off in Settings,
+    or the plan has no access.** Check it. If you forget, nothing breaks:
+    `decide()` returns an empty answer and every reader gives back None — but
+    your skill then silently takes the None branch, which is rarely what you
+    meant.
+    """
+
+    def __init__(self, gate) -> None:
+        self._gate = gate
+
+    @property
+    def available(self) -> bool:
+        """Whether a call would reach a model.
+
+        False for all of: the user turned it off in Settings, no Wingman Pro
+        session, a plan without the role. The skill then decides some other
+        way — with `self.wingman.ai.generate()`, or a rule of its own.
+        """
+        return bool(self._gate and self._gate.active)
+
+    # --- building questions -------------------------------------------------
+    #
+    # `not_for` and `examples` are optional on all three and build TypeSafe's
+    # structured instruction object. They are the single biggest lever on
+    # answer quality: on Wingman's own command routing, descriptions took
+    # wrong answers from 16 to 3 out of 152, and a structured instruction
+    # moved one transcript from 0.90 confidence to 1.00. They cost nothing in
+    # latency.
+
+    @staticmethod
+    def choice(
+        instructions: str,
+        criteria: dict,
+        *,
+        not_for: Optional[str] = None,
+        examples: Optional[list] = None,
+    ) -> dict:
+        """One of `criteria`: a map of option name to description.
+
+        A description may be None, a sentence, or `so.describe(...)` for an
+        option with a near neighbour. Up to 255 options.
+
+        Include an explicit "none of these" option whenever the honest answer
+        might be that nothing applies. Without one the probability has nowhere
+        to go but onto the real options, and a confidence gate then lets the
+        least wrong one through.
+        """
+        from providers.typesafe_jev import choice as _choice
+
+        return _choice(instructions, criteria, not_for=not_for, examples=examples)
+
+    @staticmethod
+    def score(
+        instructions: str,
+        criteria: list,
+        *,
+        not_for: Optional[str] = None,
+        examples: Optional[list] = None,
+    ) -> dict:
+        """A rating on `criteria`, lowest level first: `["low", "high"]`.
+
+        Read it back with `level()` for the label, `score()` for the position
+        between labels.
+        """
+        from providers.typesafe_jev import score as _score
+
+        return _score(instructions, criteria, not_for=not_for, examples=examples)
+
+    @staticmethod
+    def noul(
+        instructions: str,
+        *,
+        not_for: Optional[str] = None,
+        examples: Optional[list] = None,
+    ) -> dict:
+        """A yes/no question. TypeSafe's name for it, and the answer is a
+        probability rather than a boolean — `answers.noul(key)` gives the
+        number, `answers.yes_no(key)` applies a threshold."""
+        from providers.typesafe_jev import noul as _noul
+
+        return _noul(instructions, not_for=not_for, examples=examples)
+
+    # For anyone who has not read TypeSafe's docs and is looking for the
+    # obvious name. Same question, same answer.
+    yes_no = noul
+
+    @staticmethod
+    def describe(
+        what: str,
+        *,
+        not_for: Optional[str] = None,
+        examples: Optional[list] = None,
+    ) -> Any:
+        """TypeSafe's structured description, for an option a neighbour could
+        be mistaken for.
+
+            {"gear": so.describe("the landing gear alone",
+                                 not_for="landing the ship",
+                                 examples=["gear down", "retract the gear"])}
+
+        Returns the plain string when there is nothing to add, so it is safe
+        to route every description through here.
+        """
+        from providers.typesafe_jev import guidance
+
+        return guidance(what, not_for=not_for, examples=examples)
+
+    # --- asking -------------------------------------------------------------
+
+    async def decide(self, state, questions: dict) -> "SystemOneAnswers":
+        """Answer every question against `state`. Never raises.
+
+        TypeSafe's `client.system_one(state=..., questions=...)`, with the
+        same two arguments. `state` is whatever the questions are about — a
+        string, or a dict of several things. It is sent as-is, so keep it to
+        what the questions need: it is what the call is billed on, and the
+        limit is 32k tokens.
+        """
+        if not self.available or not questions:
+            return SystemOneAnswers(None)
+        return SystemOneAnswers(await self._gate.ask(state, questions))
+
+    def decide_sync(self, state, questions: dict) -> "SystemOneAnswers":
+        """Blocking version, for a skill already off the event loop."""
+        if not self.available or not questions:
+            return SystemOneAnswers(None)
+        return SystemOneAnswers(self._gate.ask_sync(state, questions))
+
+
+class SystemOneAnswers:
+    """What came back, keyed by the question names you asked under.
+
+    TypeSafe hands back `response.answers[key].choice`; here that is
+    `answers.choice(key)`. The values are theirs, untouched.
+
+    Every reader returns None (or an empty collection) when there is no
+    answer, so a skill that does not check `available` gets nothing rather
+    than an exception.
+    """
+
+    def __init__(self, result) -> None:
+        self._result = result
+
+    @property
+    def ok(self) -> bool:
+        return bool(self._result and self._result.ok)
+
+    @property
+    def error(self) -> Optional[str]:
+        """Why there is no answer, or None. For logging, not for control
+        flow — branch on the value being None instead."""
+        return self._result.error if self._result else "system one is off"
+
+    @property
+    def seconds(self) -> float:
+        return self._result.seconds if self._result else 0.0
+
+    def keys(self) -> list:
+        """The questions that were answered."""
+        return self._result.keys() if self._result else []
+
+    # --- choice -------------------------------------------------------------
+
+    def choice(self, key: str, min_confidence: float = 0.0) -> Optional[str]:
+        """The chosen option, or None below `min_confidence`.
+
+        A threshold is worth setting when acting on the answer is hard to
+        undo. It separates unsure from sure; it will not separate two options
+        that genuinely overlap, which is what descriptions are for. If the
+        wrong neighbour keeps winning at high confidence, write a better
+        description rather than raising this.
+        """
+        return self._result.choice(key, min_confidence=min_confidence) if self._result else None
+
+    def confidence(self, key: str) -> float:
+        """How concentrated the answer is, 0 to 1. Choice and score only."""
+        return self._result.confidence(key) if self._result else 0.0
+
+    def probabilities(self, key: str) -> dict:
+        """Every option with its share, summing to 1.
+
+        Keyed by option name for a choice. A score reports its shares by
+        level index; they are mapped back through the legend here, so a
+        caller never has to know which of the two it asked.
+        """
+        return self._result.probabilities(key) if self._result else {}
+
+    # --- score --------------------------------------------------------------
+
+    def score(self, key: str) -> Optional[float]:
+        """TypeSafe's score: a position on the scale, 0 to len(criteria) - 1.
+
+        Continuous, not a label — `1.99` on three levels is "almost entirely
+        the third". Use this when the distance matters and `level()` when the
+        bucket does.
+        """
+        return self._result.score(key) if self._result else None
+
+    def level(self, key: str) -> Optional[str]:
+        """The nearest level label. Usually what you want from a score.
+
+        Ours, not TypeSafe's: they return the number and a legend, and this
+        does the lookup.
+        """
+        return self._result.level(key) if self._result else None
+
+    def levels(self, key: str) -> list:
+        """The level labels, lowest first, from the answer's legend."""
+        return self._result.levels(key) if self._result else []
+
+    # --- noul ---------------------------------------------------------------
+
+    def noul(self, key: str) -> Optional[float]:
+        """TypeSafe's noul: the yes/no answer as a probability, 0 to 1."""
+        return self._result.noul_value(key) if self._result else None
+
+    def yes_no(self, key: str, threshold: float = 0.5) -> Optional[bool]:
+        """The same answer as a boolean, above `threshold`.
+
+        Ours, not TypeSafe's. Raise the threshold for a yes that is expensive
+        to get wrong.
+        """
+        return self._result.noul(key, threshold=threshold) if self._result else None
+
+    # --- escape hatch -------------------------------------------------------
+
+    def raw(self, key: Optional[str] = None) -> dict:
+        """The answers exactly as the model sent them — one, or all of them.
+
+        For anything the readers above do not cover. Everything else should
+        go through them.
+        """
+        if not self._result:
+            return {}
+        return self._result.raw(key) if key is not None else dict(self._result.answers)

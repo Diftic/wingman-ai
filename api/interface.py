@@ -5,7 +5,12 @@ from api.enums import (
     ConversationProvider,
     CoreState,
     ImageGenerationProvider,
+    ImageStyle,
     LocalAiMode,
+    PocketTtsQuality,
+    ScGameLogRulesProblem,
+    SkillRequirement,
+    SpokenLanguage,
     McpAuthType,
     McpTransportType,
     CustomPropertyType,
@@ -68,6 +73,11 @@ class SystemCore(TypedDict):
 class SystemInfo(BaseModel):
     os: str
     core: SystemCore
+
+
+class ErrorReportingState(BaseModel):
+    enabled: Optional[bool]
+    """None until the user has chosen. Core sends nothing before that."""
 
 
 class ChangelogEntry(BaseModel):
@@ -137,6 +147,8 @@ class VoiceInfo(BaseModel):
     locale: Optional[str] = None
     languages: Optional[list[str]] = None
     provider: Optional[str] = None
+    description: Optional[str] = None
+    """A short line on how the voice sounds, e.g. "ruhig, gemächlich"."""
 
 
 # from sounddevice lib
@@ -179,8 +191,12 @@ class XVASynthSettings(BaseModel):
 class PocketTTSSettings(BaseModel):
     enable: bool
     run_locally: bool = True
-    model: str = "english"
-    quantize: bool = True
+    quality: PocketTtsQuality
+    """Size of the model for `spoken_language`. The model itself follows the
+    language and is not a setting of its own (services/spoken_language.py)."""
+    custom_model: Optional[str] = None
+    """A YAML config from the Pocket TTS models folder to load instead of the
+    built-in model. None loads the built-in model for `spoken_language`."""
     host: str
     port: int
 
@@ -193,12 +209,9 @@ class PocketTTSPreloadResult(BaseModel):
 
 class ParakeetSettings(BaseModel):
     run_locally: bool = True
-    model_variant: str
-    """v2 (English) or v3 (Multilingual, 25 languages)"""
     execution_provider: str
-    """cpu, directml, coreml, or cuda"""
-    language: Optional[str] = None
-    """Transcription language. Empty means auto-detect."""
+    """cpu, directml (Windows, any GPU) or cuda (NVIDIA). Picked on the first
+    start: cuda when nvidia-smi finds a GPU, else cpu."""
     host: str = ""
     """Where a Parakeet server runs when `run_locally` is off. Empty until
     the user fills it in; nothing is contacted before that."""
@@ -559,6 +572,32 @@ class VoiceActivationSettings(BaseModel):
     "okay stop please" works with "okay stop" and "stop please" listed."""
 
 
+class PronunciationRule(BaseModel):
+    """How to say something the voice gets wrong: "aUEC" -> "Alpha U E C"."""
+
+    written: str
+    spoken: str
+    """Digits are fine: they are read in the spoken language afterwards."""
+
+
+class PronunciationSettings(BaseModel):
+    """How the text handed to the voice is rewritten, for every TTS provider
+    (services/speech_text.py). The chat keeps what the Wingman wrote."""
+
+    rules: list[PronunciationRule]
+    """The user's own rules. They win over every bundled one."""
+    presets: list[str]
+    """Bundled lists switched on, by id ("star_citizen")."""
+
+
+class PronunciationPreset(BaseModel):
+    """A bundled pronunciation list, one per game."""
+
+    id: str
+    name: str
+    count: int
+
+
 class VocabularyPreset(BaseModel):
     """A bundled word list for the speech correction, one per game."""
 
@@ -596,11 +635,6 @@ class SttSettings(BaseModel):
 
     provider: SttProvider
 
-    languages: list[str]
-    """Languages the cloud transcription may auto-detect, as BCP-47 tags such as
-    en-US. Used by the Wingman backend; the local providers have their own
-    language settings."""
-
     vocabulary: list[str] = []
     """Special words no speech model knows: place names, ship names, people.
     Every transcript is corrected against them afterwards, whatever the
@@ -627,30 +661,12 @@ class FeaturesConfig(BaseModel):
     tts_provider: TtsProvider
     conversation_provider: ConversationProvider
     image_generation_provider: ImageGenerationProvider
-    use_generic_instant_responses: bool
     condense_conversation: bool
-    """Enable automatic conversation condensation using the local support model.
-    When enabled, older messages are automatically summarized when the conversation
-    approaches the support model's context window capacity, saving tokens while
-    preserving key information."""
-    compress_tool_responses: bool
-    """Let the support model summarize a tool/MCP response that is over the
-    per-response cap (see ``skill_max_input_tokens``) instead of cutting it. Off, or
-    with no support model ready, the response is cut structurally: whole JSON entries
-    or whole lines, with a note saying what is missing. Responses under the cap are
-    never touched either way."""
-    condense_max_messages: int
-    """Maximum number of user messages before forcing condensation, regardless of token count.
-    Acts as a safety cap to prevent unbounded message list growth."""
-    condense_keep_recent_tokens: int = 8000
-    """How much recent history (in tokens) a condensation keeps verbatim. Whole turns,
-    always at least the latest one. Older messages get condensed into the running
-    summary. Capped at a third of what the support model can summarize in one pass."""
-    skill_max_input_tokens: int = 16000
-    """Max tokens skill-originated content may feed the main model at once: a
-    ctx.ai.generate side-call, or a single tool/MCP response. The side-call cap is
-    only enforced while ``condense_conversation`` is enabled; the tool-response cap is
-    always on. Wingman Pro hardcodes a lower limit (8000) that users cannot change."""
+    """Shorten the conversation once a request passes its history limit (64,000
+    tokens, or half of a smaller model's window): old tool responses are cleared
+    first, then older turns are summarized by the support model. Below the limit
+    nothing is touched. Off, the history is only shortened when a request would
+    not fit the model at all. See docs/context-and-shortening.md."""
 
 
 class AudioFile(BaseModel):
@@ -775,6 +791,22 @@ class CommandConfig(BaseModel):
     We use "DeployLandingGear" here but a number of lines like "I want to land", "Get ready to land" etc. will also work.
     If the Wingman doesn't call your command, try to rephrase the name here.
     """
+    description: Optional[str] = None
+    """What this command does, in one line, for the models that have to pick it.
+
+    Optional, and empty is normal: a command the user recorded themselves has
+    no description until they write one, and the name alone is usually enough.
+    It earns its keep where two commands are easy to confuse — "Autoland",
+    "Autodock", "Toggle Landing System" and "Landing Sequence" all read as
+    "land the ship", and the name cannot say which is which.
+
+    Measured 2026-09-20 on the shipped Star Citizen config, 152 spoken
+    transcripts: descriptions took the chat model from 0.884 to 0.952 and the
+    System One model from 0.863 to 0.973. They cost nothing in latency. Say
+    what the command does and, where a neighbour could be mistaken for it,
+    what it is NOT for.
+    """
+
     category_id: Optional[str] = None
     """Optional category ID to group commands."""
     is_system_command: Optional[bool] = False
@@ -879,6 +911,10 @@ class SkillConfig(CustomClassConfig):
     examples: Optional[list[LocalizedMetadata]] = None
     platforms: Optional[list[str]] = None
     """List of supported platforms: 'windows', 'darwin' (macOS), 'linux'. If None, skill works on all platforms."""
+    requires: Optional[list[SkillRequirement]] = None
+    """Core services that must be switched on in the settings, like the HUD or
+    the Star Citizen log reader. The client greys the skill out until they are.
+    None means the skill needs none."""
     auto_activate: Optional[bool] = False
     """If True, this skill's tools are always available without LLM activation.
     Use for event-driven skills or skills that should always be active when enabled.
@@ -947,6 +983,43 @@ class WingmanSkillState(BaseModel):
 
     is_enabled: bool
     """Whether the skill is enabled for this wingman (in discoverable_skills list)."""
+
+
+class SkillVerdictInfo(BaseModel):
+    """What the SkillCatalog decided about one skill on this boot.
+
+    Same payload as the `skill_registered` WebSocket command, offered as a
+    snapshot: the broadcast happens once while the tower initializes, so a
+    client that connects or reloads later would never learn why a skill is off.
+    """
+
+    skill: str
+    """Name of the skill."""
+    origin: str
+    """Where the skill came from: 'bundled' | 'custom'."""
+    outcome: str
+    """'ok' | 'failed' | 'quarantined' | 'legacy_v2'."""
+    id_hash: str
+    """Hash of the skill's identity."""
+    version: Optional[str] = None
+    """Skill version if available."""
+    api_version: Optional[int] = None
+    """Skill API version if available."""
+
+
+class MissingSkillInfo(BaseModel):
+    """A skill a Wingman is configured for that is not installed on this system.
+
+    Core knows nothing about it beyond the name the Wingman config stores, so it
+    cannot appear in the normal skill list. The client renders it as a disabled
+    row instead of letting it disappear without a word.
+    """
+
+    name: str
+    """The skill name as stored in the Wingman's discoverable_skills."""
+
+    module: Optional[str] = None
+    """The module path from the Wingman's skills list, if the config has one."""
 
 
 # ─────────────────────────────── MCP Configuration ─────────────────────────────── #
@@ -1406,6 +1479,101 @@ class LlamaCppSettings(BaseModel):
         return self.mode != LocalAiMode.SERVER
 
 
+class SystemOneSettings(BaseModel):
+    """The System One model: a decision layer in front of the main model.
+
+    A System One model answers typed questions instead of writing text — which
+    command was asked for, which skills a turn needs, whether the microphone
+    heard a request at all, whether a heard word is a game name. It answers in
+    about 300 ms where a chat model takes over a second, and it cannot return
+    a value outside the options it was given.
+
+    Which model that is comes from the subscription, not from here: it is a
+    fixed role like transcription and speech, so it can be changed in /admin
+    without a Wingman release. The user's choice is whether to use one at all.
+    """
+
+    enabled: bool
+    """Whether any of Core's decisions may go to the System One model.
+
+    The master switch. The decisions it takes are spread over the turn —
+    before the main model, during transcription, inside skills — and a toggle
+    per place would be a settings page nobody could reason about. Off means
+    every one of those places decides the way it did before, which is always
+    a working path and never an error."""
+
+    commands: bool
+    """Whether the model is asked which command a request means, before the
+    main model is asked anything.
+
+    Its own switch because it is the one decision that runs on spec. Every
+    other use waits until there is something to resolve — a name the speech
+    model mangled, a title said differently — and costs nothing when there is
+    not. This one asks on every request, including the ones that were never
+    going to be a command.
+
+    Measured 2026-09-21 against gpt-4.1-mini on the shipped Star Citizen
+    config: the keypress happens after 0.48 s instead of 1.13 s, and the
+    spoken confirmation after 1.49 s instead of 2.13 s. A request that is not
+    a command costs 0.46 s and changes nothing. For someone who only talks to
+    their Wingman, that is all it ever does."""
+
+
+class OtherLanguageSetting(BaseModel):
+    """A language beyond the six Wingman supports end to end."""
+
+    code: Optional[str] = None
+    """ISO 639 code, e.g. "nl"; None when the language has none (Klingon
+    has "tlh", a made-up one has nothing)."""
+    name: str
+    """The language's name in itself, e.g. "Nederlands"."""
+    english_name: str
+    """Its English name, e.g. "Dutch", for the conversation model."""
+
+
+class ScGameLogSettings(BaseModel):
+    """Core reads Star Citizen's Game.log live and hands the events to skills
+    (services/sc_gamelog, `self.wingman.sc_gamelog`)."""
+
+    enabled: bool
+    """Off for someone who does not play Star Citizen. On, the reader waits
+    for a Game.log at almost no cost."""
+    game_path: str
+    """The StarCitizen folder that holds LIVE, PTU and the other environments."""
+
+
+class ScGameLogMaintainer(BaseModel):
+    """Who maintains the Game.log rules, to contact when they break."""
+
+    name: str
+    discord: Optional[str] = None
+    url: Optional[str] = None
+
+
+class ScGameLogStatus(BaseModel):
+    """What the Star Citizen log reader is doing, for the settings page."""
+
+    running: bool
+    game_path: str
+    game_path_found: bool
+    """Whether the StarCitizen folder exists."""
+    environments: list[str]
+    """Environments with a Game.log right now, e.g. ["LIVE"]."""
+    active_environment: Optional[str] = None
+    """The environment with the newest event."""
+    rules_version: str
+    rules_revision: int
+    rules_downloaded: bool
+    """False while the reader uses the rules shipped with Wingman."""
+    rules_last_success: Optional[float] = None
+    """Unix time GitHub last answered with usable rules."""
+    rules_problem: Optional[ScGameLogRulesProblem] = None
+    rules_problem_detail: Optional[str] = None
+    maintainer: ScGameLogMaintainer
+    error: Optional[str] = None
+    """Why the reader cannot run, e.g. its database cannot be opened."""
+
+
 class SettingsConfig(BaseModel):
     audio: Optional[AudioSettings] = None
     stt: SttSettings
@@ -1414,15 +1582,62 @@ class SettingsConfig(BaseModel):
     xvasynth: XVASynthSettings
     pocket_tts: PocketTTSSettings
     llama_cpp: LlamaCppSettings
+    system_one: SystemOneSettings
     hud_server: HudServerSettings
+    sc_gamelog: ScGameLogSettings
     debug_mode: bool
     streamer_mode: bool
+    show_token_count: bool
+    """Show token counts on Wingman messages and in the conversation status
+    bar. Off by default: most users do not know what a token is, and the
+    number means nothing to them."""
+    filler_responses: bool
+    """Speak a short line, written by the support model in the user's language,
+    while a slow tool runs and the Wingman has not said anything yet."""
+    pronunciation: PronunciationSettings
     cancel_tts_key: Optional[str] = None
     cancel_tts_key_codes: Optional[list[int]] = None
     cancel_tts_joystick_button: Optional[CommandJoystickConfig] = None
     user_name: Optional[str] = None
     hardware_scan_performed: bool = False
-    spoken_language: str = "multilingual"
+    spoken_language: SpokenLanguage
+    """The one language the user and their Wingmen speak. Every
+    language-specific provider setting is derived from it."""
+    other_language: Optional[OtherLanguageSetting] = None
+    """The language when `spoken_language` is OTHER; None otherwise. The
+    default keeps a settings.yaml from before 3.2.4 loadable even where the
+    migration did not run (a missing required field stopped Core in 3.2.2)."""
+
+
+class OtherLanguageOption(BaseModel):
+    """One entry of the searchable list of other languages."""
+
+    code: str
+    native: str
+    en: str
+    de: str
+    fr: str
+    es: str
+    aliases: list[str]
+    """Other names people use ("Holländisch"), for the search."""
+    parakeet: bool
+    """Parakeet transcribes it."""
+
+
+class OtherLanguageReport(BaseModel):
+    """What works and what Wingman changed after an other language was set."""
+
+    language: OtherLanguageSetting
+    stt_provider: str
+    """"parakeet", "parakeet_remote" or "wingman_pro"."""
+    stt_supported: bool
+    """Parakeet transcribes the language (the subscription detects any)."""
+    inworld_supported: bool
+    """Inworld has voices for the language."""
+    tts_provider: Optional[str] = None
+    """The provider the Wingmen were switched to; None when none fits."""
+    switched_wingmen: list[str] = []
+    """"config/wingman" of each Wingman moved to `tts_provider`."""
 
 
 class SubscriptionModel(BaseModel):
@@ -1440,6 +1655,9 @@ class SubscriptionRoutes(BaseModel):
     """Speech."""
     image: Optional[SubscriptionModel] = None
     """Image generation."""
+    systemone: Optional[SubscriptionModel] = None
+    """The decision model. None means the plan has no System One access, and
+    the client then says so rather than naming a model that will not answer."""
     downgraded: Optional[SubscriptionModel] = None
     """What chat falls back to once the allowance is used up."""
 
@@ -1452,3 +1670,53 @@ class BenchmarkResult(BaseModel):
 
 
 BenchmarkResult.model_rebuild()
+
+
+class TokenUsage(BaseModel):
+    """What one Wingman turn used, as the provider counted it.
+
+    A turn with tool calls asks the model two or three times, and each of those
+    requests sends the whole conversation again, so every field is the sum over
+    all requests of the turn. Only token counts, never money: the backend
+    strips the cost before Core sees an answer.
+    """
+
+    input_tokens: int
+    """Tokens sent to the model, summed over every request of the turn."""
+    cached_tokens: int
+    """The part of ``input_tokens`` the provider served from its prompt cache.
+    0 when the provider does not report it."""
+    output_tokens: int
+    """Tokens the model wrote, summed over every request of the turn."""
+
+
+class AvatarGenerationRequest(BaseModel):
+    """One new avatar variant from the avatar studio."""
+
+    wingman_name: str
+    style: ImageStyle
+    """The art style preset. Core adds its text and the avatar framing."""
+    wishes: str
+    """What the user wants, in any language. May be empty: then the backstory
+    alone decides. With a reference it says what should change."""
+    prompt: Optional[str] = None
+    """The character description to use as is. None lets the wingman's model
+    write it from backstory and wishes."""
+    reference: Optional[str] = None
+    """File name of an earlier variant, or an uploaded image as data URL. The
+    new image keeps its character. None generates from scratch."""
+
+
+class AvatarVariant(BaseModel):
+    """A generated avatar, kept on disk until the user deletes it."""
+
+    file_name: str
+    url: str
+    """Path on Core that serves the image, relative to Core's base URL."""
+    path: str
+    """Absolute file path, for "show in folder"."""
+    prompt: str
+    """The character description the image was made from, without style and framing."""
+    style: ImageStyle
+    created: float
+    """Unix timestamp."""

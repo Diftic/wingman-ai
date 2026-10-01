@@ -16,6 +16,7 @@ from api.enums import LogSource, LogType
 from api.interface import (
     Config,
     ConfigDirInfo,
+    CustomProperty,
     McpConfig,
     NestedConfig,
     NewWingmanTemplate,
@@ -100,6 +101,7 @@ class ConfigManager:
         self.log_source_name = "ConfigManager"
         self.printr = Printr()
 
+        self.app_root_path = app_root_path
         self.templates_dir = path.join(app_root_path, TEMPLATES_DIR)
         self.config_dir = get_writable_dir(CONFIGS_DIR)
         self.skills_dir = get_writable_dir(SKILLS_DIR)
@@ -436,6 +438,13 @@ class ConfigManager:
             # Skip ALL skills directories - both top-level and within migration folders
             # e.g., "skills/...", "migration/1_8_0/skills/...", etc.
             if "skills" in path_parts:
+                continue
+            # Read straight from the bundle, never from a copy here: voice
+            # recordings (PocketTTS copies them into the custom voices folder,
+            # providers/pocket_tts_voices.py) and the pronunciation lists
+            # (services/speech_text.py). A copy per Wingman version would only
+            # take up space.
+            if path_parts[0] in ("pocket_tts", "pronunciation"):
                 continue
 
             # A wingman config template directory, e.g. "configs/Star Citizen"
@@ -1896,6 +1905,62 @@ class ConfigManager:
                 return candidate
         return None
 
+    def _drop_orphaned_skill_properties(
+        self, skill_dir: str, skill_manifest: dict, wingman_skill: dict
+    ) -> dict:
+        """Drop stored skill properties the installed skill no longer defines.
+
+        A saved Wingman stores only `{id, value}` per custom property; `name`,
+        `property_type` and the rest come from the skill's default_config.yaml.
+        When a skill update removes a property, the stored entry has nothing
+        left to complete it, so the merged Wingman fails validation - and
+        because parse_config re-raises, ONE stale key stops Core from starting
+        at all. The manifest owns the shape: a value with no property behind it
+        is dropped here (the YAML on disk keeps it untouched).
+
+        An entry that carries the full property itself is kept, so a skill that
+        ships its metadata in the Wingman config still works.
+        """
+        stored = wingman_skill.get("custom_properties")
+        if not stored:
+            return wingman_skill
+
+        known_ids = {
+            prop["id"]
+            for prop in (skill_manifest or {}).get("custom_properties") or []
+            if isinstance(prop, dict) and "id" in prop
+        }
+
+        kept = []
+        dropped = []
+        for prop in stored:
+            if not isinstance(prop, dict) or prop.get("id") in known_ids:
+                kept.append(prop)
+                continue
+            try:
+                CustomProperty(**prop)
+            except ValidationError:
+                dropped.append(prop.get("id"))
+                continue
+            kept.append(prop)
+
+        if not dropped:
+            return wingman_skill
+
+        self.printr.print(
+            f"Skill '{skill_dir}': dropped setting(s) {dropped} - the installed "
+            "version of the skill does not have them (any more). The values stay "
+            "in the Wingman file and are used again if the skill brings the "
+            "setting back.",
+            color=LogType.WARNING,
+            server_only=True,
+            source=LogSource.SYSTEM,
+            source_name=self.log_source_name,
+        )
+        wingman_skill = dict(wingman_skill)
+        wingman_skill["custom_properties"] = kept
+        return wingman_skill
+
     def merge_configs(self, default: Config, wingman):
         """Merge general settings with a specific wingman's overrides, including commands."""
         # Start with a copy of the wingman's specific config to keep it intact.
@@ -1951,6 +2016,9 @@ class ConfigManager:
 
                 if skill_default_config_path:
                     skill_config = self.read_config(skill_default_config_path)
+                    skill_config_wingman = self._drop_orphaned_skill_properties(
+                        skill_dir, skill_config, skill_config_wingman
+                    )
                     skill_config = self.__deep_merge(skill_config, skill_config_wingman)
                 else:
                     # Custom skill without default_config.yaml - the wingman

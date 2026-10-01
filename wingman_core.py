@@ -20,6 +20,7 @@ from api.commands import (
     AudioLibraryPlaybackFinishedCommand,
     CoreStateChangedCommand,
     LogCommand,
+    ScGameLogStateChangedCommand,
     SttVocabularyChangedCommand,
     VoiceActivationMutedCommand,
 )
@@ -30,12 +31,17 @@ from api.enums import (
     LocalAiMode,
     LogSource,
     LogType,
+    SpokenLanguage,
     SttProvider,
     WingmanInitializationErrorType,
 )
 from api.interface import (
+    ScGameLogSettings,
+    ScGameLogStatus,
     AudioDevice,
     AudioFile,
+    AvatarGenerationRequest,
+    AvatarVariant,
     BenchmarkResult,
     ChangelogEntry,
     CommandJoystickConfig,
@@ -55,6 +61,11 @@ from api.interface import (
     PocketTTSPreloadResult,
     SoundConfig,
     PresetOverride,
+    PronunciationPreset,
+    OtherLanguageOption,
+    OtherLanguageReport,
+    OtherLanguageSetting,
+    PronunciationRule,
     SttTestResult,
     SubscriptionRoutes,
     VocabularyPreset,
@@ -72,6 +83,7 @@ from providers.xvasynth import XVASynth
 from providers.pocket_tts import PocketTTS
 from wingmen.open_ai_wingman import OpenAiWingman
 from wingmen.wingman import Wingman
+from services import other_language
 from services.file import (
     get_writable_dir,
     get_audio_library_dir,
@@ -81,7 +93,10 @@ from services.file import (
     get_pocket_tts_models_dir,
     get_prompt,
 )
+from services.audio.device_names import with_full_names
 from services.model_downloader import ModelDownloader
+from services.sc_gamelog.service import ScGameLogService
+from services import avatar_studio
 from services.stt_provider_manager import SttProviderManager
 from services.stt_service import SttService
 from services.local_ai_service import LocalAiService
@@ -108,6 +123,7 @@ from services.audio import (
 from services.audio.transcription_worker import RECORDING_PATH
 from services.audio.vocabulary import apply_override, diff_override, list_presets, load_preset, spoken_names
 from services.config_manager import ConfigManager
+from services import speech_text
 from services.printr import Printr
 from services.secret_keeper import SecretKeeper
 from services.system_manager import SystemManager
@@ -125,6 +141,15 @@ MIN_OWN_WORDS = 3
 # "Stop" said while the wingman is still thinking: the answer that starts
 # within this many seconds is cut off right away instead of being played.
 STOP_AHEAD_SECONDS = 6.0
+# Below this, a voice-activated utterance is taken as room noise rather than a
+# request, and nothing answers it. Low on purpose: an answer nobody asked for
+# is a nuisance, but silence when the user did ask is a bug report.
+#
+# 0.15 measured best on the triage set (evals/jev_bench, 2026-09-20): 93%
+# against 90% at 0.2, and it is the highest gate that drops none of the real
+# user speech. "No wait, I meant the other ship." scores 0.18 and is exactly
+# the kind of sentence that must still get through.
+NOT_ADDRESSED_BELOW = 0.15
 
 
 def _key_source(key) -> str:
@@ -149,6 +174,7 @@ class WingmanCore(WebSocketUser):
     ):
         self.printr = Printr()
         self.app_root_path = app_root_path
+        speech_text.configure(app_root_path)
         self.system_manager = system_manager
         self.is_client_logged_in: bool = False
         self.client_plan: str = "Free"
@@ -191,6 +217,13 @@ class WingmanCore(WebSocketUser):
         # the user's edits are stored as a diff so an updated bundle still lands.
         self.router.add_api_route(
             methods=["GET"],
+            path="/sc-gamelog/status",
+            endpoint=self.get_sc_gamelog_status,
+            response_model=ScGameLogStatus,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
             path="/stt/vocabulary/presets",
             endpoint=self.get_stt_vocabulary_presets,
             response_model=list[VocabularyPreset],
@@ -208,6 +241,44 @@ class WingmanCore(WebSocketUser):
             path="/stt/vocabulary/presets/{preset_id}",
             endpoint=self.put_stt_vocabulary_preset,
             response_model=list[str],
+            tags=tags,
+        )
+        # How the voice says what the chat shows: bundled lists per game, and
+        # a preview of the rewritten text for the settings page.
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/tts/pronunciation/presets",
+            endpoint=self.get_pronunciation_presets,
+            response_model=list[PronunciationPreset],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/tts/pronunciation/presets/{preset_id}",
+            endpoint=self.get_pronunciation_preset,
+            response_model=list[PronunciationRule],
+            tags=tags,
+        )
+        # A language beyond the seven Wingman supports end to end.
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/spoken_language/others",
+            endpoint=self.get_other_languages,
+            response_model=list[OtherLanguageOption],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/spoken_language/resolve",
+            endpoint=self.resolve_other_language,
+            response_model=Optional[OtherLanguageSetting],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/spoken_language/other",
+            endpoint=self.set_other_language,
+            response_model=OtherLanguageReport,
             tags=tags,
         )
         # The microphone test in Settings: hold, speak, release, read the text.
@@ -266,6 +337,26 @@ class WingmanCore(WebSocketUser):
             methods=["POST"],
             path="/generate-image",
             endpoint=self.generate_image,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["GET"],
+            path="/avatar-variants",
+            endpoint=self.get_avatar_variants,
+            response_model=list[AvatarVariant],
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["POST"],
+            path="/avatar-variants",
+            endpoint=self.generate_avatar_variant,
+            response_model=AvatarVariant,
+            tags=tags,
+        )
+        self.router.add_api_route(
+            methods=["DELETE"],
+            path="/avatar-variants",
+            endpoint=self.delete_avatar_variant,
             tags=tags,
         )
         self.router.add_api_route(
@@ -763,6 +854,10 @@ class WingmanCore(WebSocketUser):
         self.settings_service.settings_events.subscribe(
             "hud_server_settings_changed", self._on_hud_server_settings_changed
         )
+        self.settings_service.settings_events.subscribe(
+            "sc_gamelog_settings_changed", self._apply_sc_gamelog_settings
+        )
+        ScGameLogService().status_callback = self._broadcast_sc_gamelog_status
 
         self.parakeet = Parakeet(
             settings=self.settings_service.settings.stt.parakeet,
@@ -778,7 +873,9 @@ class WingmanCore(WebSocketUser):
         self.xvasynth = XVASynth(settings=self.settings_service.settings.xvasynth)
         self.pocket_tts = PocketTTS(
             settings=self.settings_service.settings.pocket_tts,
+            spoken_language=self.settings_service.settings.spoken_language,
             defer_load=True,
+            app_root_path=app_root_path,
         )
         self.pocket_tts.on_model_reloaded = self._on_pocket_tts_reloaded
         self._main_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -867,6 +964,14 @@ class WingmanCore(WebSocketUser):
         # Capture the main loop so background workers can schedule coroutines.
         self._main_loop = asyncio.get_running_loop()
 
+        # Parakeet and Pocket TTS were built before the migration replaced the
+        # settings object, so they still hold the pre-migration values (a
+        # German user upgrading from 3.2.3 would get the English model).
+        settings = self.settings_service.settings
+        self.parakeet.settings = settings.stt.parakeet
+        self.pocket_tts.settings = settings.pocket_tts
+        self.pocket_tts.spoken_language = settings.spoken_language
+
         # 1. Detect hardware
         await self.set_core_state(
             CoreState.LOADING_CONFIG,
@@ -928,6 +1033,22 @@ class WingmanCore(WebSocketUser):
                 message="Starting HUD server...",
             )
         await self._start_hud_server_if_enabled()
+
+        # 7. Star Citizen log reader
+        await self._apply_sc_gamelog_settings(self.settings_service.settings.sc_gamelog)
+
+    async def _apply_sc_gamelog_settings(self, sc_gamelog: ScGameLogSettings):
+        await ScGameLogService().apply_settings(sc_gamelog.enabled, sc_gamelog.game_path)
+
+    async def _broadcast_sc_gamelog_status(self, status: ScGameLogStatus):
+        if self._connection_manager:
+            await self._connection_manager.broadcast(
+                ScGameLogStateChangedCommand(status=status)
+            )
+
+    # GET /sc-gamelog/status
+    async def get_sc_gamelog_status(self) -> ScGameLogStatus:
+        return ScGameLogService().status()
 
     def _get_validated_hud_settings(
         self, hud_settings, log_invalid: bool = True
@@ -1160,7 +1281,22 @@ class WingmanCore(WebSocketUser):
         return is_any_wingman_joystick_configured or is_cancel_tts_joystick_configured
 
     async def start_joysticks(self):
-        pygame.init()
+        # This runs on its own thread, and pygame.init() starts EVERY pygame
+        # module - including the mixer, which opens an output device while
+        # Core's own audio stack already holds one, and the video subsystem.
+        # Only display and joystick are needed here: the loop reads joystick
+        # events and never draws. pygame.event.get() refuses to work without a
+        # video driver, so display is initialized but left without a window.
+        #
+        # On macOS the video subsystem reaches into Cocoa and sets the
+        # application's main menu, which AppKit only allows on the main thread.
+        # Core died with 'API misuse: setting the main menu on a non-main
+        # thread' for every user who had a joystick button bound. The dummy
+        # driver has no Cocoa in it. Windows and Linux keep their driver.
+        if platform.system() == "Darwin":
+            os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+        pygame.display.init()
+        pygame.joystick.init()
         # Initialize ALL joysticks upfront so they generate events for both
         # normal operation and recording mode.
         joysticks = [
@@ -1414,7 +1550,10 @@ class WingmanCore(WebSocketUser):
             await self._connection_manager.broadcast(SkillRegisteredCommand(**rec))
 
         # Auto-disable legacy/incompatible skills that are still enabled in any wingman config.
-        await self.config_service.disable_ineligible_skills(skill_catalog.ineligible_skill_names())
+        await self.config_service.disable_ineligible_skills(
+            skill_catalog.ineligible_skill_names(),
+            skill_catalog.ineligible_folders(),
+        )
 
         self.tower = Tower(
             config=config,
@@ -1754,6 +1893,11 @@ class WingmanCore(WebSocketUser):
         target = wingman or self.tower.get_wingman_from_text(text)
         if not target:
             return
+        if wingman is None and not self._jev_addressed(text, target, during_playback):
+            # Voice activation only. A held key already says the utterance was
+            # meant for the wingman; there is nothing left to ask about, and
+            # asking would put a round trip in front of every push-to-talk turn.
+            return
         if playing:
             # Talking on means: skip the rest of the answer.
             self._run_on_main_loop(self.stop_playback())
@@ -1769,6 +1913,38 @@ class WingmanCore(WebSocketUser):
                 loop.close()
 
         threading.Thread(target=run, name="wingman-process").start()
+
+    def _jev_addressed(self, text: str, target, during_playback: bool) -> bool:
+        """Whether a voice-activated utterance was really meant for a wingman.
+
+        The word matcher that runs above has no answer for this. It sorts an
+        utterance into stop, echo, or answer it — and everything that is not
+        one of the first two gets answered, including two people talking in
+        the room and the speech model writing "Thank you for watching!" over
+        a second of fan noise. This is the one question it cannot ask.
+
+        True whenever Jev is off, failed, or unsure, so the behaviour without
+        a working gateway is exactly today's.
+        """
+        gate = getattr(target, "jev", None)
+        if not gate or not gate.active:
+            return True
+        values = gate.triage(
+            transcript=text,
+            wingman_names=[w.name for w in self.tower.wingmen] if self.tower else [],
+            during_playback=during_playback,
+            speaking_text=self.audio_player.speaking_text,
+        )
+        addressed = values.get("addressed")
+        if addressed is None or addressed >= NOT_ADDRESSED_BELOW:
+            return True
+        self.printr.print(
+            f"Dropped '{text}': not addressed to a wingman "
+            f"(Jev {addressed:.2f}).",
+            server_only=True,
+            color=LogType.INFO,
+        )
+        return False
 
     def _is_stop(self, words: list[str]) -> bool:
         """Whether the whole utterance is a stop command. The phrases are read
@@ -1891,6 +2067,124 @@ class WingmanCore(WebSocketUser):
         self.config_manager.save_settings_config()
         self.stt_service._preset_cache.pop(preset_id, None)
         return apply_override(bundled, overrides.get(preset_id))
+
+    # ───────────────── Pronunciation (Settings > TTS) ───────────────── #
+
+    # GET /tts/pronunciation/presets
+    async def get_pronunciation_presets(self) -> list[PronunciationPreset]:
+        # Counted as they apply to the spoken language: a term with a German
+        # and an English spelling is one term.
+        language = self.settings_service.settings.spoken_language
+        return [
+            PronunciationPreset(
+                id=pid,
+                name=name,
+                count=len(speech_text.preset_rules_for(self.app_root_path, pid, language)),
+            )
+            for pid, name, _count in speech_text.list_presets(self.app_root_path)
+        ]
+
+    # GET /tts/pronunciation/presets/{preset_id}
+    async def get_pronunciation_preset(self, preset_id: str) -> list[PronunciationRule]:
+        language = self.settings_service.settings.spoken_language
+        return [
+            PronunciationRule(written=r.written, spoken=r.spoken)
+            for r in speech_text.preset_rules_for(self.app_root_path, preset_id, language)
+        ]
+
+    # ───────────────── Other spoken languages ───────────────── #
+
+    # GET /spoken_language/others
+    async def get_other_languages(self) -> list[OtherLanguageOption]:
+        return other_language.options()
+
+    # POST /spoken_language/resolve
+    async def resolve_other_language(
+        self, text: str = Body(..., embed=True)
+    ) -> Optional[OtherLanguageSetting]:
+        """The language ``text`` names: from the list, else the support
+        model gives its name and code. None when it names no language."""
+
+        async def ask(system_prompt: str, user: str) -> Optional[str]:
+            if not self.local_ai_service or not self.local_ai_service.is_ready():
+                return None
+            from services.skill_local_ai import SamplingPreset
+
+            result = await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.local_ai_service.support(
+                    user, system_prompt=system_prompt, preset=SamplingPreset.PRECISE, max_output_tokens=80
+                ),
+            )
+            return result.text if result else None
+
+        return await other_language.resolve(text, ask)
+
+    # POST /spoken_language/other
+    async def set_other_language(self, language: OtherLanguageSetting) -> OtherLanguageReport:
+        """Speak ``language``: set it, and move the Wingmen that speak through
+        Pocket TTS to Inworld when it has voices for it. Returns what works
+        and what was changed."""
+        settings = self.settings_service.settings.model_copy(deep=True)
+        stt = self.settings_service.settings.stt
+        stt_provider = stt.provider.value if stt.provider.value != "parakeet" else (
+            "parakeet" if stt.parakeet.run_locally else "parakeet_remote"
+        )
+        if language.code in {l.value for l in SpokenLanguage if l != SpokenLanguage.OTHER}:
+            # "Deutsch" typed as another language: it is one Wingman speaks
+            # end to end, with Pocket TTS and no switch to Inworld. Saving
+            # restores switched Wingmen and gives the defaults their voice.
+            settings.spoken_language = SpokenLanguage(language.code)
+            settings.other_language = None
+            await self.settings_service.save_settings(settings)
+            return other_language.report(language, stt_provider, True, None, [])
+        was_other = settings.spoken_language == SpokenLanguage.OTHER
+        settings.spoken_language = SpokenLanguage.OTHER
+        settings.other_language = language
+        if was_other:
+            # Another language than before: its voices are not the right ones.
+            other_language.restore_wingmen(self.config_manager)
+        await self.settings_service.save_settings(settings)
+
+        voices, provider = await self._inworld_voices_for(language.code)
+        switched = []
+        if voices and provider:
+            defaults = self.config_manager.load_defaults_config(silent_on_error=True)
+            default_tts = defaults.features.tts_provider.value if defaults else "pocket_tts"
+            switched = other_language.switch_wingmen(
+                self.config_manager, default_tts, language, provider, voices
+            )
+            if switched and self.config_service.tower:
+                await self.config_service.load_config()
+        return other_language.report(
+            language, stt_provider, bool(voices), provider if switched else None, switched
+        )
+
+    async def _inworld_voices_for(self, code: Optional[str]):
+        """Inworld voices for ``code`` and the provider to reach them through:
+        the subscription when signed in, else the user's own Inworld key."""
+        if not code:
+            return [], None
+        try:
+            if self.is_client_logged_in:
+                from providers.wingman_subscription import WingmanSubscription
+
+                subscription = WingmanSubscription(
+                    wingman_name="system", settings=self.settings_service.settings.wingman_pro
+                )
+                voices = await asyncio.get_running_loop().run_in_executor(
+                    None, subscription.get_available_inworld_voices
+                )
+                return other_language.inworld_speaks(voices, code), "wingman_pro"
+            key = SecretKeeper().secrets.get("inworld")
+            if key:
+                from providers.inworld import Inworld
+
+                voices = await Inworld(api_key=key, wingman_name="").get_available_voices()
+                return other_language.inworld_speaks(voices, code), "inworld"
+        except Exception as e:
+            self.printr.print(f"Could not list Inworld voices: {e}", server_only=True)
+        return [], None
 
     # ───────────────── Microphone test (Settings) ───────────────── #
 
@@ -2023,8 +2317,7 @@ class WingmanCore(WebSocketUser):
 
     # GET /audio-devices
     def get_audio_devices(self):
-        audio_devices = sd.query_devices()
-        return audio_devices
+        return with_full_names(list(sd.query_devices()), list(sd.query_hostapis()))
 
     # GET /startup-errors
     def get_startup_errors(self):
@@ -2076,6 +2369,31 @@ class WingmanCore(WebSocketUser):
                 return await wingman.generate_image(text=text)
 
         return None
+
+    # GET /avatar-variants
+    async def get_avatar_variants(self, wingman_name: str) -> list[AvatarVariant]:
+        return avatar_studio.list_variants(wingman_name)
+
+    # POST /avatar-variants
+    async def generate_avatar_variant(
+        self, request: AvatarGenerationRequest
+    ) -> AvatarVariant:
+        wingman = (
+            self.tower.get_wingman_by_name(request.wingman_name) if self.tower else None
+        )
+        if not isinstance(wingman, OpenAiWingman):
+            raise HTTPException(
+                status_code=404,
+                detail="This wingman is not loaded. Enable it and try again.",
+            )
+        try:
+            return await avatar_studio.generate_variant(wingman, request)
+        except avatar_studio.AvatarStudioError as e:
+            raise HTTPException(status_code=502, detail=str(e))
+
+    # DELETE /avatar-variants
+    async def delete_avatar_variant(self, wingman_name: str, file_name: str):
+        avatar_studio.delete_variant(wingman_name, file_name)
 
     # POST /send-text-to-wingman
     async def send_text_to_wingman(
@@ -2264,11 +2582,16 @@ class WingmanCore(WebSocketUser):
         if not voice_ids:
             return {}
 
+        def preload_and_warm_up() -> dict[str, bool]:
+            results = self.pocket_tts.preload_voice_states(voice_ids)
+            # Inside the loading phase, so the first answer is not the one
+            # that pays for the model's first run.
+            ready = next((v for v, ok in results.items() if ok), None)
+            self.pocket_tts.warm_up(self.pocket_tts.warm_up_voice(ready))
+            return results
+
         loop = asyncio.get_running_loop()
-        preload_task = loop.run_in_executor(
-            None,
-            lambda: self.pocket_tts.preload_voice_states(voice_ids),
-        )
+        preload_task = loop.run_in_executor(None, preload_and_warm_up)
         try:
             await self.set_core_state(
                 CoreState.LOADING_CONFIG,
@@ -2296,13 +2619,7 @@ class WingmanCore(WebSocketUser):
                     server_only=True,
                 )
                 return
-        future = asyncio.run_coroutine_threadsafe(
-            self._preload_pocket_tts_voices(
-                state_message_prefix="Preloading voices",
-                restore_ready_state=True,
-            ),
-            loop,
-        )
+        future = asyncio.run_coroutine_threadsafe(self._after_pocket_tts_reload(), loop)
 
         def _log_preload_failure(fut):
             exc = fut.exception()
@@ -2314,6 +2631,81 @@ class WingmanCore(WebSocketUser):
                 )
 
         future.add_done_callback(_log_preload_failure)
+
+    async def _after_pocket_tts_reload(self) -> None:
+        """Get the voices ready for the model that was just loaded, under the
+        loading indicator, so a voice the user picks later speaks at once.
+
+        The voices the Wingmen use come first. Then the clones the model
+        still lacks, with their progress in the indicator: every custom voice
+        when the load replaced another model (a new spoken language or
+        quality) or Wingman brought new recordings; on any other load only
+        clones that exist but are outdated, after a Wingman update brought a
+        pocket-tts that computes them differently. Each clone is made once
+        per model: 49 shipped voices took 26 s on an M2 Pro (2026-09-24).
+        """
+        # Recordings Wingman ships for the spoken language (see
+        # providers/pocket_tts_voices.py): new ones are cloned right away, and
+        # so are those an earlier start copied but was closed before cloning.
+        installed = (
+            self.pocket_tts.install_bundled_voices()
+            or self.pocket_tts.bundled_voices_needing_clone()
+        )
+        only_stale = not (self.pocket_tts.last_load_switched_model or installed)
+        await self._preload_pocket_tts_voices(
+            state_message_prefix="Preloading voices",
+            restore_ready_state=False,
+        )
+        try:
+            # Every newly loaded model gets its warm-up generation, also when
+            # no Wingman uses a Pocket TTS voice to preload (then the one
+            # above did none): the first answer after a language switch
+            # should start as fast as every later one.
+            if self.pocket_tts.model and self.pocket_tts.settings.run_locally:
+                await self.set_core_state(CoreState.LOADING_CONFIG, message="Warming up voice")
+                await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: self.pocket_tts.warm_up(self.pocket_tts.warm_up_voice())
+                )
+            await self._precompute_with_indicator(only_stale)
+        finally:
+            await self.set_core_state(CoreState.READY)
+
+    async def _precompute_with_indicator(self, only_stale: bool) -> None:
+        """Clone what the active model lacks, showing "Preparing voices
+        (12/49)" and the progress in the loading indicator."""
+        pocket = self.pocket_tts
+        if not pocket.settings.enable or not pocket.settings.run_locally or not pocket.model:
+            return
+        if pocket._precompute_running:
+            return
+        total = len(
+            pocket.list_custom_voices_needing_precompute(
+                only_stale=only_stale, spoken_language_only=True
+            )
+        )
+        if not total:
+            return
+        loop = asyncio.get_running_loop()
+
+        def progress(current: int, total: int, _voice: str) -> None:
+            asyncio.run_coroutine_threadsafe(
+                self.set_core_state(
+                    CoreState.LOADING_CONFIG,
+                    message=f"Preparing voices ({current}/{total})",
+                    progress=(current - 1) / total,
+                ),
+                loop,
+            )
+
+        await self.set_core_state(
+            CoreState.LOADING_CONFIG, message=f"Preparing voices (0/{total})", progress=0.0
+        )
+        await loop.run_in_executor(
+            None,
+            lambda: pocket.precompute_custom_voices(
+                progress_cb=progress, only_stale=only_stale, spoken_language_only=True
+            ),
+        )
 
     # POST /pocket_tts/preload_voice
     async def preload_pocket_tts_voice(self, voice: str) -> PocketTTSPreloadResult:
@@ -2341,9 +2733,12 @@ class WingmanCore(WebSocketUser):
     # POST /pocket_tts/precompute_voices
     async def precompute_pocket_tts_voices(self) -> dict:
         """Kick off a background precompute pass over all custom voices
-        missing a ``.<active_model>.safetensors`` cache. Returns immediately;
-        progress is surfaced via ``GET /pocket_tts/status``.
+        missing a current ``.<active_model>.safetensors`` cache. Returns
+        immediately; progress is surfaced via ``GET /pocket_tts/status``.
         """
+        return await self._start_precompute(only_stale=False)
+
+    async def _start_precompute(self, only_stale: bool) -> dict:
         if not self.pocket_tts.settings.enable or not self.pocket_tts.settings.run_locally:
             return {"started": False, "reason": "pocket_tts unavailable", "total": 0}
         if not self.pocket_tts.model:
@@ -2355,7 +2750,9 @@ class WingmanCore(WebSocketUser):
                 "total": self.pocket_tts._precompute_total,
             }
 
-        targets = self.pocket_tts.list_custom_voices_needing_precompute()
+        targets = self.pocket_tts.list_custom_voices_needing_precompute(
+            only_stale=only_stale
+        )
         if not targets:
             return {"started": False, "reason": "nothing to do", "total": 0}
 
@@ -2363,7 +2760,9 @@ class WingmanCore(WebSocketUser):
         # Fire-and-forget: run on the default executor so the HTTP call returns
         # immediately. The method manages its own _precompute_* state for the
         # status poller.
-        loop.run_in_executor(None, self.pocket_tts.precompute_custom_voices)
+        loop.run_in_executor(
+            None, lambda: self.pocket_tts.precompute_custom_voices(only_stale=only_stale)
+        )
         return {"started": True, "total": len(targets)}
 
     # POST /pocket_tts/start
@@ -2862,19 +3261,24 @@ class WingmanCore(WebSocketUser):
         )
         try:
             elevenlabs = ElevenLabs(api_key=elevenlabs_api_key, wingman_name="")
-            models = elevenlabs.get_available_models()
 
-            convert = lambda model: ElevenlabsModel(
-                name=model.name,
-                model_id=model.modelID,
-                description=model.description,
-                max_characters=model.maxCharacters,
-                cost_factor=model.costFactor,
-                supported_languages=model.supportedLanguages,
-                metadata=model.metadata,
-            )
-            result = [convert(model) for model in models]
-            return result
+            # maxCharacters asks ElevenLabs for the subscription tier, and the
+            # lookups wait for each other, so all of it runs off the event loop.
+            def load_models():
+                return [
+                    ElevenlabsModel(
+                        name=model.name,
+                        model_id=model.modelID,
+                        description=model.description,
+                        max_characters=model.maxCharacters,
+                        cost_factor=model.costFactor,
+                        supported_languages=model.supportedLanguages,
+                        metadata=model.metadata,
+                    )
+                    for model in elevenlabs.get_available_models()
+                ]
+
+            return await asyncio.to_thread(load_models)
         except Exception as e:
             self.printr.toast_error(f"Elevenlabs: \n{str(e)}")
             return []
@@ -3127,6 +3531,10 @@ class WingmanCore(WebSocketUser):
         "greeting-returning": {
             "production_preset": "Creative",
             "example_message": "Generate your greeting.",
+        },
+        "filler-response": {
+            "production_preset": "Balanced",
+            "example_message": 'User request: "Hola Em, ¿puedes comprobarme si ha cambiado el precio del hierro?"',
         },
         # enhance-backstory: uses the conversation LLM, not the support model — not listed here
         "radio-chatter": {
@@ -3919,6 +4327,7 @@ class WingmanCore(WebSocketUser):
 
         # Stop HUD Server
         await self._stop_hud_server()
+        await ScGameLogService().stop()
 
         if self.settings_service.settings.xvasynth.enable:
             self.stop_xvasynth()

@@ -5,6 +5,7 @@ into a single class that delegates to extracted services and provider
 interfaces for STT, TTS, and LLM.
 """
 
+import json
 import time
 import asyncio
 import traceback
@@ -24,12 +25,14 @@ from api.interface import (
     SettingsConfig,
     SkillConfig,
     SoundConfig,
+    TokenUsage,
     WingmanConfig,
     WingmanInitializationError,
 )
 from api.enums import (
     CommandTag,
     ConversationProvider,
+    ImageAspect,
     ImageGenerationProvider,
     LogSource,
     LogType,
@@ -42,9 +45,18 @@ from services.audio_player import AudioPlayer
 from services.benchmark import Benchmark
 from services.markdown import cleanup_text
 from services.secret_keeper import SecretKeeper
+from services import speech_text
 from services.printr import Printr
 from services.audio_library import AudioLibrary
+from services.context_budget import (
+    SUBSCRIPTION_MAX_REQUEST_CHARS,
+    ContextBudget,
+    ContextOverflowError,
+    learn_window,
+    model_window,
+)
 from services.conversation_manager import ConversationManager
+from services.token_utils import count_tokens
 from services.conversation_condenser import ConversationCondenser
 from services.context_builder import ContextBuilder
 from services.command_executor import CommandExecutor
@@ -57,13 +69,15 @@ from services.capability_registry import CapabilityRegistry
 from services.wingman_mcp_manager import WingmanMcpManager
 from services.wingman_skill_manager import WingmanSkillManager, _get_skill_folder_from_module
 from services.turn_metrics import TurnMetrics
-from services.instant_response_generator import InstantResponseGenerator
+from services.filler_response import FillerLine, FillerResponder
+from services.jev_gate import JevGate
 from skills.skill_base import Skill
 
 if TYPE_CHECKING:
     from services.tower import Tower
 
 printr = Printr()
+
 
 
 class Wingman:
@@ -124,7 +138,9 @@ class Wingman:
         self.conversation = ConversationManager(config, settings, name)
         self.condenser = ConversationCondenser(self.conversation, config, name)
         self.context_builder = ContextBuilder(config, settings, name)
-        self.tool_executor = ToolExecutor(config, settings, name)
+        self.tool_executor = ToolExecutor(
+            config, settings, name, budget_fn=lambda: self.context_budget
+        )
         self.command_executor = CommandExecutor(
             config=config,
             audio_library=audio_library,
@@ -181,16 +197,23 @@ class Wingman:
 
         # --- Image generation (lazy) ---
         self._image_subscription = None
+        self._learned_window: int | None = None
+        """The main model's window as learned from an overflow; None until then.
+        Reset when the config changes, since the model may have changed."""
 
-        # --- Instant response generator ---
-        self.instant_response_generator = InstantResponseGenerator(
-            wingman_name=name,
-            llm_call_fn=self.actual_llm_call,
-            get_context_fn=self.get_context,
+        # --- Filler line while a turn with tools runs (settings.filler_responses) ---
+        self.filler = FillerResponder(
+            settings=self.settings,
+            get_local_ai=lambda: self.local_ai_service,
+            speak=self._speak_filler,
         )
+        self._turn_filler: FillerLine | None = None
 
         # --- Conversation state ---
         self.last_gpt_call = None
+
+        # --- System One decisions (settings.system_one.enabled) ---
+        self.jev = JevGate(wingman_name=name, settings=settings)
 
     # ──────────────────────────────── Backward-compat properties ──────────────── #
 
@@ -302,22 +325,6 @@ class Wingman:
         return errors
 
     # ──────────────────────────────── Lifecycle ─────────────────────────────────── #
-
-    async def prepare(self):
-        try:
-            if self.config.features.use_generic_instant_responses:
-                printr.print(
-                    "Generating AI instant responses...",
-                    color=LogType.WARNING,
-                    server_only=True,
-                )
-                self.threaded_execution(self.instant_response_generator.generate)
-        except Exception as e:
-            await printr.print_async(
-                f"Error while preparing wingman '{self.name}': {str(e)}",
-                color=LogType.ERROR,
-            )
-            printr.print(traceback.format_exc(), color=LogType.ERROR, server_only=True)
 
     async def unload(self):
         # Wait for any background memory extraction tasks to finish
@@ -485,22 +492,27 @@ class Wingman:
                 )
 
                 benchmark_llm = Benchmark(label="Command/AI Processing")
-                process_result, instant_response, skill, interrupt = (
-                    await self._get_response_for_transcript(
-                        transcript=transcript, benchmark=benchmark_llm, images=images
+                try:
+                    process_result, instant_response, skill, interrupt = (
+                        await self._get_response_for_transcript(
+                            transcript=transcript, benchmark=benchmark_llm, images=images
+                        )
                     )
+                finally:
+                    # The answer is ready: a filler line that is not out yet
+                    # is dropped; one that was spoken must not be cut off.
+                    if self._stop_turn_filler():
+                        interrupt = False
+                # Every path out of the turn passes here, including the ones
+                # that end early on a command. Skills add their own decisions
+                # to the same list on the way, so this is the whole layer.
+                self.metrics.add_system_one_snapshot(
+                    benchmark_llm, self.jev.take_decisions()
                 )
 
                 actual_response = instant_response or process_result
 
                 if actual_response:
-                    token_usage = None
-                    if self.metrics.last_turn_prompt_tokens or self.metrics.last_turn_completion_tokens:
-                        token_usage = (
-                            self.metrics.last_turn_prompt_tokens,
-                            self.metrics.last_turn_completion_tokens,
-                        )
-                        self.metrics.reset_token_counters()
                     await printr.print_async(
                         f"{actual_response}",
                         color=LogType.POSITIVE,
@@ -508,7 +520,7 @@ class Wingman:
                         source_name=self.name,
                         skill_name=skill.name if skill else "",
                         benchmark_result=benchmark_llm.finish(),
-                        token_usage=token_usage,
+                        token_usage=self.metrics.take_turn_usage(),
                     )
 
             if process_result:
@@ -530,6 +542,7 @@ class Wingman:
         self, transcript: str, benchmark: Benchmark, images: list[tuple[str, str]] = None
     ) -> tuple[str | None, str | None, Skill | None, bool]:
         self.ensure_memory_initialized()
+        self.metrics.start_turn_usage()
 
         await self.add_user_message(transcript, images=images)
 
@@ -544,6 +557,22 @@ class Wingman:
                 instant_response = None
             return instant_response, instant_response, None, True
         benchmark.finish_snapshot()
+
+        # The same shape as instant activation above, one step less exact: the
+        # phrase list matches words, this matches meaning. A command with a
+        # written response ends the turn here without a main-model call at all;
+        # one without still needs the model for something to say, but no longer
+        # needs it to pick the command.
+        #
+        # No snapshot around this: the gate times every decision it takes,
+        # including the ones skills make later in the turn, and they are added
+        # together at the end.
+        if self.jev.active and not instant_command_executed:
+            jev_executed, jev_response = await self._ask_jev_about_the_turn(transcript)
+            if jev_response:
+                await self.conversation.add_assistant_message(jev_response)
+                return jev_response, jev_response, None, True
+            instant_command_executed = instant_command_executed or jev_executed
 
         llm_processing_time_ms = 0.0
         tool_execution_time_ms = 0.0
@@ -563,8 +592,9 @@ class Wingman:
             completion, instant_command_executed is False
         )
 
-        turn_prompt_tokens = usage[0]
-        turn_completion_tokens = usage[1]
+        self.metrics.add_call_usage(usage)
+        turn_prompt_tokens = usage.input_tokens
+        turn_completion_tokens = usage.output_tokens
 
         is_waiting_response_needed, is_summarize_needed = await self.conversation.add_gpt_response(
             response_message, tool_calls
@@ -572,29 +602,27 @@ class Wingman:
         interrupt = True
 
         while tool_calls:
-            if is_waiting_response_needed:
-                message = None
-                if response_message.content:
-                    message = response_message.content
-                else:
-                    filler = self.instant_response_generator.get_random_filler()
-                    if filler:
-                        message = filler
-                        is_summarize_needed = True
-                if message:
-                    self.threaded_execution(self.play_to_user, message, not interrupt)
-                    await printr.print_async(
-                        f"{message}",
-                        color=LogType.POSITIVE,
-                        source=LogSource.WINGMAN,
-                        source_name=self.name,
-                        skill_name="",
-                    )
+            if is_waiting_response_needed and response_message.content:
+                if self._stop_turn_filler():
                     interrupt = False
-                else:
-                    is_summarize_needed = True
+                message = response_message.content
+                self.threaded_execution(self.play_to_user, message, not interrupt)
+                await printr.print_async(
+                    f"{message}",
+                    color=LogType.POSITIVE,
+                    source=LogSource.WINGMAN,
+                    source_name=self.name,
+                    skill_name="",
+                )
+                interrupt = False
             else:
                 is_summarize_needed = True
+
+            # Nothing said yet in this turn: fill the wait until the answer is
+            # ready. It runs across rounds — activating a capability, the tool,
+            # the model writing the answer — and is stopped by the caller.
+            if interrupt and self._turn_filler is None:
+                self._turn_filler = await self._start_filler(transcript, tool_calls)
 
             tool_start = time.perf_counter()
             instant_response, skill, iteration_timings = await self._handle_tool_calls(
@@ -604,7 +632,6 @@ class Wingman:
             tool_timings.extend(iteration_timings)
 
             if instant_response:
-                await self.conversation.trim_tool_responses(is_condensing=self.condenser.is_condensing)
                 self.metrics.add_benchmark_snapshot(
                     benchmark, "LLM Processing", llm_processing_time_ms
                 )
@@ -623,7 +650,6 @@ class Wingman:
                 llm_processing_time_ms += (time.perf_counter() - llm_start) * 1000
 
                 if completion is None:
-                    await self.conversation.trim_tool_responses(is_condensing=self.condenser.is_condensing)
                     self.metrics.add_benchmark_snapshot(
                         benchmark, "LLM Processing", llm_processing_time_ms
                     )
@@ -639,8 +665,9 @@ class Wingman:
                 response_message, tool_calls, usage = await self._process_completion(
                     completion
                 )
-                turn_prompt_tokens = usage[0]
-                turn_completion_tokens += usage[1]
+                self.metrics.add_call_usage(usage)
+                turn_prompt_tokens = usage.input_tokens
+                turn_completion_tokens += usage.output_tokens
 
                 is_waiting_response_needed, is_summarize_needed = (
                     await self.conversation.add_gpt_response(response_message, tool_calls)
@@ -648,7 +675,6 @@ class Wingman:
                 if tool_calls:
                     interrupt = False
             elif is_waiting_response_needed:
-                await self.conversation.trim_tool_responses(is_condensing=self.condenser.is_condensing)
                 self.metrics.add_benchmark_snapshot(
                     benchmark, "LLM Processing", llm_processing_time_ms
                 )
@@ -661,7 +687,6 @@ class Wingman:
                 )
                 return None, None, None, interrupt
 
-        await self.conversation.trim_tool_responses(is_condensing=self.condenser.is_condensing)
 
         self.metrics.add_benchmark_snapshot(
             benchmark, "LLM Processing", llm_processing_time_ms
@@ -687,6 +712,8 @@ class Wingman:
 
         try:
             completion = await self.llm.ask(messages=messages, tools=tools)
+        except ContextOverflowError:
+            raise  # _llm_call learns the window and retries
         except APIConnectionError as e:
             provider = self.config.features.conversation_provider.value
             cause = e.__cause__
@@ -726,8 +753,36 @@ class Wingman:
 
         messages = self.conversation.messages.copy()
         await self.add_context(messages)
+        messages = await self._fit_request(messages, tools)
 
-        completion = await self.actual_llm_call(messages, tools)
+        try:
+            completion = await self.actual_llm_call(messages, tools)
+        except ContextOverflowError as error:
+            # The provider says the window is smaller than we assumed. Learn it
+            # from the request that did not fit, shorten, and try once more.
+            request_tokens = self._request_tokens(messages, tools)
+            self._learned_window = learn_window(request_tokens)
+            await printr.print_async(
+                f"The model refused a request of ~{request_tokens:,} tokens as too long "
+                f"({error}). Wingman now assumes a window of "
+                f"~{self._learned_window:,} tokens for it and retries.",
+                color=LogType.WARNING,
+                source=LogSource.WINGMAN,
+                source_name=self.name,
+            )
+            messages = self.conversation.messages.copy()
+            await self.add_context(messages)
+            messages = await self._fit_request(messages, tools)
+            try:
+                completion = await self.actual_llm_call(messages, tools)
+            except ContextOverflowError as again:
+                await printr.print_async(
+                    f"The model refused the shortened request too: {again}",
+                    color=LogType.ERROR,
+                    source=LogSource.WINGMAN,
+                    source_name=self.name,
+                )
+                return None
 
         if self.last_gpt_call != thiscall:
             await printr.print_async(
@@ -736,6 +791,74 @@ class Wingman:
             return None
 
         return completion
+
+    @property
+    def context_budget(self) -> ContextBudget:
+        """What this wingman may send, from its main model's window. See
+        services/context_budget.py."""
+        return ContextBudget(
+            model_window(
+                self.config,
+                reported=getattr(self.llm, "context_window", None),
+                learned=self._learned_window,
+            )
+        )
+
+    @staticmethod
+    def _request_tokens(messages: list, tools: list | None) -> int:
+        text = sum(
+            count_tokens(ConversationManager.message_text(m)) for m in messages
+        )
+        return text + (count_tokens(json.dumps(tools)) if tools else 0)
+
+    async def _fit_request(self, messages: list, tools: list | None) -> list:
+        """The brake: drop the oldest whole turns while a request is over what
+        the model can take.
+
+        The model's window is the limit (``ContextBudget.brake``), and on the
+        subscription also the backend's 400 KB, past which it refuses the
+        conversation. Below both nothing happens. With condensation on the
+        history limit keeps requests far below this; with it off this is the
+        only thing that shortens the history.
+        """
+        budget = self.context_budget
+        excess_tokens = self._request_tokens(messages, tools) - budget.brake
+        excess_chars = 0
+        if (
+            self.config.features.conversation_provider
+            == ConversationProvider.WINGMAN_PRO
+        ):
+            size = sum(ConversationManager.message_chars(m) for m in messages)
+            excess_chars = size - SUBSCRIPTION_MAX_REQUEST_CHARS
+        if excess_tokens <= 0 and excess_chars <= 0:
+            return messages
+
+        removed = 0
+        if excess_tokens > 0:
+            removed += self.conversation.drop_oldest_turns(
+                excess_tokens,
+                size_of=lambda m: count_tokens(ConversationManager.message_text(m)),
+            )
+        if excess_chars > 0:
+            removed += self.conversation.drop_oldest_turns(excess_chars)
+        if not removed:
+            return messages
+
+        limit = (
+            "the size limit of the Wingman subscription"
+            if excess_chars > 0
+            else f"what the model can take (~{budget.brake:,} tokens)"
+        )
+        await printr.print_async(
+            f"The conversation reached {limit}. The {removed} oldest messages "
+            f"were removed from the history.",
+            color=LogType.WARNING,
+            source=LogSource.WINGMAN,
+            source_name=self.name,
+        )
+        messages = self.conversation.messages.copy()
+        await self.add_context(messages)
+        return messages
 
     async def _process_completion(
         self, completion: ChatCompletion, allow_tool_calls: bool = True
@@ -754,16 +877,19 @@ class Wingman:
                 response_message.tool_calls, self.command_executor.get_command
             )
 
-        prompt_tokens = 0
-        completion_tokens = 0
+        usage = TokenUsage(input_tokens=0, cached_tokens=0, output_tokens=0)
         if completion.usage:
-            prompt_tokens = completion.usage.prompt_tokens or 0
-            completion_tokens = completion.usage.completion_tokens or 0
+            details = getattr(completion.usage, "prompt_tokens_details", None)
+            usage = TokenUsage(
+                input_tokens=completion.usage.prompt_tokens or 0,
+                cached_tokens=(details.cached_tokens or 0) if details else 0,
+                output_tokens=completion.usage.completion_tokens or 0,
+            )
 
         return (
             response_message,
             response_message.tool_calls,
-            (prompt_tokens, completion_tokens),
+            usage,
         )
 
     # ───────────────── Tool calls ───────────────── #
@@ -780,11 +906,96 @@ class Wingman:
             get_command_fn=self.command_executor.get_command,
             execute_command_fn=self.command_executor.execute_command,
             play_to_user_fn=self.play_to_user,
-            local_ai_service=self.local_ai_service,
             update_tool_response_fn=self.conversation.update_tool_response,
             add_tool_response_fn=self.conversation.add_tool_response,
             pending_tool_calls=self.conversation.pending_tool_calls,
         )
+
+    async def _start_filler(self, transcript: str, tool_calls) -> FillerLine | None:
+        """Start the filler line for the rest of this turn, if it applies.
+
+        Immediate when a tool's skill asks for a waiting response; otherwise
+        only once the turn has gone on for ``FILLER_DELAY_S``.
+        """
+        names = []
+        immediate = False
+        for tc in tool_calls:
+            name = tc.function.name if tc.function else None
+            if not name:
+                continue
+            if name.startswith("activate_"):
+                # "activate mcp server" tells the model nothing; what is being
+                # activated does ("wingman_starhead").
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except (TypeError, ValueError):
+                    args = {}
+                name = (
+                    args.get("capability_name") or args.get("server_name")
+                    or args.get("skill_name") or name
+                )
+            names.append(name)
+            skill = self.tool_skills.get(tc.function.name)
+            if skill and await skill.is_waiting_response_needed(tc.function.name):
+                immediate = True
+        if not names:
+            return None
+        return self.filler.start(
+            request=transcript,
+            tool_names=names,
+            immediate=immediate,
+            name=self.name,
+            backstory=self.config.prompts.backstory or "",
+        )
+
+    def _stop_turn_filler(self) -> bool:
+        """Stop this turn's filler line. True if it was spoken."""
+        line, self._turn_filler = self._turn_filler, None
+        return self.filler.stop(line)
+
+    def _speak_filler(self, line: str) -> None:
+        """Runs on the filler's thread: speech gets its own thread, the message
+        is handed to the main loop by ``printr.print``."""
+        self.threaded_execution(self.play_to_user, line, False)
+        printr.print(
+            line,
+            color=LogType.FILLER,
+            source=LogSource.WINGMAN,
+            source_name=self.name,
+            wingman_name=self.name,
+        )
+
+    async def _ask_jev_about_the_turn(self, transcript: str) -> tuple[bool, str | None]:
+        """Ask which command the request means, and run it if the answer holds."""
+        name = await self.jev.pick_command(
+            transcript, self.command_executor.eligible_commands()
+        )
+        if not name:
+            return False, None
+        return await self._run_jev_command(name)
+
+    async def _run_jev_command(self, name: str) -> tuple[bool, str | None]:
+        """Run the command the System One model picked.
+
+        Returns ``(executed, spoken_response)``. ``executed`` without a
+        response means the keypress happened but the command has no written
+        response, so the main model is still asked for something to say —
+        with tools switched off, exactly as after an instant activation.
+
+        The executed command is written into the history as the assistant's
+        own tool call, the same way instant activation does it. Without that,
+        the model's next turn has no idea the landing gear is down.
+        """
+        command = self.command_executor.get_command(name)
+        if not command:
+            # A command that vanished between the question and the answer.
+            return False, None
+
+        instant_response, _function_response = await self.command_executor.execute_command(
+            command, is_instant=True
+        )
+        await self.conversation.add_forced_assistant_command_calls([command])
+        return True, instant_response or None
 
     async def execute_command_by_function_call(
         self, function_name: str, function_args: dict[str, Any]
@@ -824,7 +1035,9 @@ class Wingman:
             content,
             images=images,
             condense_fn=lambda: self.condenser.maybe_condense(
-                self.local_ai_service, self.metrics.last_turn_prompt_tokens
+                self.local_ai_service,
+                self.metrics.last_turn_prompt_tokens,
+                self.context_budget,
             ),
         )
 
@@ -928,9 +1141,6 @@ class Wingman:
             sound_config = self.config.sound
 
         text, contains_links, contains_code_blocks = cleanup_text(text)
-        # The listen controller compares short interruptions against this so
-        # the wingman saying "stop" does not stop itself.
-        self.audio_player.speaking_text = text
 
         if no_interrupt and self.audio_player.is_playing:
             while self.audio_player.is_playing:
@@ -946,6 +1156,23 @@ class Wingman:
                         LogType.INFO,
                     )
                     text = changed_text
+
+        # Written the way it is spoken: "Cptn." -> "Captain", "10 km" ->
+        # "zehn Kilometer", the user's own rules. Only what the voice reads;
+        # the chat already shows the answer as the Wingman wrote it.
+        pronunciation = self.settings.pronunciation
+        text = speech_text.prepare_for_speech(
+            text,
+            self.settings.spoken_language,
+            pronunciation.rules,
+            pronunciation.presets,
+            reads_numbers=self.config.features.tts_provider
+            in speech_text.VOICES_THAT_READ_NUMBERS,
+        )
+        # The listen controller compares short interruptions against this so
+        # the wingman saying "stop" does not stop itself - so it is what the
+        # speakers say, not what the chat shows.
+        self.audio_player.speaking_text = text
 
         if sound_config.volume == 0.0:
             printr.print(
@@ -986,7 +1213,14 @@ class Wingman:
 
     # ───────────────── Image generation ───────────────── #
 
-    async def generate_image(self, text: str) -> str:
+    async def generate_image(
+        self,
+        text: str,
+        aspect: ImageAspect = ImageAspect.SQUARE,
+        reference_images: Optional[list[str]] = None,
+    ) -> str:
+        """Returns the image as data URL or URL, "" on failure.
+        `reference_images` are data URLs, already shrunk for the backend."""
         if (
             self.config.features.image_generation_provider
             != ImageGenerationProvider.WINGMAN_PRO
@@ -999,7 +1233,9 @@ class Wingman:
                 self._image_subscription = WingmanSubscription(
                     wingman_name=self.name, settings=self.settings.wingman_pro
                 )
-            return await self._image_subscription.generate_image(text)
+            return await self._image_subscription.generate_image(
+                text, aspect=aspect.value, images=reference_images
+            )
         except Exception as e:
             await printr.print_async(
                 f"Error during image generation: {str(e)}", color=LogType.ERROR
@@ -1079,6 +1315,7 @@ class Wingman:
 
             self.config = config
             self._propagate_config(config)
+            self._learned_window = None
 
             await self._update_skill_configs(config)
             await self.skill_manager.apply_disabled_tools(config)
@@ -1164,6 +1401,7 @@ class Wingman:
             self.tool_executor._settings = settings
             self.mcp_manager.settings = settings
             self.skill_manager.settings = settings
+            self.jev.update_settings(settings)
 
             for skill in self.skills:
                 skill.settings = settings

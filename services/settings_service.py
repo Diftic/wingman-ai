@@ -3,7 +3,7 @@ from os import path
 from typing import Awaitable, Callable, Optional
 from fastapi import APIRouter
 import sounddevice as sd
-from api.enums import LogType, SttProvider, ToastType
+from api.enums import LogType, SpokenLanguage, SttProvider, ToastType
 from api.interface import (
     AudioSettings,
     AudioDeviceSettings,
@@ -14,20 +14,11 @@ from providers.xvasynth import XVASynth
 from providers.pocket_tts import PocketTTS
 from services.config_manager import ConfigManager
 from services.local_ai_service import LocalAiService
+from services import other_language
 from services.config_service import ConfigService
+from services.wingman_default_voices import apply_default_voices
 from services.printr import Printr
 from services.pub_sub import PubSub
-
-
-SPOKEN_TO_POCKET_TTS = {
-    "en": "english_2026-04",
-    "de": "german",
-    # French has no 6-layer model in pocket-tts v2 — 24l is the only variant.
-    "fr": "french_24l",
-    "es": "spanish",
-    "it": "italian",
-    "pt": "portuguese",
-}
 
 
 class SettingsService:
@@ -203,8 +194,7 @@ class SettingsService:
         if new_stt.provider == SttProvider.PARAKEET:
             old_pk, new_pk = old_stt.parakeet, new_stt.parakeet
             reload_needed = reload_needed or (
-                old_pk.model_variant != new_pk.model_variant
-                or old_pk.execution_provider != new_pk.execution_provider
+                old_pk.execution_provider != new_pk.execution_provider
                 or old_pk.run_locally != new_pk.run_locally
             )
         if reload_needed and self.stt_provider_manager:
@@ -251,39 +241,46 @@ class SettingsService:
                 "PocketTTS is not initialized. Please run SettingsService.initialize()",
             )
             return
-        self.pocket_tts.update_settings(settings=settings.pocket_tts)
+        # The spoken language picks the Pocket TTS model, so a new language
+        # reloads it like a new quality does.
+        self.config_manager.settings_config.spoken_language = settings.spoken_language
+        self.config_manager.settings_config.other_language = settings.other_language
+        self.pocket_tts.update_settings(
+            settings=settings.pocket_tts, spoken_language=settings.spoken_language
+        )
         self.config_manager.settings_config.pocket_tts = settings.pocket_tts
-
-        # Spoken language cascade
-        old_spoken = old.spoken_language
-        new_spoken = settings.spoken_language
-        if new_spoken != old_spoken:
-            self.config_manager.settings_config.spoken_language = new_spoken
-
-            # Cascade to PocketTTS model language
-            pocket_lang = SPOKEN_TO_POCKET_TTS.get(new_spoken, "english_2026-04")
-            if settings.pocket_tts.model != pocket_lang:
-                settings.pocket_tts.model = pocket_lang
-                self.config_manager.settings_config.pocket_tts.model = pocket_lang
-                self.pocket_tts.update_settings(settings=settings.pocket_tts)
-
-            # Cascade to the STT language
-            stt_lang = None if new_spoken == "multilingual" else new_spoken
-            settings.stt.parakeet.language = stt_lang
-
+        if settings.spoken_language != old.spoken_language:
             self.printr.print(
-                f"Spoken language changed to '{new_spoken}'. "
-                f"PocketTTS: {pocket_lang}, STT: {stt_lang or 'auto-detect'}",
+                f"Spoken language: {settings.spoken_language.value}. "
+                f"Pocket TTS model: {self.pocket_tts.model_id}.",
                 server_only=True,
                 color=LogType.INFO,
             )
-        else:
-            self.config_manager.settings_config.spoken_language = new_spoken
+            # Back from another language: the Wingmen it moved to Inworld
+            # speak through Pocket TTS again (services/other_language.py).
+            restored = []
+            if (
+                old.spoken_language == SpokenLanguage.OTHER
+                and settings.spoken_language != SpokenLanguage.OTHER
+            ):
+                restored = other_language.restore_wingmen(self.config_manager)
+            # Shipped Wingmen still on a default voice follow the language.
+            changed = apply_default_voices(
+                self.config_manager,
+                self.config_manager.app_root_path,
+                settings.spoken_language.value,
+            )
+            if (changed or restored) and self.config_service.tower:
+                await self.config_service.load_config()
 
         # Local AI (llama.cpp)
         if self.local_ai_service:
             await self.local_ai_service.update_settings_async(settings.llama_cpp)
             self.config_manager.settings_config.llama_cpp = settings.llama_cpp
+
+        # System One. Nothing to react to: the gates read the flag on every
+        # call, so the next utterance follows it without a restart.
+        self.config_manager.settings_config.system_one = settings.system_one
 
         # voice activation
         self.config_manager.settings_config.voice_activation = settings.voice_activation
@@ -317,6 +314,9 @@ class SettingsService:
             self.local_ai_service.update_subscription(settings.wingman_pro)
         self.config_manager.settings_config.debug_mode = settings.debug_mode
         self.config_manager.settings_config.streamer_mode = settings.streamer_mode
+        self.config_manager.settings_config.show_token_count = settings.show_token_count
+        self.config_manager.settings_config.filler_responses = settings.filler_responses
+        self.config_manager.settings_config.pronunciation = settings.pronunciation
 
         # cancel TTS ("shut up") bindings
         self.config_manager.settings_config.cancel_tts_key = settings.cancel_tts_key
@@ -332,6 +332,13 @@ class SettingsService:
         if settings.hud_server != old.hud_server:
             await self.settings_events.publish(
                 "hud_server_settings_changed", settings.hud_server
+            )
+
+        # Star Citizen log reader
+        self.config_manager.settings_config.sc_gamelog = settings.sc_gamelog
+        if settings.sc_gamelog != old.sc_gamelog:
+            await self.settings_events.publish(
+                "sc_gamelog_settings_changed", settings.sc_gamelog
             )
 
         # save the config file

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from wingmen.facade import (
         SkillAi, SkillAudio, SkillCommands, SkillTools, SkillTts, SkillStt,
         SkillLocalAiView, SkillMemory, SkillConversation, SkillSecrets, SkillSkills,
-        SkillSettings,
+        SkillSettings, SkillSystemOne, SkillScGameLog, SkillUi, SkillHud, SpokenLanguageInfo,
     )
     from wingmen.wingman import Wingman
 
@@ -63,6 +63,10 @@ class WingmanContext:
         self.__tools = None
         self.__conversation = None
         self.__memory = None
+        self.__system_one = None
+        self.__sc_gamelog = None
+        self.__ui = None
+        self.__hud = None
         self.__secrets = None
         self.__skills = None
         self.__settings = None
@@ -103,6 +107,23 @@ class WingmanContext:
         default Wingman AI avatar if the user hasn't set a custom one. None if
         unavailable (e.g. in tests)."""
         return self.__wingman.get_avatar_path()
+
+    @property
+    def language(self) -> "SpokenLanguageInfo":
+        """The language the user speaks, read fresh from the settings each time
+        so a change in the client applies without reloading the skill."""
+        from api.enums import SpokenLanguage
+        from services.spoken_language import language_name
+        from wingmen.facade import SpokenLanguageInfo
+
+        settings = self.__wingman.settings
+        other = settings.other_language
+        is_other = settings.spoken_language == SpokenLanguage.OTHER
+        return SpokenLanguageInfo(
+            code=(other.code if other else None) if is_other else settings.spoken_language.value,
+            name=language_name(settings.spoken_language, other),
+            is_other=is_other,
+        )
 
     @property
     def settings(self) -> "SkillSettings":
@@ -179,6 +200,39 @@ class WingmanContext:
             from services.skill_local_ai import SkillLocalAI
             self.__memory = SkillMemory(SkillLocalAI(self.__wingman))
         return self.__memory
+
+    @property
+    def system_one(self) -> "SkillSystemOne":
+        if self.__system_one is None:
+            from wingmen.facade import SkillSystemOne
+            # The wingman's own gate, so a skill obeys the same switch, the same
+            # subscription and the same off-means-old-path rule as Core does.
+            self.__system_one = SkillSystemOne(self.__wingman.jev)
+        return self.__system_one
+
+    @property
+    def ui(self) -> "SkillUi":
+        """Show something in the client, e.g. a dialog."""
+        if self.__ui is None:
+            from wingmen.facade import SkillUi
+            self.__ui = SkillUi(self.__wingman)
+        return self.__ui
+
+    @property
+    def hud(self) -> "SkillHud":
+        """The HUD overlay; every call checks that the user has it on."""
+        if self.__hud is None:
+            from wingmen.facade import SkillHud
+            self.__hud = SkillHud(self.__wingman)
+        return self.__hud
+
+    @property
+    def sc_gamelog(self) -> "SkillScGameLog":
+        """Star Citizen's Game.log, read live by Core: state, events, subscriptions."""
+        if self.__sc_gamelog is None:
+            from wingmen.facade import SkillScGameLog
+            self.__sc_gamelog = SkillScGameLog()
+        return self.__sc_gamelog
 
     @property
     def secrets(self) -> "SkillSecrets":

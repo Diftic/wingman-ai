@@ -35,6 +35,17 @@ _VERDICT_TO_OUTCOME = {
 }
 
 
+# Custom skills whose job Core took over. They would run next to Core and do
+# everything twice, so they never load, whatever version is installed. Where a
+# bundled skill has the same folder, the bundled one wins
+# (ModuleManager.read_available_skill_configs).
+REPLACED_BY_CORE = {
+    "sc_log_reader": "replaced by Core's Star Citizen log reader",
+    "sc_log_reader_2": "replaced by Core's Star Citizen log reader",
+    "sc_accountant": "replaced by the bundled Star Citizen Accountant",
+}
+
+
 def _id_hash(folder: str) -> str:
     return hashlib.sha256(folder.encode("utf-8")).hexdigest()[:12]
 
@@ -88,6 +99,10 @@ class SkillCatalog:
         origin = "custom" if is_custom else "bundled"
         h = _id_hash(folder)
 
+        if is_custom and folder in REPLACED_BY_CORE:
+            return SkillCatalogEntry(folder, None, None, origin, None,
+                                     SkillVerdict.INVALID, REPLACED_BY_CORE[folder], h)
+
         raw = ModuleManager.read_config(config_path)
         if not raw:
             return SkillCatalogEntry(folder, None, None, origin, None,
@@ -137,6 +152,12 @@ class SkillCatalog:
         them from Wingman configs. Excludes entries with no name."""
         return {e.name for e in self._entries if e.verdict != SkillVerdict.OK and e.name}
 
+    def ineligible_folders(self) -> set[str]:
+        """Skill FOLDER names that are NOT eligible. Needed next to
+        ineligible_skill_names() because `discoverable_skills` stores skill names
+        while a Wingman's `skills` entries are addressed by module/folder."""
+        return {e.folder for e in self._entries if e.verdict != SkillVerdict.OK}
+
     def is_eligible(self, folder: str) -> bool:
         return folder in self.eligible_folders()
 
@@ -163,6 +184,18 @@ class SkillCatalog:
         }
         self._runtime_outcomes[h] = record
         return record
+
+    def current_records(self) -> list[dict]:
+        """Scan verdicts with this boot's runtime failures folded in.
+
+        The same records WingmanCore broadcasts, but as a snapshot a client can
+        ask for. The broadcast only happens once, while the tower initializes -
+        a client that reloads after that has no way to learn why a skill is off.
+        """
+        by_hash = {rec["id_hash"]: rec for rec in self.telemetry_records()}
+        for rec in self._runtime_outcomes.values():
+            by_hash[rec["id_hash"]] = rec
+        return list(by_hash.values())
 
     def telemetry_records(self) -> list[dict]:
         """Scan verdicts (one per skill) as telemetry records."""

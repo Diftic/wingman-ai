@@ -48,15 +48,15 @@ class MemorySearchResult:
 class SamplingPreset(Enum):
     """Named sampling presets for the Qwen3.5 local AI model.
 
-    Based on Qwen3.5-2B HuggingFace recommended sampling parameters.
+    Based on the Qwen3.5 HuggingFace recommended sampling parameters.
     Use these when calling ``generate()`` or ``generate_sync()`` to get
     sensible values without tuning them yourself.
     Manual arguments take precedence over any preset.
 
     Attributes (temperature, top_p, top_k, presence_penalty):
         PRECISE:   (0.1, 0.95, 20, 0.5) — Extraction, structured data, JSON. Near
-                   deterministic: at temp 0.6 the 2B drops/duplicates facts ~33%
-                   of the time; at 0.1 it is ~98% reliable (measured in the
+                   deterministic: at temp 0.6 the old 2B dropped/duplicated facts
+                   ~33% of the time; at 0.1 it was ~98% reliable (measured in the
                    internal eval suite). Use for any parse/transform.
         BALANCED:  (1.0, 0.95, 20, 1.5) — Summaries, condensation, paraphrasing.
         CREATIVE:  (1.0, 1.0, 20, 2.0) — Greetings, flavor text, roleplay, dialogue.
@@ -147,6 +147,7 @@ class SkillLocalAI:
             f"[SkillLocalAI] {method}() failed: {error}",
             color=LogType.ERROR,
             source_name=self._wingman.name,
+            wingman_name=self._wingman.name,
             source=LogSource.WINGMAN,
         )
 
@@ -155,6 +156,7 @@ class SkillLocalAI:
             f"[SkillLocalAI] {method}() failed: {error}",
             color=LogType.ERROR,
             source_name=self._wingman.name,
+            wingman_name=self._wingman.name,
             source=LogSource.WINGMAN,
         )
 
@@ -378,6 +380,12 @@ class SkillLocalAI:
 
             # Too large for sync — truncate and mark as truncated
             truncated_text = truncate_to_tokens(text, budget.max_input_tokens)
+            printr.print(
+                f"A skill's summarize() input was cut from ~{text_tokens:,} to "
+                f"~{budget.max_input_tokens:,} tokens to fit the support model.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
             result = self.generate_sync(
                 truncated_text, system_prompt=instruction,
                 preset=preset, temperature=temperature, top_p=top_p,

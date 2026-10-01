@@ -1,3 +1,4 @@
+import asyncio
 from typing import TYPE_CHECKING, Optional
 import openai
 import requests
@@ -23,10 +24,12 @@ from providers.interfaces import (
 from services.audio_player import AudioPlayer
 from services.openai_utils import get_minimal_reasoning_by_model
 from services.printr import Printr
+from services.context_budget import ContextOverflowError, is_context_overflow
 from services.secret_keeper import SecretKeeper
+from services.spoken_language import inworld_language
 
 if TYPE_CHECKING:
-    from api.interface import WingmanConfig
+    from api.interface import SettingsConfig, WingmanConfig
 
 
 class WingmanSubscription:
@@ -68,7 +71,9 @@ class WingmanSubscription:
         )
 
     def send_quota_error(self, response: requests.Response):
-        """The monthly allowance is used up.
+        """The allowance of the account's current window is used up. Each
+        account's window starts on its own day of the month, so the date comes
+        from the backend.
 
         The backend's own sentence is preferred: it knows the plan, and what a
         free account should hear ("a subscription lifts the limit") is not what a
@@ -85,9 +90,9 @@ class WingmanSubscription:
 
         if not message:
             message = (
-                f"Your Wingman allowance for this month is used up. It resets on {resets_at}."
+                f"Your Wingman allowance is used up. It resets on {resets_at}."
                 if resets_at
-                else "Your Wingman allowance for this month is used up."
+                else "Your Wingman allowance is used up."
             )
 
         self.printr.print(text=message, color=LogType.ERROR)
@@ -168,6 +173,16 @@ class WingmanSubscription:
         elif response.status_code >= 500:
             self.send_server_error(response)
             return None
+        elif response.status_code == 400:
+            # "The conversation is too large": over the backend's 400 KB. The
+            # wingman shortens and retries once instead of failing every turn.
+            try:
+                message = (response.json().get("message") or "").strip()
+            except Exception:
+                message = ""
+            if "too large" in message.lower() or is_context_overflow(message):
+                raise ContextOverflowError(message)
+            response.raise_for_status()
         else:
             response.raise_for_status()
 
@@ -182,6 +197,7 @@ class WingmanSubscription:
         sound_config: SoundConfig,
         audio_player: AudioPlayer,
         wingman_name: str,
+        language: Optional[str] = None,
     ):
         data = {
             "provider": "inworld",
@@ -191,6 +207,8 @@ class WingmanSubscription:
             "model_id": config.model_id,
             "temperature": config.temperature,
         }
+        if language:
+            data["language"] = language
         if config.audio_config is not None:
             data["audio_config"] = config.audio_config.model_dump()
 
@@ -282,11 +300,22 @@ class WingmanSubscription:
     async def generate_image(
         self,
         text: str,
+        aspect: str = "square",
+        images: Optional[list[str]] = None,
     ):
+        """`images` are reference pictures as small JPEG data URLs (see
+        services/image_generation.reference_data_url). With them the backend
+        edits instead of generating from scratch."""
         data = {
             "prompt": text,
+            "aspect": aspect,
         }
-        response = requests.post(
+        if images:
+            data["images"] = images
+        # An image takes 7 to 15 seconds. In a thread, so Core keeps talking to
+        # the client and listening meanwhile.
+        response = await asyncio.to_thread(
+            requests.post,
             url=f"{self.settings.base_url}/api/v1/images/generations",
             headers=self._get_headers(),
             json=data,
@@ -386,9 +415,15 @@ class WingmanSubscription:
 
 @tts_provider(TtsProvider.WINGMAN_PRO)
 class WingmanSubscriptionTts(TtsInterface):
-    def __init__(self, ws_instance: "WingmanSubscription", config: "WingmanConfig"):
+    def __init__(
+        self,
+        ws_instance: "WingmanSubscription",
+        config: "WingmanConfig",
+        settings: "SettingsConfig",
+    ):
         self._ws = ws_instance
         self._config = config
+        self._settings = settings
 
     async def play_audio(self, text, sound_config, audio_player, wingman_name):
         # One provider, so nothing to dispatch on. `wingman_pro.tts_provider`
@@ -400,6 +435,9 @@ class WingmanSubscriptionTts(TtsInterface):
             sound_config=sound_config,
             audio_player=audio_player,
             wingman_name=wingman_name,
+            language=inworld_language(
+                self._settings.spoken_language, self._settings.other_language
+            ),
         )
 
 @llm_provider(ConversationProvider.WINGMAN_PRO)

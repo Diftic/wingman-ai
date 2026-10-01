@@ -9,7 +9,13 @@ from api.enums import (
     RecordingDevice,
     ToastType,
 )
-from api.interface import AudioFile, CommandActionConfig, BenchmarkResult
+from api.interface import (
+    AudioFile,
+    BenchmarkResult,
+    CommandActionConfig,
+    ScGameLogStatus,
+    TokenUsage,
+)
 
 
 # We use this Marker base class for reflection to "iterate all commands"
@@ -55,6 +61,8 @@ class ClientLoggedInCommand(WebSocketCommandModel):
     command: Literal["client_logged_in"] = "client_logged_in"
     plan: str
     account_name: str
+    user_id: Optional[str] = None
+    """Supabase user ID, for error reports. Older clients do not send it."""
 
 
 class ClientLoggedOutCommand(WebSocketCommandModel):
@@ -75,6 +83,9 @@ class LogCommand(WebSocketCommandModel):
     skill_name: Optional[str] = None
     additional_data: Optional[dict] = None
     benchmark_result: Optional[BenchmarkResult] = None
+    token_usage: Optional[TokenUsage] = None
+    """What the turn behind this message used. None on every message that did
+    not come out of a model call."""
 
 
 class PromptSecretCommand(WebSocketCommandModel):
@@ -133,6 +144,26 @@ class McpOAuthStateChangedCommand(WebSocketCommandModel):
     """Why it failed, when it did."""
 
 
+class SkillDialogCommand(WebSocketCommandModel):
+    """A skill asks the client to show a dialog (`self.wingman.ui.show_dialog`)."""
+
+    command: Literal["skill_dialog"] = "skill_dialog"
+    wingman_name: str
+    title: str
+    text: str
+    """Markdown. The client sanitizes it and opens links in the browser."""
+    image: Optional[str] = None
+    """A data URL, shown under the text."""
+
+
+class ScGameLogStateChangedCommand(WebSocketCommandModel):
+    """Sent when the Star Citizen log reader starts, stops, finds a Game.log
+    or gets new rules, and when the rules cannot be updated."""
+
+    command: Literal["sc_gamelog_state_changed"] = "sc_gamelog_state_changed"
+    status: ScGameLogStatus
+
+
 class AudioLibraryPlaybackFinishedCommand(WebSocketCommandModel):
     command: Literal["audio_library_playback_finished"] = (
         "audio_library_playback_finished"
@@ -153,7 +184,7 @@ class CoreStateChangedCommand(WebSocketCommandModel):
     state: CoreState
     """The current state of Wingman AI Core."""
     message: Optional[str] = None
-    """Human-readable sub-step detail (e.g. 'Downloading Qwen3.5-2B...')."""
+    """Human-readable sub-step detail (e.g. 'Downloading Qwen3.5-4B...')."""
     progress: Optional[float] = None
     """0.0–1.0 progress for operations with known duration (e.g. downloads)."""
 

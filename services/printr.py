@@ -8,7 +8,8 @@ from logging.handlers import RotatingFileHandler
 from os import path
 from api.commands import LogCommand, ToastCommand
 from api.enums import CommandTag, LogSource, LogType, ToastType
-from api.interface import BenchmarkResult
+from api.interface import BenchmarkResult, TokenUsage
+from services import error_reporting
 from services.file import get_writable_dir
 from services.websocket_user import WebSocketUser
 
@@ -123,6 +124,8 @@ class Printr(WebSocketUser):
         skill_name: str = "",
         additional_data: dict = None,
         benchmark_result: BenchmarkResult = None,
+        token_usage: TokenUsage = None,
+        wingman_name: str = None,
     ):
         if self._connection_manager is None:
             raise ValueError("connection_manager has not been set.")
@@ -132,8 +135,10 @@ class Printr(WebSocketUser):
                 command=ToastCommand(text=text, toast_type=toast_type)
             )
         else:
-            wingman_name = None
-            current_frame = inspect.currentframe()
+            # Found on the call stack unless the caller says. A message sent
+            # from a worker thread is run on the main loop, where no Wingman
+            # is on the stack, and the client drops it from the Wingman's view.
+            current_frame = inspect.currentframe() if wingman_name is None else None
             if current_frame is not None:
                 while current_frame:
                     # Check if the caller is a method of a class
@@ -160,6 +165,7 @@ class Printr(WebSocketUser):
                     additional_data=additional_data,
                     wingman_name=wingman_name,
                     benchmark_result=benchmark_result,
+                    token_usage=token_usage,
                 )
             )
 
@@ -173,11 +179,13 @@ class Printr(WebSocketUser):
         server_only=False,
         command_tag: CommandTag = None,
         additional_data: dict = None,
+        wingman_name: str = None,
     ):
         # print to server (terminal) with source_name prefix
         self.print_colored(
             text, color=self.get_terminal_color(color), source_name=source_name
         )
+        self._report(text, color, toast, source_name)
 
         if not server_only and self._connection_manager is not None:
             # send to GUI without print() having to be async
@@ -190,6 +198,7 @@ class Printr(WebSocketUser):
                     source_name=source_name,
                     command_tag=command_tag,
                     additional_data=additional_data,
+                    wingman_name=wingman_name,
                 )
             )
 
@@ -205,7 +214,8 @@ class Printr(WebSocketUser):
         skill_name: str = "",
         additional_data: dict = None,
         benchmark_result: BenchmarkResult = None,
-        token_usage: tuple[int, int] = None,
+        token_usage: TokenUsage = None,
+        wingman_name: str = None,
     ):
         # Build the server (terminal) display string
         server_text = text
@@ -213,7 +223,10 @@ class Printr(WebSocketUser):
         if benchmark_result:
             suffix_parts.append(benchmark_result.formatted_execution_time)
         if token_usage:
-            suffix_parts.append(f"{token_usage[0]} in / {token_usage[1]} out")
+            suffix_parts.append(
+                f"{token_usage.input_tokens} in ({token_usage.cached_tokens} cached)"
+                f" / {token_usage.output_tokens} out"
+            )
         if suffix_parts:
             server_text = f"{text} ({' | '.join(suffix_parts)})"
         # print to server (terminal) with source_name prefix
@@ -222,6 +235,7 @@ class Printr(WebSocketUser):
             color=self.get_terminal_color(color),
             source_name=source_name,
         )
+        self._report(text, color, toast, source_name)
         if benchmark_result and benchmark_result.snapshots:
             for snapshot in benchmark_result.snapshots:
                 self.print_colored(
@@ -241,6 +255,8 @@ class Printr(WebSocketUser):
                 skill_name=skill_name,
                 additional_data=additional_data,
                 benchmark_result=benchmark_result,
+                token_usage=token_usage,
+                wingman_name=wingman_name,
             )
 
     def toast(self, text: str):
@@ -256,6 +272,13 @@ class Printr(WebSocketUser):
         self.print(text, toast=ToastType.ERROR, color=LogType.ERROR)
 
     # INTERNAL METHODS
+
+    def _report(self, text, color: LogType, toast: ToastType, source_name: str):
+        """Hands the line to error reporting, which does nothing until Sentry runs."""
+        log_type = getattr(color, "value", str(color))
+        error_reporting.add_breadcrumb(text, log_type, source_name)
+        if log_type == LogType.ERROR.value or toast == ToastType.ERROR:
+            error_reporting.capture_logged_error(text, source_name)
 
     def get_terminal_color(self, tag: LogType):
         # System/Runtime messages

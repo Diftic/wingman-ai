@@ -1,7 +1,7 @@
 """Per-turn benchmark snapshot building and token-usage broadcasting."""
 
 from api.enums import ConversationProvider
-from api.interface import BenchmarkResult, WingmanConfig
+from api.interface import BenchmarkResult, TokenUsage, WingmanConfig
 from services.benchmark import Benchmark, format_ms
 from services.printr import Printr
 from services.token_utils import count_tokens
@@ -23,6 +23,7 @@ class TurnMetrics:
         self.conversation = conversation
         self.last_turn_prompt_tokens: int = 0
         self.last_turn_completion_tokens: int = 0
+        self._turn_usage: TokenUsage | None = None
 
     # ──────────────────────────── public API ─────────────────────────── #
 
@@ -34,6 +35,34 @@ class TurnMetrics:
                 label=label,
                 execution_time_ms=execution_time_ms,
                 formatted_execution_time=format_ms(execution_time_ms),
+            )
+        )
+
+    def add_system_one_snapshot(
+        self, benchmark: Benchmark, decisions: list[tuple[str, float]]
+    ) -> None:
+        """What the decision layer cost this turn, and on what.
+
+        One line in the tooltip with the individual decisions under it, the
+        same shape tool execution uses. Nothing is added when the layer is
+        off, so a user who never switched it on does not get an empty row
+        asking what it is.
+        """
+        if not decisions:
+            return
+        benchmark.snapshots.append(
+            BenchmarkResult(
+                label="System 1 decision making",
+                execution_time_ms=sum(ms for _label, ms in decisions),
+                formatted_execution_time=format_ms(sum(ms for _label, ms in decisions)),
+                snapshots=[
+                    BenchmarkResult(
+                        label=label,
+                        execution_time_ms=ms,
+                        formatted_execution_time=format_ms(ms),
+                    )
+                    for label, ms in decisions
+                ],
             )
         )
 
@@ -105,6 +134,28 @@ class TurnMetrics:
             )
         )
 
-    def reset_token_counters(self) -> None:
-        self.last_turn_prompt_tokens = 0
-        self.last_turn_completion_tokens = 0
+    def start_turn_usage(self) -> None:
+        """Forget what an earlier turn used, including one that ended early."""
+        self._turn_usage = None
+
+    def add_call_usage(self, usage: TokenUsage) -> None:
+        """Add one model request to the turn.
+
+        ``last_turn_prompt_tokens`` stays what the *last* request sent: that is
+        the size of the context, which the status bar and the condenser need.
+        What the turn used is every request added up, because each one sends
+        the whole conversation again.
+        """
+        if not (usage.input_tokens or usage.output_tokens):
+            return
+        if self._turn_usage is None:
+            self._turn_usage = usage.model_copy()
+            return
+        self._turn_usage.input_tokens += usage.input_tokens
+        self._turn_usage.cached_tokens += usage.cached_tokens
+        self._turn_usage.output_tokens += usage.output_tokens
+
+    def take_turn_usage(self) -> TokenUsage | None:
+        """What the turn used, once: the next message must not repeat it."""
+        usage, self._turn_usage = self._turn_usage, None
+        return usage

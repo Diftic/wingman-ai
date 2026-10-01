@@ -7,18 +7,19 @@ This spec file bundles:
 - NVIDIA CUDA libraries for GPU-accelerated speech recognition (Parakeet via onnxruntime-gpu)
 - All required data files and dependencies
 
-NVIDIA CUDA Libraries:
-- nvidia-cublas-cu12: cuBLAS for matrix operations
-- nvidia-cudnn-cu12: cuDNN for deep learning primitives
-- nvidia-cuda-runtime-cu12: CUDA runtime
-- nvidia-cuda-nvrtc-cu12: NVRTC for runtime compilation
+NVIDIA CUDA 13 Libraries (nvidia/cu13/ and nvidia/cudnn/):
+- nvidia-cublas: cuBLAS for matrix operations
+- nvidia-cudnn-cu13: cuDNN for deep learning primitives
+- nvidia-cuda-runtime: CUDA runtime
+- nvidia-cuda-nvrtc: NVRTC for runtime compilation
+- nvidia-cufft, nvidia-curand (Linux): linked by onnxruntime-gpu's CUDA provider
 
 These libraries enable GPU acceleration without requiring users to install CUDA separately.
 """
 
 import os
 import sys
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, collect_all
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules, collect_all, copy_metadata
 
 # Determine the venv site-packages path based on the platform
 if sys.platform == 'win32':
@@ -47,6 +48,8 @@ datas = [
     ('templates/configs', 'templates/configs'),
     # Vocabulary presets for the speech correction, one text file per game.
     ('templates/vocabulary', 'templates/vocabulary'),
+    ('templates/pronunciation', 'templates/pronunciation'),
+    ('templates/pocket_tts', 'templates/pocket_tts'),
     ('audio_samples', 'audio_samples'),
     # Silero VAD, runs on the onnxruntime that Parakeet already needs.
     ('audio_models', 'audio_models'),
@@ -76,21 +79,38 @@ if os.path.exists('lib/python3.dll'):
 binaries = []
 
 # Collect NVIDIA CUDA DLLs for GPU support (Windows/Linux only — macOS uses Metal)
-if sys.platform != 'darwin':
-    nvidia_packages = [
-        'nvidia.cublas',
-        'nvidia.cuda_runtime',
-        'nvidia.cudnn',
-        'nvidia.nvrtc',
-        'nvidia.cuda_nvrtc',
-    ]
+#
+# The CUDA 13 wheels are namespace packages without __init__.py, which
+# collect_dynamic_libs does not handle, so walk the folders. Each library keeps
+# its path below site-packages (nvidia/cu13/bin/x86_64/cublas64_13.dll,
+# nvidia/cu13/lib/libcublas.so.13, nvidia/cudnn/...): onnxruntime's
+# preload_dlls() looks for them there, relative to its own package.
+def collect_nvidia_libraries(*folders):
+    import nvidia
 
-    for pkg in nvidia_packages:
-        try:
-            binaries += collect_dynamic_libs(pkg)
-            print(f"Collected DLLs from {pkg}")
-        except Exception as e:
-            print(f"Warning: Could not collect {pkg} DLLs: {e}")
+    found = []
+    for base in nvidia.__path__:
+        site_packages = os.path.dirname(base)
+        for folder in folders:
+            for dirpath, _, files in os.walk(os.path.join(base, folder)):
+                for name in files:
+                    if name.endswith('.dll') or '.so' in name:
+                        found.append(
+                            (os.path.join(dirpath, name), os.path.relpath(dirpath, site_packages))
+                        )
+    return found
+
+
+if sys.platform != 'darwin':
+    nvidia_binaries = collect_nvidia_libraries('cu13', 'cudnn')
+    cublas = 'cublas64_13.dll' if sys.platform == 'win32' else 'libcublas.so.13'
+    if not any(os.path.basename(src) == cublas for src, _ in nvidia_binaries):
+        raise SystemExit(
+            f"{cublas} not found under site-packages/nvidia/cu13 — refusing to ship a "
+            "build whose Parakeet cannot use CUDA."
+        )
+    binaries += nvidia_binaries
+    print(f"Collected {len(nvidia_binaries)} NVIDIA libraries")
 
 # ============================================================================
 # HIDDEN IMPORTS
@@ -180,10 +200,6 @@ hiddenimports = [
 
     # NVIDIA packages (ensure they're included even if DLL collection fails)
     'nvidia',
-    'nvidia.cublas',
-    'nvidia.cuda_runtime',
-    'nvidia.cudnn',
-    'nvidia.cuda_nvrtc',
 
 	# for pocket-tts
 	'engineio.async_drivers.threading',
@@ -213,21 +229,11 @@ except Exception as e:
 
 # Collect all pocket-tts
 ptts_datas, ptts_binaries, ptts_hidden = collect_all('pocket_tts')
+# Its dist-info, so importlib.metadata can tell the UI which version runs.
+ptts_datas += copy_metadata('pocket-tts')
 datas += ptts_datas
 binaries += ptts_binaries
 hiddenimports += ptts_hidden
-
-# Collect all torchao — required by pocket-tts for int8 quantization.
-# Without it, pocket-tts falls back to torch.ao.quantize_dynamic, which
-# wraps nn.Linear such that .weight is a bound method instead of a tensor
-# and breaks voice cloning (AttributeError on .device in init_state).
-try:
-    torchao_datas, torchao_binaries, torchao_hidden = collect_all('torchao')
-    datas += torchao_datas
-    binaries += torchao_binaries
-    hiddenimports += torchao_hidden
-except Exception as e:
-    print(f"Warning: Could not collect torchao: {e}")
 
 # Collect tiktoken encoding data (e.g. cl100k_base BPE ranks)
 tiktoken_datas, tiktoken_binaries, tiktoken_hidden = collect_all('tiktoken')
@@ -305,6 +311,20 @@ if missing_migration_modules:
         f"{', '.join(missing_migration_modules)} — refusing to ship a build "
         "that cannot migrate user configs."
     )
+
+# Linux: leave the audio stack to the system. Our libasound.so.2 comes from the
+# Ubuntu build machine and looks for its plugins in Ubuntu's directory, so on
+# Fedora, Arch and others it never finds the PipeWire/Pulse plugin and offers
+# only raw hw: devices; USB headsets were missing. PortAudio and JACK link
+# against it. sounddevice finds PortAudio through ldconfig, which never saw our
+# copy anyway: without a system PortAudio Core did not start at all. The
+# vendored copies inside pygame.libs etc. carry a hash in their name and stay.
+if sys.platform.startswith('linux'):
+    SYSTEM_AUDIO_LIBS = ('libasound.so', 'libportaudio.so', 'libjack.so')
+    a.binaries = [
+        entry for entry in a.binaries
+        if not os.path.basename(entry[0]).startswith(SYSTEM_AUDIO_LIBS)
+    ]
 
 # ============================================================================
 # PACKAGING

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 from api.enums import (
     ConversationProvider,
     ImageGenerationProvider,
+    LogType,
     TtsProvider,
     WingmanInitializationErrorType,
 )
@@ -134,7 +135,9 @@ class ProviderFactory:
             from providers.inworld import Inworld, InworldTts
 
             inworld = Inworld(api_key=api_key, wingman_name=self._wingman_name)
-            return InworldTts(inworld_instance=inworld, config=self._config)
+            return InworldTts(
+                inworld_instance=inworld, config=self._config, settings=self._settings
+            )
         elif tts_enum == TtsProvider.OPENAI:
             api_key = await self._retrieve_secret("openai", errors)
             if not api_key:
@@ -176,7 +179,9 @@ class ProviderFactory:
                 wingman_name=self._wingman_name,
                 settings=self._settings.wingman_pro,
             )
-            return WingmanSubscriptionTts(ws_instance=ws, config=self._config)
+            return WingmanSubscriptionTts(
+                ws_instance=ws, config=self._config, settings=self._settings
+            )
         return None
 
     async def create_llm(
@@ -235,11 +240,12 @@ class ProviderFactory:
             openrouter = OpenAi(
                 api_key=api_key, base_url=self._config.openrouter.endpoint
             )
-            supports_tools = await self._check_openrouter_tool_support(api_key)
+            supports_tools, context_window = await self._check_openrouter_endpoints(api_key)
             return OpenRouterLlm(
                 openai_instance=openrouter,
                 config=self._config,
                 supports_tools=supports_tools,
+                context_window=context_window,
             )
         elif llm_enum == ConversationProvider.LOCAL_LLM:
             from providers.open_ai import OpenAi, LocalLlm
@@ -282,31 +288,60 @@ class ProviderFactory:
             return XAiLlm(xai_instance=xai, config=self._config)
         return None
 
-    async def _check_openrouter_tool_support(self, api_key: str) -> bool:
-        """Check if the configured OpenRouter model supports tools.
+    async def _check_openrouter_endpoints(self, api_key: str) -> tuple[bool, int | None]:
+        """Whether any OpenRouter endpoint of the configured model takes tools,
+        and the smallest context window among those that can serve the request.
 
-        Replicates the logic from OpenAiWingman.validate_and_set_openrouter().
+        The window sizes what the wingman sends (services/context_budget.py).
+        OpenRouter may route to any of the endpoints, so the smallest one is the
+        one that has to fit.
+
+        OpenRouter routes a request with tools to an endpoint that supports
+        them, so one is enough. A model without any gets its tools stripped,
+        because OpenRouter would reject the whole request. When the check
+        itself fails, tools are sent: a network hiccup at startup must not
+        leave the wingman without its skills for the whole session.
         """
+        import asyncio
+        import requests
+
+        model = self._config.openrouter.conversation_model
+        if not model:
+            return False, None
+
+        def _fetch():
+            return requests.get(
+                f"https://openrouter.ai/api/v1/models/{model}/endpoints",
+                headers={"Authorization": f"Bearer {api_key}"},
+                timeout=10,
+            )
+
         try:
-            import asyncio
-            import requests
-
-            model = self._config.openrouter.conversation_model
-
-            def _fetch():
-                return requests.get(
-                    f"https://openrouter.ai/api/v1/models/{model}",
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    timeout=10,
-                )
-
             response = await asyncio.to_thread(_fetch)
-            if response.status_code == 200:
-                result = response.json()
-                supported_params = result.get("data", {}).get(
-                    "supported_parameters", []
-                )
-                return "tools" in supported_params
-        except Exception:
-            pass
-        return False
+            response.raise_for_status()
+            endpoints = response.json().get("data", {}).get("endpoints", [])
+        except Exception as e:
+            printr.print(
+                f"Could not check tool support of OpenRouter model {model}, sending tools anyway: {e}",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+            return True, None
+
+        supports_tools = any(
+            "tools" in (endpoint.get("supported_parameters") or [])
+            for endpoint in endpoints
+        )
+        if not supports_tools:
+            printr.print(
+                f"OpenRouter model {model} does not support tools, so they are left out of its calls.",
+                color=LogType.WARNING,
+                server_only=True,
+            )
+        usable = [
+            endpoint
+            for endpoint in endpoints
+            if not supports_tools or "tools" in (endpoint.get("supported_parameters") or [])
+        ]
+        windows = [int(e["context_length"]) for e in usable if e.get("context_length")]
+        return supports_tools, (min(windows) if windows else None)

@@ -4,7 +4,7 @@
 
 When work is approved, create a PR in both repos. If you didn't change anything in one repo, just remove that worktree.
 
-- **Core**: Ask if there is a GitHub issue to link the PR to. If not, create one and link it.
+- **Core**: If the work belongs to a GitHub issue, link it (`Closes #123`). A PR without one is fine.
 - **Client**: Closed source, no issue tracking — just create the PR.
 
 ## Logging — Never use bare `print()`
@@ -25,9 +25,13 @@ All output goes through the `Printr` singleton (`services/printr.py`). The two m
 
 If you use `printr.print()` without `server_only=True`, it sends to the client synchronously via `ensure_async()` — prefer the explicit async version when you want client visibility.
 
-### LogType.LOCALMODEL — local support/embedding model messages
+### LogType.LOCALMODEL — support model status messages
 
-Use `LogType.LOCALMODEL` for any message originating from the local support model or embedding model (greetings, condensation status, etc.). The client renders these with a distinct dashed-border style and a label ("Generated locally — not part of the conversation with your AI provider") to distinguish them from conversation messages with the main AI provider.
+Use `LogType.LOCALMODEL` for status messages about support model work (condensation, tool response summaries, etc.), no matter whether the support model runs in the cloud, locally or on a remote server. The client renders these with a distinct style and the label "Support Model - not part of the conversation with your Wingman" to set them apart from the conversation with the main AI provider. The name is historical: the support model used to be local only.
+
+### LogType.FILLER — the line spoken while a slow tool runs
+
+`services/filler_response.py` has the support model write one short line ("Bin dran...") in the user's language while a tool runs, and the Wingman speaks it. It is printed with `LogType.FILLER` so the client can show it as a Wingman message in its own style. It never enters the conversation history. The switch is `settings.filler_responses`.
 
 ### LogType.MEMORY — persistent memory operations
 
@@ -43,7 +47,7 @@ await printr.print_async(
 
 ## Writing Prompts for the Support Model
 
-The local support model is a small 2B-parameter LLM (llama.cpp). It does not follow instructions as reliably as cloud models. When writing or editing prompt templates in `prompts/` or `system_prompt` strings for `local_ai_service.support()`, follow these rules:
+The support model is a small, cheap model. By default it runs in our cloud (`llama_cpp.mode: cloud`); users can also run Qwen3.5-4B locally or point Wingman at their own llama.cpp server. The same prompt has to work on all of them, so write for the weakest one: it follows instructions less reliably than the main conversation model. When writing or editing prompt templates in `prompts/` or `system_prompt` strings for `local_ai_service.support()`, follow these rules:
 
 **Use prompt templates with `{variables}`, not hard-coded strings.** Prompt files live in `prompts/*.md` and use Python `str.format()` placeholders (e.g., `{name}`, `{backstory}`, `{comm_context}`). The calling code fills them in via `.format(name=..., backstory=...)`. Never hard-code values that should come from config or runtime — always use a `{variable}` and pass it in from the caller.
 
@@ -59,9 +63,9 @@ See also: [skills/README.md — Prompt Writing Guidelines](skills/README.md#prom
 
 ## Sampling Parameters — Temperature and Top P
 
-The support model is a small 2B model — sampling parameters matter more than on large models. Global defaults are tuned for summarization (0.3 / 1.0). **Override for creative tasks or output will be flat.**
+Sampling parameters matter more on small models than on large ones. The global defaults are 1.0 / 1.0 (`DEFAULT_TEMPERATURE` / `DEFAULT_TOP_P` in `services/local_ai_service.py`). **Pick a preset per task** — extraction needs `PRECISE`, or it drops and duplicates facts.
 
-All `support()` calls accept optional `temperature` and `top_p` overrides. In skills, use `SamplingPreset` from `services/skill_local_ai.py` (`PRECISE`, `BALANCED`, `CREATIVE`, `ADVENTUROUS`) or pass raw values. Manual values override presets. See `SamplingPreset` docstring for values.
+All `support()` calls accept optional `temperature` and `top_p` overrides. In skills, use `SamplingPreset` from `services/skill_local_ai.py` (`PRECISE`, `BALANCED`, `CREATIVE`) or pass raw values. Manual values override presets. See `SamplingPreset` docstring for values.
 
 ## Config Properties — interface.py
 
@@ -87,18 +91,21 @@ Skills declare OS support via `platforms` in `default_config.yaml` (`windows`, `
 
 ## Version Bumps and Migrations
 
-Version lives in `services/system_manager.py` as `LOCAL_VERSION`. Migration templates in `templates/migration/{version}/configs/` are frozen snapshots of default configs for each version.
+The version is written in seven places across Core and the Client. Do not edit them by hand:
 
-**When bumping a version** (e.g., 2.1.1 → 2.2.0):
+```
+python scripts/bump_version.py 3.2.4
+```
 
-1. Create skeleton migration `services/migrations/migration_211_to_220.py` with no-op `migrate_defaults` and `migrate_wingman` methods
-2. Update `LOCAL_VERSION`
+That sets `LOCAL_VERSION` in `services/system_manager.py`, the six client spots (`package.json`, both places in `package-lock.json`, `tauri.conf.json`, `Cargo.toml`, `Cargo.lock`), and writes the skeleton migration `services/migrations/migration_<old>_to_<new>.py`. The chain loader scans that directory, so there is nothing to register. `python scripts/bump_version.py --check` reports disagreement and is what `tests/test_version_consistency.py` runs.
+
+There are no frozen per-version config snapshots. A migration reads the user's own file and the *current* `templates/configs/`; fields no step adds are backfilled from the template at the end of the chain.
 
 **When adding a feature that changes config:**
 
 1. Update the Pydantic model in `api/interface.py`
 2. Update `templates/configs/` with new defaults
-3. Add migration step(s) to the current migration file
+3. Add a migration step to the migration **into the release you are building** — never to one that already shipped. If the current `LOCAL_VERSION` is already out with testers, bump first and put the step in the new file.
 
 ## Client API Regeneration
 
