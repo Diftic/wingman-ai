@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Literal
 
 from api.interface import SettingsConfig, SkillConfig
 from services.skill_local_ai import SamplingPreset
+from skills.sc_game_events import item_names
 from skills.sc_game_events.notifications import (
     _CATEGORIES,
     _DETAIL_FIELDS,
@@ -88,6 +89,7 @@ class ScGameEvents(Skill):
 
     async def prepare(self) -> None:
         await super().prepare()
+        await asyncio.to_thread(item_names.lookup, None, None)  # Load the table off the loop.
         self._subscription = self.wingman.sc_gamelog.on("*", self._on_event)
 
     async def unload(self) -> None:
@@ -103,6 +105,16 @@ class ScGameEvents(Skill):
 
     # --- reacting ---------------------------------------------------------------
 
+    @staticmethod
+    def _data(event) -> dict:
+        """The event's fields, with the in-game item name when Core has none."""
+        data = dict(event.data)
+        if event.type in ("shop_buy", "shop_sell") and not data.get("item_display_name"):
+            data["item_display_name"] = item_names.display_name(
+                data.get("item_guid"), data.get("item_name")
+            )
+        return data
+
     def _on_event(self, event) -> None:
         events = self._enabled_events()
         if not events:
@@ -116,7 +128,7 @@ class ScGameEvents(Skill):
             {
                 "event_type": event.type,
                 "status": event.status,
-                "data": dict(event.data),
+                "data": self._data(event),
                 "amount_auec": event.data.get("amount_auec"),
                 "environment": event.environment,
                 "generation": event.environment,
@@ -272,7 +284,7 @@ class ScGameEvents(Skill):
         for event in events:
             wording = _TEMPLATES[event.type][1]
             detail = next(
-                (value for field in _DETAIL_FIELDS[event.type] if (value := _literal(event.data.get(field)))),
+                (value for field in _DETAIL_FIELDS[event.type] if (value := _literal(self._data(event).get(field)))),
                 "",
             )
             when = event.time.strftime("%H:%M") if event.time else "?"
