@@ -15,6 +15,8 @@ from typing import Optional
 TABLE = Path(__file__).resolve().parent / "item_names.json"
 _VARIANT = re.compile(r"^(.+?)(?:_\d\d){1,2}$")
 _MAX_NAME = 128
+# Ship components are sold as <class>_SCItem; the table can list more endings.
+_SUFFIXES = ["_scitem"]
 
 
 @lru_cache(maxsize=1)
@@ -25,6 +27,7 @@ def _table() -> tuple[dict, dict, dict]:
         by_class = {str(k).lower(): str(v) for k, v in data.get("by_class", {}).items()}
     except (OSError, ValueError, AttributeError):
         return {}, {}, {}  # No table: tidied class names only.
+    _SUFFIXES[:] = list(dict.fromkeys(["_scitem"] + [str(x).lower() for x in data.get("strip_suffixes", [])]))
     # Some keys carry a manufacturer prefix: SASU_<class>. Used only when one does.
     prefixed: dict[str, list[str]] = {}
     for key, name in by_class.items():
@@ -34,6 +37,13 @@ def _table() -> tuple[dict, dict, dict]:
     return by_guid, by_class, prefixed
 
 
+def _strip(cls: str) -> str:
+    for suffix in _SUFFIXES:
+        if cls.endswith(suffix) and len(cls) > len(suffix):
+            return cls[: -len(suffix)]
+    return cls
+
+
 def lookup(guid: Optional[str], class_name: Optional[str]) -> Optional[str]:
     """The in-game name, or None when the table does not know the item."""
     by_guid, by_class, prefixed = _table()
@@ -41,7 +51,7 @@ def lookup(guid: Optional[str], class_name: Optional[str]) -> Optional[str]:
         return by_guid[guid.lower()][:_MAX_NAME]
     if not isinstance(class_name, str) or not class_name:
         return None
-    cls = class_name.lower()
+    cls = _strip(class_name.lower())
     if cls in by_class:
         return by_class[cls][:_MAX_NAME]
     if len(prefixed.get(cls, ())) == 1:
@@ -56,6 +66,7 @@ def lookup(guid: Optional[str], class_name: Optional[str]) -> Optional[str]:
 
 def tidy(class_name: str) -> str:
     """ESPR_BallisticCannon_Barrel_S3 -> ESPR Ballistic Cannon Barrel S3."""
+    class_name = class_name[: len(_strip(class_name.lower()))]
     words = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", class_name.replace("_", " ")).split()
     return " ".join(w if w.isupper() or not w.isalpha() else w.capitalize() for w in words)[:_MAX_NAME]
 
