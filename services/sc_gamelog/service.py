@@ -32,6 +32,7 @@ from api.interface import ScGameLogMaintainer, ScGameLogStatus
 from services.file import get_generated_files_dir
 from services.printr import Printr
 from services.sc_gamelog.history import EventHistory
+from services.sc_gamelog.item_names import ItemNamesSource
 from services.sc_gamelog.reader import Instructions, Reader
 from services.sc_gamelog.rules import (
     CHECK_INTERVAL_SECONDS,
@@ -40,8 +41,8 @@ from services.sc_gamelog.rules import (
 )
 from services.sc_gamelog.state import State
 from services.sc_gamelog.tailer import LogTail
+from services.star_citizen.game_folder import ENVIRONMENTS, looks_like_game_folder
 
-ENVIRONMENTS = ("LIVE", "PTU", "EPTU", "HOTFIX", "TECH-PREVIEW")
 POLL_SECONDS = 0.25
 IDLE_SECONDS = 2.0
 """Between looks while no environment has a Game.log."""
@@ -138,6 +139,7 @@ class ScGameLogService:
         the first is still stopping."""
         self._rules_task: Optional[asyncio.Task] = None
         self._rules: Optional[RulesSource] = None
+        self._names: Optional[ItemNamesSource] = None
         self._pending_rules: Optional[Instructions] = None
         self._reader: Optional[Reader] = None
         self._history: Optional[EventHistory] = None
@@ -180,6 +182,7 @@ class ScGameLogService:
         data_dir = Path(get_generated_files_dir(DATA_DIR_NAME))
         try:
             self._rules = RulesSource(str(data_dir))
+            self._names = ItemNamesSource(str(data_dir))
             self._history = EventHistory(data_dir / "events.sqlite3")
         except (OSError, sqlite3.Error, ValueError) as error:
             self._error = f"{type(error).__name__}: {error}"
@@ -276,7 +279,7 @@ class ScGameLogService:
         return ScGameLogStatus(
             running=self.running,
             game_path=self._game_path,
-            game_path_found=bool(self._game_path) and Path(self._game_path).is_dir(),
+            game_path_found=looks_like_game_folder(self._game_path),
             environments=list(self._found),
             active_environment=self.active_environment,
             rules_version=rules.version if rules else "",
@@ -308,6 +311,9 @@ class ScGameLogService:
                 _log(f"new rules {newer.version} (revision {newer.revision})", LogType.INFO)
             if newer is not None or self._rules.status.problem != problem_before:
                 await self._publish_status()
+            # Item names change with every patch; they come from the same place.
+            if self._names and await self._names.check():
+                _log(f"new item names (revision {self._names.revision})", LogType.INFO)
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)
 
     def _swap_rules(self, instructions: Instructions) -> None:

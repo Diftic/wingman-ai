@@ -288,8 +288,12 @@ class SettingsService:
                     f"these Wingmen now speak with Azure voices: {', '.join(wingmen)}.",
                     color=LogType.INFO,
                 )
-            if (changed or restored or moved) and self.config_service.tower:
-                await self.config_service.load_config()
+            # Also without a Tower: before sign-in the config is already parsed,
+            # and the Tower starts from that copy, not from the rewritten files.
+            if changed or restored or moved:
+                await self.config_service.load_config(
+                    self.config_service.current_config_dir
+                )
 
         # Local AI (llama.cpp)
         if self.local_ai_service:
@@ -352,11 +356,16 @@ class SettingsService:
                 "hud_server_settings_changed", settings.hud_server
             )
 
-        # Star Citizen log reader
+        # Star Citizen: the game folder, and the log reader that reads it
+        self.config_manager.settings_config.star_citizen = settings.star_citizen
         self.config_manager.settings_config.sc_gamelog = settings.sc_gamelog
-        if settings.sc_gamelog != old.sc_gamelog:
+        # star_citizen as a whole: the answer "I play" starts or stops it too.
+        if (
+            settings.sc_gamelog != old.sc_gamelog
+            or settings.star_citizen != old.star_citizen
+        ):
             await self.settings_events.publish(
-                "sc_gamelog_settings_changed", settings.sc_gamelog
+                "sc_gamelog_settings_changed", settings
             )
 
         # save the config file

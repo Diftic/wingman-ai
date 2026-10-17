@@ -2,8 +2,22 @@ import re
 from io import StringIO
 from markdown import Markdown
 
+from api.enums import SpokenLanguage
+
 # Maximum number of list items per list block before stripping that list for TTS
 MAX_LIST_ITEMS_FOR_TTS = 15
+
+# The word in front of the last item of a spoken list. A language without
+# one here gets a comma: an English "and" in a German answer is read out.
+_LIST_AND = {
+    SpokenLanguage.EN: "and",
+    SpokenLanguage.DE: "und",
+    SpokenLanguage.FR: "et",
+    SpokenLanguage.ES: "y",
+    SpokenLanguage.IT: "e",
+    SpokenLanguage.PT: "e",
+    SpokenLanguage.NL: "en",
+}
 
 
 def remove_emote_text(text: str):
@@ -202,7 +216,17 @@ def _count_list_items(items: list[dict]) -> int:
     return sum(1 + len(item["children"]) for item in items)
 
 
-def _format_list_for_tts(items: list[dict]) -> str:
+LIST_ITEM_SENTENCE_WORDS = 4
+"""A list with an item longer than this is spoken item by item as sentences;
+a shorter one as an enumeration ("Gear down and Lights on.")."""
+
+
+def _as_sentence(text: str) -> str:
+    text = text.strip().rstrip(",;:")
+    return text if text.endswith((".", "!", "?", "\u2026")) else text + "."
+
+
+def _format_list_for_tts(items: list[dict], and_word: str | None = "and") -> str:
     """Formats parsed list items into natural speech.
 
     Examples:
@@ -218,20 +242,32 @@ def _format_list_for_tts(items: list[dict]) -> str:
         else:
             parts.append(item["text"])
 
+    # Items that are sentences of their own ("Buy 288 SCU of Silicon at the
+    # Admin Office, Baijini Point, 565,632 aUEC") are said as sentences: joined
+    # with commas and an "and" they ran into one long sentence, and no voice
+    # could be heard to start a new item.
+    if all(not item["children"] for item in items) and any(
+        len(part.split()) > LIST_ITEM_SENTENCE_WORDS for part in parts
+    ):
+        return " ".join(_as_sentence(part) for part in parts)
+
     # If all items are simple (no children), join with commas
     if all(not item["children"] for item in items):
+        last = f"{and_word} {parts[-1]}" if and_word else parts[-1]
         if len(parts) == 1:
             return parts[0] + "."
         elif len(parts) == 2:
-            return f"{parts[0]} and {parts[1]}."
+            return f"{parts[0]}{' ' if and_word else ', '}{last}."
         else:
-            return ", ".join(parts[:-1]) + f", and {parts[-1]}."
+            # The comma in front of "and" is English only.
+            joint = ", " if and_word in (None, "and") else " "
+            return ", ".join(parts[:-1]) + f"{joint}{last}."
 
     # Items with sub-items get joined with periods
     return ". ".join(parts) + "."
 
 
-def convert_lists_for_tts(text: str) -> str:
+def convert_lists_for_tts(text: str, and_word: str | None = "and") -> str:
     """Converts markdown lists to TTS-friendly natural language.
 
     Short lists are converted to spoken enumerations.
@@ -264,7 +300,7 @@ def convert_lists_for_tts(text: str) -> str:
             return
         total = _count_list_items(items)
         if total <= MAX_LIST_ITEMS_FOR_TTS:
-            result_lines.append(_format_list_for_tts(items))
+            result_lines.append(_format_list_for_tts(items, and_word))
         # else: too long, strip entirely
         list_block.clear()
 
@@ -372,7 +408,7 @@ def remove_markdown(text: str):
     return __md.convert(text)
 
 
-def cleanup_text(text: str):
+def cleanup_text(text: str, language: SpokenLanguage = SpokenLanguage.EN):
     """Cleans up text for TTS playback.
 
     Removes/transforms elements that don't work well with text-to-speech:
@@ -388,6 +424,7 @@ def cleanup_text(text: str):
 
     Args:
         text (str): The raw text from LLM response.
+        language: The language it is spoken in, for the "and" of a list.
 
     Returns:
         tuple: (cleaned_text, contains_links, contains_code_blocks)
@@ -397,7 +434,7 @@ def cleanup_text(text: str):
     # Remove tables entirely — they never sound good in TTS
     text = remove_tables(text)
     # Convert lists to natural speech (or strip if too long)
-    text = convert_lists_for_tts(text)
+    text = convert_lists_for_tts(text, _LIST_AND.get(language))
     # Extract link text from Markdown links before removing markdown
     text = extract_markdown_link_text(text)
     # Actions between asterisks, before Markdown turns them into italics
@@ -434,3 +471,34 @@ def strip_edge_breaks(text: str) -> str:
     engine.
     """
     return _EDGE_BREAK_RE.sub("", text)
+
+
+# <break time="400ms" />, <verbatim>, </verbatim>, and <sigh> written wrongly.
+_SPEECH_TAG = r"<(?:break\b[^<>]*|/?[a-z]+)\s*/?>"
+# Wraps a word that stays: only the tag goes, the spaces around it stay.
+_VERBATIM_RE = re.compile(r"</?verbatim\s*>", re.IGNORECASE)
+# [sigh], [laughs softly]: lowercase words in brackets. Not a Markdown link
+# "[text](url)" or "[text][ref]", not "[x]" of a task list, not "[1]" or "[SCU]".
+_STAGE_DIRECTION = r"(?<!\])\[[a-z][a-z ]{2,28}\](?![(\[])"
+_SPEECH_MARKUP = f"(?:{_SPEECH_TAG}|{_STAGE_DIRECTION})"
+_MARKUP_AT_LINE_START_RE = re.compile(rf"(?m)^([ \t]*){_SPEECH_MARKUP}[ \t]*")
+_MARKUP_RE = re.compile(rf"[ \t]*{_SPEECH_MARKUP}")
+
+
+def display_text(text: str) -> str:
+    """The reply as it is read, without what only the voice needs.
+
+    Models write speech markup into replies for the TTS provider: pauses
+    (<break time="400ms" />), spelled-out names (<verbatim>L3</verbatim>) and
+    stage directions ([sigh], or <sigh> when they get it wrong). The client
+    renders those; the HUD showed them as typed. Everything else stays as
+    written, indentation and Markdown included.
+    """
+    if not text:
+        return text
+    # At the start of a line the space after the markup goes with it, the
+    # indentation before it stays; inside a line the space before it goes.
+    text = _VERBATIM_RE.sub("", text)
+    text = _MARKUP_AT_LINE_START_RE.sub(r"\1", text)
+    text = _MARKUP_RE.sub("", text)
+    return text.strip()

@@ -9,6 +9,7 @@ Skills that legitimately need to change something use a sanctioned capability
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
@@ -315,7 +316,23 @@ class SkillAi:
         return self._wingman.context_budget.tool_cap
 
     async def _call(self, messages: list):
-        from services.context_budget import ContextOverflowError
+        from api.enums import ConversationProvider
+        from services.context_budget import ContextOverflowError, SUBSCRIPTION_MAX_REQUEST_CHARS
+        from services.conversation_manager import ConversationManager
+
+        # Wingman Pro refuses a request over its size limit (images count with
+        # their full base64): no need to send it to hear that.
+        if (
+            self._wingman.config.features.conversation_provider
+            == ConversationProvider.WINGMAN_PRO
+        ):
+            size = sum(ConversationManager.message_chars(m) for m in messages)
+            if size > SUBSCRIPTION_MAX_REQUEST_CHARS:
+                raise FacadeError(
+                    f"Skill tried to send {size:,} characters to Wingman Pro, but the "
+                    f"limit is {SUBSCRIPTION_MAX_REQUEST_CHARS:,} per request. Send less "
+                    f"(a smaller image, or less data)."
+                )
 
         try:
             return await self._wingman.actual_llm_call(messages)
@@ -1110,6 +1127,30 @@ class SkillConversation:
     async def add_assistant(self, content: str) -> None:
         await self._wingman.conversation.add_assistant_message(content)
 
+    async def add_note(self, content: str) -> None:
+        """Put context into the history that is neither the user nor this
+        Wingman talking: what happened in the game meanwhile, what was said
+        on the Wingman's own initiative. It goes in as a bracketed note in a
+        user message, so the model reads it but has no line of its own to
+        copy — lines added with add_assistant came back appended to its next
+        answers. Add it right before the user's next message (the
+        on_add_user_message hook), not while a turn is running."""
+        from services.conversation_manager import NOTE_PREFIX
+
+        self._wingman.conversation.messages.append(
+            {"role": "user", "content": f"{NOTE_PREFIX}{content}]"}
+        )
+
+    @property
+    def user_busy(self) -> bool:
+        """True while the user holds a push-to-talk key, was heard a moment
+        ago, or any wingman is still answering. Something said on the
+        Wingman's own initiative must wait: over a held key it ends up in the
+        user's transcript, in a turn it lands between question and answer."""
+        from services.user_activity import user_activity
+
+        return user_activity.busy
+
     async def show(self, text: str, *, skill_name: str = "") -> None:
         """Show a line in the chat as said by this Wingman, like one of its
         answers. Only the display: pair it with tts.speak to say it and with
@@ -1333,6 +1374,65 @@ class SkillHud:
             WindowType.PERSISTENT,
             lambda client: client.remove_item(self._group, WindowType.PERSISTENT, title),
         )
+
+
+class SkillStarCitizen:
+    """Where Star Citizen is installed (`self.wingman.star_citizen`).
+
+    One folder for every skill that reads the game's files. The user sets it
+    once, in the setup after the first start or in Settings. Read-only.
+
+        live = self.wingman.star_citizen.environment_path("LIVE")
+        if live:
+            profiles = live / "user" / "client" / "0" / "Profiles"
+    """
+
+    __slots__ = ("_wingman",)
+
+    def __init__(self, wingman: "Wingman") -> None:
+        object.__setattr__(self, "_wingman", wingman)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise FacadeError("star_citizen is read-only for skills.")
+
+    def _settings(self):
+        return object.__getattribute__(self, "_wingman").settings.star_citizen
+
+    @property
+    def plays(self) -> Optional[bool]:
+        """What the user answered to "Do you play Star Citizen?", None
+        before they answered."""
+        return self._settings().plays
+
+    @property
+    def game_path(self) -> Optional[Path]:
+        """The StarCitizen folder that holds LIVE, PTU and the other
+        environments, as the user set it. It may not exist; see `found`."""
+        game_path = self._settings().game_path
+        return Path(game_path) if game_path else None
+
+    @property
+    def environments(self) -> tuple[str, ...]:
+        """Environment folders in it right now, e.g. ("LIVE", "PTU")."""
+        from services.star_citizen.game_folder import inspect_game_folder
+
+        return tuple(inspect_game_folder(self._settings().game_path).environments)
+
+    @property
+    def found(self) -> bool:
+        """The folder holds at least one environment."""
+        return bool(self.environments)
+
+    def environment_path(self, environment: str = "LIVE") -> Optional[Path]:
+        """`<game_path>/<environment>` if that folder exists, else None."""
+        game_path = self.game_path
+        if not game_path:
+            return None
+        folder = game_path / environment.upper()
+        try:
+            return folder if folder.is_dir() else None
+        except OSError:
+            return None
 
 
 class SkillScGameLog:

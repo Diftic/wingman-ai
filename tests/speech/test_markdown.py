@@ -77,6 +77,14 @@ def test_a_short_list_becomes_an_enumeration():
     assert spoken("Do this:\n\n1. Gear down\n2. Lights on\n\nDone.") == "Do this:\nGear down and Lights on.\nDone."
 
 
+def test_a_list_is_joined_in_the_spoken_language():
+    from api.enums import SpokenLanguage
+
+    text = "- Kaufen\n- Verkaufen\n- Gewinn"
+    assert cleanup_text(text, SpokenLanguage.DE)[0] == "Kaufen, Verkaufen und Gewinn."
+    assert cleanup_text(text, SpokenLanguage.OTHER)[0] == "Kaufen, Verkaufen, Gewinn."
+
+
 def test_a_long_list_is_left_out():
     items = "\n".join(f"- Item {i}" for i in range(MAX_LIST_ITEMS_FOR_TTS + 1))
     assert spoken(f"Here:\n{items}\nThat was it.") == "Here:\nThat was it."
@@ -98,3 +106,39 @@ def test_a_break_between_sentences_stays():
 
 def test_several_edge_breaks_in_any_case():
     assert strip_edge_breaks('<BREAK time="1s" /> <break time="2s"/> Hello. <break time="300ms" />') == "Hello."
+
+
+def test_list_items_that_are_sentences_are_said_as_sentences():
+    text = (
+        "Best run:\n\n"
+        "- Buy 288 SCU of Silicon at Baijini Point for 565,632 aUEC\n"
+        "- Sell at Patch City for 835,200 aUEC\n"
+        "- Profit: about 270,000 aUEC, roughly twenty-five minutes\n"
+    )
+    assert spoken(text) == (
+        "Best run:\n"
+        "Buy 288 SCU of Silicon at Baijini Point for 565,632 aUEC. "
+        "Sell at Patch City for 835,200 aUEC. "
+        "Profit: about 270,000 aUEC, roughly twenty-five minutes."
+    )
+
+
+def test_display_text_drops_what_only_the_voice_needs():
+    from services.markdown import display_text
+
+    text = (
+        'Hurston <verbatim>L3</verbatim>, noted. <break time="400ms" /> '
+        "[sigh] Fine. <sigh> See the [Cutlass page](https://example.org)."
+    )
+    assert display_text(text) == (
+        "Hurston L3, noted. Fine. See the [Cutlass page](https://example.org)."
+    )
+
+
+
+def test_display_text_keeps_markdown_and_data():
+    from services.markdown import display_text
+
+    text = "- [x] Shields\n  - [ ] Coolers [1]\n    code line\nCargo [SCU]: 4, see [docs][ref]"
+    assert display_text(text) == text
+    assert display_text("[sigh] Fine.\n  <break time=\"1s\"/> Indented.") == "Fine.\n  Indented."

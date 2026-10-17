@@ -17,6 +17,7 @@ it stops delivering while it claims to be open.
 
 import queue
 import threading
+import time
 from typing import Callable, Optional
 
 import numpy as np
@@ -40,6 +41,10 @@ def device_blocksize(rate: int) -> int:
 # No block for this long while the stream is open means the stream is dead.
 STALL_SECONDS = 3.0
 
+REOPEN_AFTER_PLAYBACK_SECONDS = 0.5
+"""No block for this long when a playback ends: the microphone stopped while
+the speakers played and is opened again right away."""
+
 
 class AudioInput:
     def __init__(self, on_frame: Callable[[np.ndarray], None]):
@@ -57,6 +62,14 @@ class AudioInput:
         self.device_rate = SAMPLE_RATE
         # Set by stop(): the watchdog then stops retrying.
         self._stopped = False
+        # While a wingman speaks the watchdog leaves a silent microphone alone.
+        # On a device that is microphone and speakers in one (an EVO4, a
+        # headset), opening the speakers stops the microphone on macOS, and
+        # reopening it then reconfigures the device under the playing
+        # speakers: heard as a crack about 3 s into every answer (2026-10-10).
+        # It is reopened when the playback ends instead.
+        self._output_busy = False
+        self._last_block = time.monotonic()
 
     # --- lifecycle ---
 
@@ -68,6 +81,7 @@ class AudioInput:
             # watchdog running, otherwise one bad start (device busy at boot)
             # kills the microphone for the rest of the session.
             self._ensure_consumer()
+            error = None
             try:
                 device = sounddevice.default.device[0]
                 info = sounddevice.query_devices(device, kind="input")
@@ -83,6 +97,10 @@ class AudioInput:
                 )
                 self._stream.start()
             except Exception as e:
+                error = e
+            if error:
+                # No device, or the system refused it: a setup problem. Told
+                # outside the except, so it is not reported as a bug.
                 self._stream = None
                 if not self._reported:
                     self._reported = True
@@ -90,7 +108,7 @@ class AudioInput:
                         "Unable to open the microphone. Please check your microphone, "
                         "anti-virus and privacy settings. Audio input will be disabled."
                     )
-                    self.printr.print(f"Microphone: {e}", color=LogType.ERROR, server_only=True)
+                    self.printr.print(f"Microphone: {error}", color=LogType.WARNING, server_only=True)
                 self.available = False
                 return False
             self.available = True
@@ -105,6 +123,20 @@ class AudioInput:
     def restart(self) -> bool:
         """After a device change: the stream is bound to the device it was opened on."""
         return self.start()
+
+    def set_output_busy(self, busy: bool) -> None:
+        """A playback started or ended (see _output_busy)."""
+        self._output_busy = busy
+        if not busy and not self._stopped and self._stalled(REOPEN_AFTER_PLAYBACK_SECONDS):
+            self.printr.print(
+                "Microphone was silent while the speakers played; reopening the stream.",
+                color=LogType.INFO,
+                server_only=True,
+            )
+            threading.Thread(target=self.restart, name="audio-input-reopen", daemon=True).start()
+
+    def _stalled(self, seconds: float) -> bool:
+        return time.monotonic() - self._last_block > seconds
 
     def _ensure_consumer(self) -> None:
         """Called under the lock. The thread runs for the whole session."""
@@ -147,7 +179,7 @@ class AudioInput:
             try:
                 block = self._queue.get(timeout=STALL_SECONDS)
             except queue.Empty:
-                if self._stopped:
+                if self._stopped or self._output_busy:
                     continue
                 if self.available:
                     self.printr.print(
@@ -163,6 +195,7 @@ class AudioInput:
                 continue
             if block is None:
                 return
+            self._last_block = time.monotonic()
             resampler = self._resampler
             if resampler is None:
                 continue
